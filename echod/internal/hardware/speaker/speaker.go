@@ -38,6 +38,19 @@ const (
 	// codecSettle is how long the codec sits powered and idle before the amplifier is enabled,
 	// measured from the vendor HAL doing the same thing on a route change.
 	codecSettle = 1100 * time.Millisecond
+
+	// standbyAfter is how long the amplifier stays enabled after the last sound before it rests,
+	// which is the figure Android's audio HAL uses. ampWarm is how long it is given to come up before
+	// audio is fed to it again; the codec is never re-routed for this, so it is the amplifier's own
+	// ramp and not codecSettle.
+	standbyAfter = 3 * time.Second
+	ampWarm      = 40 * time.Millisecond
+)
+
+// The same, in periods of the write loop.
+var (
+	standbyPeriods = int(standbyAfter.Seconds() * Rate / period)
+	warmPeriods    = max(1, int(ampWarm.Seconds()*Rate/period))
 )
 
 // VoiceRate is the rate Home Assistant's pipeline works at, and VoiceUpsample how many playback
@@ -90,6 +103,10 @@ type Player struct {
 	stale  atomic.Bool
 	mono   []float32
 
+	// standby is whether the amplifier rests between sounds. Read by the write loop every period,
+	// so a change from Home Assistant takes effect at once.
+	standby atomic.Bool
+
 	// fed is whether the last block had anything in it, and belongs to the write loop alone.
 	fed bool
 
@@ -137,6 +154,7 @@ func New() *Player {
 	p.voice, p.resampling = NewResampler(config.ResampleSinc)
 	p.SetVolume(VolumeSteps)
 	p.on.Store(config.DefaultASP)
+	p.standby.Store(false)
 
 	if !DriverTuning {
 		return p
@@ -348,18 +366,43 @@ func (p *Player) Run(ctx context.Context) error {
 	p.OnOutput.Emit(out)
 	safe.Go("jack watcher", func() { p.watchJack(ctx) })
 
+	// Standby, as Android's audio HAL does it: the amplifier is switched off a few seconds after the
+	// last sound and back on just before the next. The daemon began by leaving it enabled for the life
+	// of the stream and feeding it silence, because an undriven amplifier hisses and toggling it pops.
+	// But a live amplifier also reproduces whatever its rails carry, and on the Dot that is the LED
+	// ring: every reply came with the ring's pulse as a faint beep behind the voice. Off has no hiss,
+	// and the chime that opens every turn covers the pop.
+	ampOn := true
+	idle, warm := 0, 0
 	silence := make([]byte, len(buf))
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil
 		}
 
-		p.fill(buf)
+		standby := p.standby.Load() && p.Output() == OutputSpeaker
+		if !ampOn && (!standby || p.wants()) {
+			p.amp(true)
+			ampOn, warm = true, warmPeriods
+			slog.Debug("amplifier on")
+		}
+
 		to := buf
-		if s := p.sink.Load(); s != nil {
-			// The sink gets the audio; the codec keeps its pace on silence.
-			s.push(buf)
+		active := false
+		if warm > 0 {
+			// The amplifier is coming up; what is queued waits for it rather than losing its first
+			// few milliseconds to the ramp.
+			warm--
 			to = silence
+			active = true
+		} else {
+			active = p.fill(buf)
+			if s := p.sink.Load(); s != nil {
+				// The sink gets the audio; the codec keeps its pace on silence.
+				s.push(buf)
+				to = silence
+				active = false
+			}
 		}
 		if err := p.send(ctx, pb, to); err != nil {
 			if ctx.Err() != nil {
@@ -368,7 +411,37 @@ func (p *Player) Run(ctx context.Context) error {
 			return err
 		}
 		p.written.Add(period)
+
+		if !standby || !ampOn {
+			continue
+		}
+		if active {
+			idle = 0
+			continue
+		}
+		if idle++; idle >= standbyPeriods {
+			p.amp(false)
+			ampOn, idle = false, 0
+			slog.Debug("amplifier in standby")
+		}
 	}
+}
+
+// wants reports whether there is anything for the amplifier to play: audio queued, or a Source
+// attached, and no sink taking it elsewhere.
+func (p *Player) wants() bool {
+	if p.sink.Load() != nil {
+		return false
+	}
+	p.mu.Lock()
+	queued := len(p.pending) > 0
+	p.mu.Unlock()
+	if queued {
+		return true
+	}
+	p.srcMu.Lock()
+	defer p.srcMu.Unlock()
+	return p.src != nil
 }
 
 // send writes one period, putting the same buffer back after an underrun rather than refilling. fill
@@ -392,8 +465,9 @@ func (p *Player) send(ctx context.Context, to io.Writer, buf []byte) error {
 	}
 }
 
-// fill takes what is queued and pads the rest with silence.
-func (p *Player) fill(buf []byte) {
+// fill takes what is queued and pads the rest with silence. It reports whether the period carried
+// anything, counting the one after the audio stops, which the tuning's filter still holds.
+func (p *Player) fill(buf []byte) bool {
 	p.mu.Lock()
 	take := min(len(p.pending), period*Channels)
 	chunk := p.pending[:take]
@@ -465,7 +539,7 @@ func (p *Player) fill(buf []byte) {
 		binary.LittleEndian.PutUint16(buf[(i+1)*2:], uint16(limit(float32(r)*OutputBoost*gain)))
 	}
 	if !tuned {
-		return
+		return drain
 	}
 
 	// Resetting belongs to whoever processes, so a toggle only says that the history is no longer
@@ -482,6 +556,7 @@ func (p *Player) fill(buf []byte) {
 		binary.LittleEndian.PutUint16(buf[i*2:], uint16(s))
 		binary.LittleEndian.PutUint16(buf[(i+1)*2:], uint16(s))
 	}
+	return drain
 }
 
 // render asks the Source for this period. Called only from the write loop, so the buffer is reused.
@@ -586,6 +661,17 @@ func (p *Player) SetASP(on bool) bool {
 
 // ASP reports whether the driver tuning is being applied.
 func (p *Player) ASP() bool { return p.on.Load() }
+
+// SetStandby turns amplifier standby on or off and reports what it settled on, which is off on a
+// device with no amplifier switch that is safe to touch. The write loop acts on it within a period.
+func (p *Player) SetStandby(on bool) bool {
+	on = on && AmpSwitch != ""
+	p.standby.Store(on)
+	return on
+}
+
+// Standby reports whether the amplifier rests between sounds.
+func (p *Player) Standby() bool { return p.standby.Load() }
 
 // Resampling is the one in use.
 func (p *Player) Resampling() config.Resampling {

@@ -53,12 +53,12 @@ func TestSurveyModels(t *testing.T) {
 		shapes[fmt.Sprint(g.Tensors[g.Inputs[0]].Shape)]++
 
 		var names []string
-		ok := len(m.Subgraphs) == 1
+		ok := true
 		for _, sub := range m.Subgraphs {
 			for _, o := range sub.Ops {
 				name := o.Op.String()
 				names = append(names, name)
-				if _, have := kernels[o.Op]; !have {
+				if !implemented(o.Op) {
 					missing[name]++
 					if example[name] == "" {
 						example[name] = e.Name()

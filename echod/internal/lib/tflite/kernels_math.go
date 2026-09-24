@@ -277,11 +277,16 @@ func reshape(o *OpDesc, in, out []*Tensor) error {
 	x, y := in[0], out[0]
 
 	var target []int
-	if len(in) > 1 && in[1] != nil && len(in[1].I32) > 0 {
+	switch {
+	case len(in) > 1 && in[1] != nil && len(in[1].I32) > 0:
 		for _, v := range in[1].I32 {
 			target = append(target, int(v))
 		}
-	} else {
+	case len(in) > 1 && in[1] != nil && len(in[1].Shape) == 1 && in[1].Shape[0] == 0:
+		// An empty shape vector asks for a scalar: rank zero, one element. A two-stage wake word
+		// model squeezes its boolean gate down to one this way before handing it to IF.
+		target = []int{}
+	default:
 		target = append(target, o.dims...)
 	}
 	if target == nil {
@@ -387,6 +392,13 @@ func init() {
 			d := a - b
 			return d * d
 		}),
+
+		OpLess:         compare(func(a, b float64) bool { return a < b }),
+		OpLessEqual:    compare(func(a, b float64) bool { return a <= b }),
+		OpGreater:      compare(func(a, b float64) bool { return a > b }),
+		OpGreaterEqual: compare(func(a, b float64) bool { return a >= b }),
+		OpEqual:        compare(func(a, b float64) bool { return a == b }),
+		OpNotEqual:     compare(func(a, b float64) bool { return a != b }),
 
 		OpLogistic: unary(func(v float32) float32 {
 			return float32(1 / (1 + math.Exp(-float64(v))))

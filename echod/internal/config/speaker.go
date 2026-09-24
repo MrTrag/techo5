@@ -6,6 +6,12 @@ type Speaker struct {
 	Volume     int        `json:"volume"`
 	Resampling Resampling `json:"resampling"`
 	ASP        bool       `json:"asp"`
+
+	// AmpStandby rests the speaker amplifier a few seconds after the last sound, as Android's audio
+	// HAL does, and wakes it just before the next: see hardware/speaker. Off by default: it silences
+	// the LED ring's bleed into the amplifier while the device thinks, but the amplifier coming off
+	// is an audible pop, and Steve chose no ring during a turn over the pop (24 Sep 2026).
+	AmpStandby bool `json:"amp_standby"`
 }
 
 const (
@@ -38,6 +44,11 @@ func (w SpeakerWriter) Resampling(v Resampling) error {
 
 func (w SpeakerWriter) ASP(v bool) error {
 	return w.st.Update(func(c *Config) { c.Speaker.ASP = v })
+}
+
+// Standby records whether the amplifier rests between sounds.
+func (w SpeakerWriter) Standby(v bool) error {
+	return w.st.Update(func(c *Config) { c.Speaker.AmpStandby = v })
 }
 
 // Resampling is how the 16 kHz voice a pipeline sends is stretched to the 48 kHz the codec takes.

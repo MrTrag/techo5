@@ -92,7 +92,13 @@ const (
 	OpExp            Op = 47
 	OpMaximum        Op = 55
 	OpMinimum        Op = 57
+	OpLess           Op = 58
+	OpGreater        Op = 61
+	OpGreaterEqual   Op = 62
+	OpLessEqual      Op = 63
 	OpExpandDims     Op = 70
+	OpEqual          Op = 71
+	OpNotEqual       Op = 72
 	OpLog            Op = 73
 	OpSum            Op = 74
 	OpSqrt           Op = 75
@@ -105,6 +111,7 @@ const (
 	OpFill           Op = 94
 	OpLeakyRelu      Op = 98
 	OpSquaredDiff    Op = 99
+	OpIf             Op = 118
 	OpBatchMatMul    Op = 126
 )
 
@@ -120,6 +127,9 @@ var opNames = map[Op]string{
 	OpReduceMax: "REDUCE_MAX", OpSquare: "SQUARE", OpLeakyRelu: "LEAKY_RELU",
 	OpShape: "SHAPE", OpReduceProd: "REDUCE_PROD", OpPack: "PACK", OpFill: "FILL",
 	OpSquaredDiff: "SQUARED_DIFFERENCE", OpBatchMatMul: "BATCH_MATMUL",
+	OpLess: "LESS", OpLessEqual: "LESS_EQUAL", OpGreater: "GREATER",
+	OpGreaterEqual: "GREATER_EQUAL", OpEqual: "EQUAL", OpNotEqual: "NOT_EQUAL",
+	OpIf: "IF",
 }
 
 func (o Op) String() string {
@@ -194,6 +204,10 @@ type OpDesc struct {
 
 	adjX bool
 	adjY bool
+
+	// The subgraphs an IF chooses between, by index into the model.
+	thenGraph int
+	elseGraph int
 }
 
 var errShort = errors.New("tflite: buffer too short")
@@ -351,6 +365,10 @@ func (o *OpDesc) decodeOptions(t table, present bool) {
 	case OpBatchMatMul:
 		o.adjX = t.boolf(0, false)
 		o.adjY = t.boolf(1, false)
+
+	case OpIf:
+		o.thenGraph = int(t.i32f(0, 0))
+		o.elseGraph = int(t.i32f(1, 0))
 	}
 }
 

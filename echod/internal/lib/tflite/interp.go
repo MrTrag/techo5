@@ -2,6 +2,7 @@ package tflite
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 )
@@ -63,11 +64,36 @@ type Interpreter struct {
 	model   *Model
 	graph   *Subgraph
 	tensors []*Tensor
+
+	// branches are the subgraphs each IF in this graph can run, prepared once so that taking a
+	// branch allocates nothing. A graph with no IF has none.
+	branches map[*OpDesc]*branches
 }
 
-// New prepares the model's first subgraph for execution.
+// branches are one IF's two ways forward.
+type branches struct {
+	then, otherwise *Interpreter
+}
+
+// New prepares the model's first subgraph for execution, and through it every subgraph an IF in it
+// can reach.
 func New(m *Model) (*Interpreter, error) {
-	g := m.Subgraphs[0]
+	return newGraph(m, 0, map[int]bool{})
+}
+
+// newGraph prepares one subgraph. building holds the subgraphs on the way to this one, so a graph
+// that reaches itself through an IF is refused rather than descended into forever.
+func newGraph(m *Model, idx int, building map[int]bool) (*Interpreter, error) {
+	if idx < 0 || idx >= len(m.Subgraphs) {
+		return nil, fmt.Errorf("tflite: no subgraph %d", idx)
+	}
+	if building[idx] {
+		return nil, fmt.Errorf("tflite: subgraph %d reaches itself", idx)
+	}
+	building[idx] = true
+	defer delete(building, idx)
+
+	g := m.Subgraphs[idx]
 	in := &Interpreter{model: m, graph: g, tensors: make([]*Tensor, len(g.Tensors))}
 
 	for i, d := range g.Tensors {
@@ -90,11 +116,36 @@ func New(m *Model) (*Interpreter, error) {
 	}
 
 	for i, o := range g.Ops {
-		if _, ok := kernels[o.Op]; !ok {
+		if !implemented(o.Op) {
 			return nil, fmt.Errorf("tflite: operator %d is %s, which is not implemented", i, o.Op)
 		}
+		if o.Op != OpIf {
+			continue
+		}
+		then, err := newGraph(m, o.thenGraph, building)
+		if err != nil {
+			return nil, fmt.Errorf("tflite: operator %d (IF), then branch: %w", i, err)
+		}
+		otherwise, err := newGraph(m, o.elseGraph, building)
+		if err != nil {
+			return nil, fmt.Errorf("tflite: operator %d (IF), else branch: %w", i, err)
+		}
+		if in.branches == nil {
+			in.branches = map[*OpDesc]*branches{}
+		}
+		in.branches[o] = &branches{then: then, otherwise: otherwise}
 	}
 	return in, nil
+}
+
+// implemented reports whether an operator can run: it has a kernel, or it is the control operator
+// the interpreter handles itself.
+func implemented(op Op) bool {
+	if op == OpIf {
+		return true
+	}
+	_, ok := kernels[op]
+	return ok
 }
 
 func decode(t *Tensor, raw []byte) error {
@@ -159,11 +210,78 @@ func (in *Interpreter) Invoke() error {
 		for j, idx := range o.Outputs {
 			outs[j] = in.tensors[idx]
 		}
-		if err := kernels[o.Op](o, ins, outs); err != nil {
+		var err error
+		if o.Op == OpIf {
+			err = in.runIf(o, ins, outs)
+		} else {
+			err = kernels[o.Op](o, ins, outs)
+		}
+		if err != nil {
 			return fmt.Errorf("tflite: op %d (%s): %w", i, o.Op, err)
 		}
 	}
 	return nil
+}
+
+// runIf takes one of an IF's two branches. The condition is the first input; the rest become the
+// chosen subgraph's inputs, and its outputs come back as the IF's own.
+//
+// The inputs are handed over by reference rather than copied. A subgraph only reads its inputs,
+// and a two-stage wake word model passes its verifier's whole weight set through here on every
+// step, which would be 400 KB of copying for the branch that then does nothing with it.
+func (in *Interpreter) runIf(o *OpDesc, ins, outs []*Tensor) error {
+	br := in.branches[o]
+	if br == nil {
+		return errors.New("no branches were prepared")
+	}
+	cond := ins[0]
+	if cond == nil || len(cond.I32) == 0 {
+		return errors.New("the condition is empty")
+	}
+	branch := br.otherwise
+	if cond.I32[0] != 0 {
+		branch = br.then
+	}
+
+	args := ins[1:]
+	if len(args) != len(branch.graph.Inputs) {
+		return fmt.Errorf("%d inputs handed to a subgraph that takes %d", len(args), len(branch.graph.Inputs))
+	}
+	for i, a := range args {
+		if a == nil {
+			return fmt.Errorf("input %d is missing", i+1)
+		}
+		idx := branch.graph.Inputs[i]
+		if want := branch.graph.Tensors[idx].Type; storage(a.Type) != storage(want) {
+			return fmt.Errorf("input %d is %s, the subgraph wants %s", i+1, a.Type, want)
+		}
+		branch.tensors[idx] = a
+	}
+
+	if err := branch.Invoke(); err != nil {
+		return err
+	}
+
+	if len(outs) != len(branch.graph.Outputs) {
+		return fmt.Errorf("%d outputs expected, the subgraph produces %d", len(outs), len(branch.graph.Outputs))
+	}
+	for i, y := range outs {
+		src := branch.Output(i)
+		if storage(src.Type) != storage(y.Type) {
+			return fmt.Errorf("output %d is %s, the subgraph produced %s", i, y.Type, src.Type)
+		}
+		y.resize(src.Shape)
+		copyData(y, src)
+	}
+	return nil
+}
+
+// storage is which of a tensor's two buffers its type is kept in.
+func storage(t TensorType) TensorType {
+	if t == Float32 {
+		return Float32
+	}
+	return Int32
 }
 
 type kernel func(o *OpDesc, in, out []*Tensor) error
