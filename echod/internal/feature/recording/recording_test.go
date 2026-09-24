@@ -79,7 +79,7 @@ func TestTurnAudioRefusesAnIDThatLeavesTheDirectory(t *testing.T) {
 // points when it closes.
 func TestATurnWithAnUnusableIDIsNotRecorded(t *testing.T) {
 	s := &Store{}
-	s.Opens("../escaped", 0)
+	s.Opens("../escaped", 0, nil)
 	if s.open != "" {
 		t.Errorf("a turn opened as %q", s.open)
 	}

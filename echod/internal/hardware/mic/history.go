@@ -14,8 +14,11 @@ import (
 // matching an intent.
 const History = 250 * time.Millisecond
 
-// The ring holds a second, whatever is being sent of it.
-const historySamples = Rate
+// The ring holds two seconds, whatever is being sent of it. A turn sends a quarter of that; the rest
+// is for the recording a turn keeps, which wants the wake word whole. Detection fires around half a
+// second after the word has ended, and the word itself is half a second or more, so a ring of one
+// second held its tail and lost its start (measured on the lounge Dot, 24 September 2026). 64 KB.
+const historySamples = 2 * Rate
 
 // history is a ring of the most recently captured mono samples.
 type history struct {

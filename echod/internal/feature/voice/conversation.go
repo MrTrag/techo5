@@ -552,6 +552,11 @@ func (c *conversation) start(n nextTurn) {
 	c.slot = slot
 	c.followUp = n.followUp
 
+	// The microphone's last second, taken now, because it holds the wake word: the chime about to
+	// sound and the round trip to Home Assistant take longer than the ring is deep, so by the time
+	// the streamer starts the word has gone. It opens the recording: see recording.Prewake.
+	history := c.source.Recent(recording.Prewake)
+
 	// Before the chime, and before Home Assistant is told anything. Ducking is what the room hears
 	// first, and it has a second of queued music to get through, so every step it waits behind is a
 	// step of full-volume music over somebody who has already started talking.
@@ -568,7 +573,7 @@ func (c *conversation) start(n nextTurn) {
 		c.log.Woke(phrase)
 	}
 	c.turn = c.log.Begin(slot+1, phrase)
-	recording.Get().Opens(c.turn.ID(), slot)
+	recording.Get().Opens(c.turn.ID(), slot, history)
 	c.send("start", func() error { return c.vs.StartTurn(phrase, audioSettings()) })
 
 	c.shown = State{}
@@ -893,19 +898,7 @@ func (c *conversation) stream(ctx context.Context, slot int, followUp bool, id s
 	//
 	// A slot that chimes does not send it: whoever is talking waits for the tone, so the history holds
 	// the wake word rather than the request, and the tone itself is louder at the array than they are.
-	//
-	// The recording gets the whole second before this moment whatever is sent on, because the wake
-	// word is in it: see recording.Prewake. What the pipeline gets is the tail of the same snapshot,
-	// so nothing is doubled and nothing falls between the two.
-	history := c.source.Recent(recording.Prewake)
-	if len(history) > 0 {
-		pcm := make([]byte, 0, 2*len(history))
-		for _, s := range history {
-			pcm = append(pcm, byte(s), byte(s>>8))
-		}
-		recording.Get().Frame(pcm)
-	}
-	pre := history[len(history)-min(len(history), int(mic.History.Seconds()*mic.Rate)):]
+	pre := c.source.Recent(mic.History)
 	if wakeword.Tones(slot, followUp) {
 		pre = nil
 	}
@@ -941,7 +934,7 @@ func (c *conversation) stream(ctx context.Context, slot int, followUp bool, id s
 		for _, s := range pre {
 			buf = append(buf, byte(s), byte(s>>8))
 		}
-		// Already in the recording, as the tail of the pre-wake second above.
+		recording.Get().Frame(buf)
 
 		c.sendAudio(buf)
 		slog.Debug("sent audio history", "ms", len(pre)*1000/mic.Rate)

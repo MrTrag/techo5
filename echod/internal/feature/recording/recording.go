@@ -51,11 +51,12 @@ const Longest = 30 * mic.Rate * 2
 const KeepMost = 10
 
 // Prewake is how much of the microphone's history opens every recording, whatever the turn sends on
-// to the pipeline. A wake word can only be recognized once it has been spoken, so a recording that
-// began where the stream did held the tail of the request and never the word: what a kept turn is
-// worth as training material, and what a false wake can be replayed to find out about, is in this
-// second. It is the whole of what the microphone keeps (mic/history.go), 32 KB a turn.
-const Prewake = time.Second
+// to the pipeline. A wake word can only be recognized once it has been spoken, and detection fires
+// about half a second after it ends, so a recording that began where the stream did held the tail
+// of the request and never the word: what a kept turn is worth as training material, and what a
+// false wake can be replayed to find out about, is in these two seconds. It is the whole of what
+// the microphone keeps (mic/history.go), 64 KB a turn.
+const Prewake = 2 * time.Second
 
 const (
 	wavExt  = ".wav"
@@ -192,9 +193,10 @@ func (s *Store) available() (*Available, error) {
 	return out, nil
 }
 
-// Opens starts recording a turn. An assistant set to keep none records nothing, which is how somebody
-// turns it off for one of them without touching the other.
-func (s *Store) Opens(id string, slot int) {
+// Opens starts recording a turn, beginning with history: the microphone's last second as it was at
+// the moment of the wake, which holds the word itself (see Prewake). An assistant set to keep none
+// records nothing, which is how somebody turns it off for one of them without touching the other.
+func (s *Store) Opens(id string, slot int, history []int16) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -211,7 +213,11 @@ func (s *Store) Opens(id string, slot int) {
 		s.open, s.buf = "", nil
 		return
 	}
-	s.open, s.slot, s.buf = id, slot, nil
+	buf := make([]byte, 0, 2*len(history))
+	for _, v := range history {
+		buf = append(buf, byte(v), byte(v>>8))
+	}
+	s.open, s.slot, s.buf = id, slot, buf
 }
 
 // Frame takes audio for whichever turn is open. Called from the streamer, which does not know or care
