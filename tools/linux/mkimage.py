@@ -17,7 +17,6 @@ import gzip
 import hashlib
 import lzma
 import io
-import os
 import stat
 import struct
 import sys
@@ -82,7 +81,14 @@ class Cpio:
                 if not name:
                     continue
                 if skip_dotfiles and name.startswith("."):
-                    continue  # apk metadata: .PKGINFO, .SIGN.*, .post-install
+                    # apk metadata: .PKGINFO, .SIGN.*, .post-install. These are the package's own
+                    # bookkeeping, and an initramfs that is unpacked by the kernel rather than by apk
+                    # has no use for them, so they are left out on purpose. Dropping .SIGN.* is not a
+                    # signature check being skipped: nothing here ever verified one. The packages are
+                    # checked where they are fetched — tools/fetch-inputs.py matches each against the
+                    # checksum Alpine's index gives for it and against the package's own datahash —
+                    # so an --apk from somewhere else arrives with nothing vouching for it.
+                    continue
                 # apk archives may repeat a directory the rootfs already has
                 if m.isdir() and name in self.seen:
                     continue
@@ -173,7 +179,7 @@ def main():
                     help="Alpine package to unpack into the rootfs (its files only; no install scripts)")
     ap.add_argument("--copy", action="append", default=[], metavar="SRC=DEST", help="extra file, mode 644")
     ap.add_argument("--script", action="append", default=[], metavar="SRC=DEST",
-                    help="extra text file, mode 755, CRLF normalised (shell scripts from a Windows checkout)")
+                    help="extra text file, mode 755, CRLF normalized (shell scripts from a Windows checkout)")
     ap.add_argument("--cmdline-append", default=None)
     ap.add_argument("--ramdisk-addr", type=lambda v: int(v, 0), default=None,
                     help="override the ramdisk load address in the header (e.g. 0x43400000)")
@@ -256,7 +262,7 @@ def main():
     if a.ramdisk_addr is not None:
         struct.pack_into("<I", hdr, 20, a.ramdisk_addr)
     size = write_bootimg(hdr, kernel, rd, ps, a.output, a.cmdline_append)
-    print(f"initramfs: {len(names)} entries, {len(raw)} bytes raw, {len(rd)} bytes gzip")
+    print(f"initramfs: {len(names)} entries, {len(raw)} bytes raw, {len(rd)} bytes {a.compress}")
     print(f"kernel: {len(kernel)} bytes; image: {size} bytes ({size / a.max_size:.0%} of {a.max_size})")
     if size > a.max_size:
         sys.exit("image does not fit the partition")

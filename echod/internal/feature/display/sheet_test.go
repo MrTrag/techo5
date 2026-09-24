@@ -68,9 +68,9 @@ func TestEveryCardDraws(t *testing.T) {
 	editor := sheetScene(catAlarms)
 	editor.draft = &alarmDraft{alarm: editor.alarms.Local[0]}
 	cases["alarm editor"] = editor
-	colours := sheetScene(catDisplay)
-	colours.sheet.colours = true
-	cases["custom colours"] = colours
+	colors := sheetScene(catDisplay)
+	colors.sheet.colors = true
+	cases["custom colors"] = colors
 
 	for name, s := range cases {
 		r := testRenderer()
@@ -99,7 +99,7 @@ func TestEveryCardDraws(t *testing.T) {
 			t.Errorf("%s: %d categories and %d Done on the rail, want %d and 1", name, cats, done, categories)
 		}
 		// The rows in view: every one with an id can be tapped.
-		shown := (r.h - 2*cardIn - headerH - 8) / rowH
+		shown := (r.h - 2*r.cardIn() - r.headerH() - 8) / r.rowH()
 		for i, row := range v.rows {
 			if i < shown && row.id != "" && !ids[row.id] {
 				t.Errorf("%s: row %q has nowhere to tap", name, row.label)
@@ -119,13 +119,15 @@ func TestCardScrolls(t *testing.T) {
 	r := testRenderer()
 	r.settingsScreen(s)
 	cardMax, _ := r.scrollLimits()
-	if want := 12*rowH - (r.h - 2*cardIn - headerH - 8); cardMax != want {
-		t.Fatalf("12 rows scroll %d, want %d", cardMax, want)
+	// However many rows the card has ended up with — alarms, the timers, and the settings under them.
+	rows := len(alarmsCard(s.view()).rows)
+	if want := rows*r.rowH() - (r.h - 2*r.cardIn() - r.headerH() - 8); cardMax != want {
+		t.Fatalf("%d rows scroll %d, want %d", rows, cardMax, want)
 	}
 
 	s.sheet.cardScroll = cardMax + 500 // held to the end
 	r.settingsScreen(s)
-	list := image.Rect(railW, cardIn+headerH, r.w-cardIn, r.h-cardIn-8)
+	list := image.Rect(r.railW(), r.cardIn()+r.headerH(), r.w-r.cardIn(), r.h-r.cardIn()-8)
 	var last bool
 	for _, z := range r.zones {
 		if z.kind == zoneRow && !z.r.In(list) {

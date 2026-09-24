@@ -13,12 +13,13 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/feature/home"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/media"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/security"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/timer"
 )
 
 // sheetVolumeSteps is how many steps the Volume row counts.
 const sheetVolumeSteps = media.VolumeSteps
 
-// restartWindow is how long a second tap on Restart (or Delete, on an alarm, or Forget) is honoured
+// restartWindow is how long a second tap on Restart (or Delete, on an alarm, or Forget) is honored
 // after the first.
 const restartWindow = 4 * time.Second
 
@@ -36,11 +37,11 @@ type sheetCtl struct {
 	dragScroll int
 	dragging   bool
 
-	// checking is an update check asked for from the screen, still out; colours the custom colours
+	// checking is an update check asked for from the screen, still out; colors the custom colors
 	// editor open on the Display card; folder the slideshow's folder list, as far as it has been
 	// opened; draft the alarm open in the Alarms card's editor.
 	checking bool
-	colours  bool
+	colors   bool
 	folder   folderView
 	draft    *alarmDraft
 }
@@ -63,7 +64,7 @@ type settings struct {
 	wifiOK      bool   // Wi-Fi is managed here, so it can be changed
 	btProxy     bool
 	checking    bool       // an update check from the screen is out
-	colours     bool       // the custom colours editor is open
+	colors      bool       // the custom colors editor is open
 	demo        bool       // placeholders for the owner's details, for published screenshots
 	folder      folderView // the slideshow folder list, while it is open
 	name        string
@@ -88,6 +89,9 @@ type sheetView struct {
 	snooze   int
 	now      time.Time
 	radio    home.Radio
+
+	// timers are what is counting down, the device's own and Home Assistant's alike, soonest first.
+	timers []timer.Countdown
 }
 
 // alarmDraft is an alarm being set in the Alarms card's editor: a new one, or a copy of one being changed.

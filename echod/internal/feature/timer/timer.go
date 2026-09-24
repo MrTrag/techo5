@@ -1,7 +1,7 @@
 // Package timer is a kitchen timer: Home Assistant keeps the timers, the device counts them down on
 // the ring and rings when one finishes.
 //
-// Home Assistant sends an event when a timer starts, is changed, is cancelled or finishes, and
+// Home Assistant sends an event when a timer starts, is changed, is canceled or finishes, and
 // nothing in between — so the countdown here is local arithmetic against a monotonic clock, corrected
 // whenever an event arrives. A finished timer is dropped at that end, so the ringing is entirely this
 // device's to start and to stop.
@@ -10,9 +10,11 @@ package timer
 import (
 	"cmp"
 	"context"
+	"fmt"
 	"log/slog"
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +23,8 @@ import (
 	"github.com/ygelfand/go-esphome-device/api"
 
 	"github.com/HuskerMinion/techo5/echod/internal/component"
+	"github.com/HuskerMinion/techo5/echod/internal/config"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/ring"
 	"github.com/HuskerMinion/techo5/echod/internal/hardware/led"
 	"github.com/HuskerMinion/techo5/echod/internal/hardware/speaker"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/hook"
@@ -29,32 +33,27 @@ import (
 
 func init() {
 	component.Register(component.Device, Get(), component.Order(31))
+
+	// Only a silence, and no snooze: a timer cannot be put off, so an offer accepted beside a
+	// ringing alarm stops the timer and snoozes the alarm, which is what somebody means.
+	ring.Silences(func() bool { return Get().Stop() })
 }
 
 const (
 	// refresh is how often the countdown is redrawn. The frame is only sent when it changes, so a long
 	// timer costs nothing between segments.
 	refresh = 250 * time.Millisecond
-
-	// ringFor is how long a finished timer rings for if nobody stops it, and ringEvery how often the
-	// tone repeats within that.
-	ringFor   = 15 * time.Minute
-	ringEvery = 2 * time.Second
-
-	// alarmLevel is louder than the tones the device uses for feedback: this one is meant to fetch
-	// somebody from another room.
-	alarmLevel = 0.6
 )
 
-var (
-	countdownColor = led.Color{R: 0xFF, G: 0x8C, B: 0x00}
-	alarmColor     = led.Color{R: 0xFF, G: 0x40, B: 0x00}
-)
+var countdownColor = led.Color{R: 0xFF, G: 0x8C, B: 0x00}
+
+// resumeWithin is how late a timer of the device's own may still ring after a restart; the alarm's
+// ResumeWithin, and for the same reasons. Not imported: alarm imports this package.
+const resumeWithin = 2 * time.Minute
 
 // Timers is every timer Home Assistant has told this device about.
 type Timers struct {
 	countdown *led.Claim
-	alarm     *led.Claim
 
 	// names is what is counting down, since the ring can only ever say that something is.
 	names *esphome.TextSensor
@@ -62,30 +61,37 @@ type Timers struct {
 	// woke is how a new timer restarts the redraw, which stops while there is nothing counting down.
 	woke chan struct{}
 
-	mu    sync.Mutex
-	held  map[string]*timer
-	stop  context.CancelFunc
-	rang  string // the name of what is ringing, for the screen
-	shown []led.Color
+	mu   sync.Mutex
+	held map[string]*timer
+
+	// waiting is saved timers not yet restored, because the clock was not set when the device came
+	// up. Kept so a save meanwhile writes them back rather than dropping them.
+	waiting []config.LocalTimer
+	stop    func()
+	rang    string // the name of what is ringing, for the screen
+	shown   []led.Color
 
 	// Changed fires when a timer starts, changes, ends or rings, and when the ringing stops.
 	Changed hook.Hook[struct{}]
 }
 
-// Countdown is a timer as the screen shows it.
+// Countdown is a timer as the screen shows it. Local is one of the device's own, which the screen
+// may cancel; Home Assistant's are canceled where they were set.
 type Countdown struct {
+	ID     string
 	Name   string
 	Left   time.Duration
 	Total  time.Duration
 	Active bool
+	Local  bool
 }
 
 // List is every timer, soonest running first and paused ones after.
 func (t *Timers) List(now time.Time) []Countdown {
 	t.mu.Lock()
 	out := make([]Countdown, 0, len(t.held))
-	for _, c := range t.held {
-		out = append(out, Countdown{Name: c.name, Left: c.remaining(now), Total: c.total, Active: c.active})
+	for id, c := range t.held {
+		out = append(out, Countdown{ID: id, Name: c.name, Left: c.remaining(now), Total: c.total, Active: c.active, Local: c.local})
 	}
 	t.mu.Unlock()
 	slices.SortFunc(out, func(a, b Countdown) int {
@@ -115,6 +121,10 @@ type timer struct {
 	left   time.Duration
 	at     time.Time
 	active bool
+
+	// local is a timer set on the device rather than by Home Assistant: it finishes here, from this
+	// clock, so it runs with Home Assistant away.
+	local bool
 }
 
 func (t *timer) remaining(now time.Time) time.Duration {
@@ -137,7 +147,6 @@ func Get() *Timers {
 func build() *Timers {
 	return &Timers{
 		countdown: led.Get().Claim(led.PriorityTimer),
-		alarm:     led.Get().Claim(led.PriorityAlarm),
 		names: &esphome.TextSensor{
 			Base: esphome.Base{
 				ObjectID: "timers",
@@ -154,6 +163,54 @@ func build() *Timers {
 func (t *Timers) Name() string { return "timers" }
 
 func (t *Timers) Entities() []esphome.Entity { return []esphome.Entity{t.names} }
+
+// Actions let Home Assistant set and cancel the device's own timers, which run and ring here with Home
+// Assistant away. Its own timers, set by voice through Assist, are canceled the same way they were set.
+func (t *Timers) Actions() []*esphome.Action {
+	return []*esphome.Action{
+		{
+			Name:    "timer_start",
+			Args:    []esphome.Arg{{Name: "duration", Type: esphome.ArgString}, {Name: "label", Type: esphome.ArgString}},
+			Answers: true,
+			Run: func(c esphome.Call) (any, error) {
+				d, err := ParseDuration(c.String("duration"))
+				if err != nil {
+					return nil, err
+				}
+				return map[string]string{"id": t.Start(strings.TrimSpace(c.String("label")), d)}, nil
+			},
+		},
+		{
+			Name: "timer_cancel",
+			Args: []esphome.Arg{{Name: "id", Type: esphome.ArgString}},
+			Run: func(c esphome.Call) (any, error) {
+				return nil, t.cancelFromHA(strings.TrimSpace(c.String("id")))
+			},
+		},
+	}
+}
+
+// cancelFromHA cancels one of the device's own timers by id, or every one of them for "all".
+func (t *Timers) cancelFromHA(id string) error {
+	if id == "all" {
+		n := 0
+		for _, c := range t.List(time.Now()) {
+			if c.Local && t.Cancel(c.ID) {
+				n++
+			}
+		}
+		slog.Info("timers canceled from home assistant", "count", n)
+		return nil
+	}
+	if id != "" && !strings.HasPrefix(id, localPrefix) {
+		return fmt.Errorf("timers: %q was set through Home Assistant; cancel it there", id)
+	}
+	if !t.Cancel(id) {
+		return fmt.Errorf("timers: no timer %q on this device", id)
+	}
+	slog.Info("timer canceled from home assistant", "id", id)
+	return nil
+}
 
 // Run redraws the countdown while there is one, and waits to be woken while there is not.
 func (t *Timers) Run(ctx context.Context) error {
@@ -172,6 +229,7 @@ func (t *Timers) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-time.After(refresh):
 		}
+		t.ripe(time.Now())
 		t.show()
 	}
 }
@@ -180,6 +238,202 @@ func (t *Timers) counting() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.soonest(time.Now()) != nil
+}
+
+// localPrefix marks the ids of timers set on the device. Home Assistant's ids are its own and never
+// look like this.
+const localPrefix = "local:"
+
+// localList is the device's own timers as they are saved, with an absolute finish time rather than a
+// duration left: a duration left means nothing once the process has stopped. Call it with the lock
+// held.
+func localList(held map[string]*timer, now time.Time) []config.LocalTimer {
+	var out []config.LocalTimer
+	for id, c := range held {
+		if !c.local {
+			continue
+		}
+		saved := config.LocalTimer{ID: id, Name: c.name, Total: c.total}
+		if c.active {
+			saved.Finish = now.Add(c.remaining(now))
+		} else {
+			saved.Left = c.left
+		}
+		out = append(out, saved)
+	}
+	slices.SortFunc(out, func(a, b config.LocalTimer) int { return strings.Compare(a.ID, b.ID) })
+	return out
+}
+
+// saved is what is written down: the timers held, and any still waiting for the clock to be
+// restored, which a save made meanwhile must not drop. Call it with the lock held.
+func (t *Timers) saved(now time.Time) []config.LocalTimer {
+	return append(localList(t.held, now), t.waiting...)
+}
+
+// clockSet reports whether the wall clock has been set: before NTP a device reads 1970. The alarm
+// scheduler's test, repeated here because alarm imports this package.
+func clockSet(now time.Time) bool { return now.Year() >= 2025 }
+
+// clockPoll is how often restoring timers looks for the clock to have been set.
+const clockPoll = 5 * time.Second
+
+// saveLocal writes the device's own timers down. Called when one is set, canceled or finishes, and
+// never on a tick: every set marshals the whole config and fsyncs it.
+func saveLocal(list []config.LocalTimer) {
+	if err := config.Set().Timers().Local(list); err != nil {
+		slog.Warn("saving the timers failed", "err", err)
+	}
+}
+
+// Restore brings back the timers the device set itself.
+//
+// One that finished while the device was off does not ring. A crash loop would otherwise be a device
+// that screams every time it boots, and a timer whose moment went by unheard is not made right by
+// sounding an hour later — it is said out loud instead, which is more than it used to get.
+//
+// With the clock not yet set it waits for it: a finish time read against 1970 is a timer that runs
+// for fifty years, or one that finished while the device was off taken for one still to come.
+func (t *Timers) Restore(c config.Config) {
+	if len(c.Timers.Local) == 0 {
+		return
+	}
+	if !clockSet(time.Now()) {
+		t.mu.Lock()
+		t.waiting = c.Timers.Local
+		t.mu.Unlock()
+		slog.Info("timers wait for the clock before they are restored", "count", len(c.Timers.Local))
+		safe.Go("timers wait for the clock", func() {
+			for !clockSet(time.Now()) {
+				time.Sleep(clockPoll)
+			}
+			t.mu.Lock()
+			list := t.waiting
+			t.waiting = nil
+			t.mu.Unlock()
+			t.restore(list, time.Now())
+		})
+		return
+	}
+	t.restore(c.Timers.Local, time.Now())
+}
+
+// restore brings back saved timers against a clock that can be trusted.
+func (t *Timers) restore(list []config.LocalTimer, now time.Time) {
+	var live []config.LocalTimer
+	var resume string
+
+	t.mu.Lock()
+	for _, s := range list {
+		switch {
+		case !s.Finish.IsZero() && !s.Finish.After(now):
+			// Just finished, as when a restart lands on it, rings; longer ago is written down and
+			// shown instead, or a device that crashes while ringing would ring on every start.
+			if now.Sub(s.Finish) <= resumeWithin {
+				resume = cmp.Or(s.Name, "Timer")
+			} else {
+				ring.Missed("timer", s.Name, s.Finish)
+			}
+			continue
+		case !s.Finish.IsZero():
+			t.held[s.ID] = &timer{name: s.Name, total: s.Total, left: s.Finish.Sub(now), at: now, active: true, local: true}
+		default:
+			t.held[s.ID] = &timer{name: s.Name, total: s.Total, left: s.Left, at: now, local: true}
+		}
+		live = append(live, s)
+	}
+	// Everything held, not just what came back: timers may have been set while this waited.
+	saved := t.saved(now)
+	t.mu.Unlock()
+
+	if len(live) != len(list) {
+		saveLocal(saved)
+	}
+	if resume != "" {
+		slog.Info("ringing a timer that finished as the device was starting", "name", resume)
+		t.startRinging(resume)
+	}
+	if len(live) > 0 {
+		slog.Info("timers restored", "count", len(live))
+		t.show()
+		t.publish()
+		t.Changed.Emit(struct{}{})
+	}
+}
+
+// Start sets a timer of the device's own and returns its id. It counts down, shows and rings exactly
+// as one from Home Assistant does, because from here on it is the same timer.
+func (t *Timers) Start(name string, d time.Duration) string {
+	if d <= 0 {
+		return ""
+	}
+	id := localPrefix + strconv.FormatInt(time.Now().UnixNano(), 36)
+	t.mu.Lock()
+	now := time.Now()
+	t.held[id] = &timer{name: name, total: d, left: d, at: now, active: true, local: true}
+	saved := t.saved(now)
+	t.mu.Unlock()
+
+	saveLocal(saved)
+	slog.Info("timer set here", "name", name, "for", d)
+
+	select {
+	case t.woke <- struct{}{}:
+	default:
+	}
+	t.show()
+	t.publish()
+	t.Changed.Emit(struct{}{})
+	return id
+}
+
+// Cancel drops one of the device's own timers. Home Assistant's are left alone: they are canceled
+// where they were set, and it would tell us about that itself.
+func (t *Timers) Cancel(id string) bool {
+	if !strings.HasPrefix(id, localPrefix) {
+		return false
+	}
+	t.mu.Lock()
+	_, had := t.held[id]
+	delete(t.held, id)
+	saved := t.saved(time.Now())
+	t.mu.Unlock()
+	if !had {
+		return false
+	}
+	saveLocal(saved)
+	t.show()
+	t.publish()
+	t.Changed.Emit(struct{}{})
+	return true
+}
+
+// ripe finishes any of the device's own timers that have run out, since nothing else will tell us.
+// Home Assistant sends an event for its own, which is why only local ones are looked at here.
+func (t *Timers) ripe(now time.Time) {
+	t.mu.Lock()
+	var done []string
+	for id, c := range t.held {
+		if c.local && c.active && c.remaining(now) <= 0 {
+			done = append(done, id)
+		}
+	}
+	t.mu.Unlock()
+	for _, id := range done {
+		t.mu.Lock()
+		name := ""
+		if c := t.held[id]; c != nil {
+			name = c.name
+		}
+		delete(t.held, id)
+		saved := t.saved(now)
+		t.mu.Unlock()
+		saveLocal(saved)
+		slog.Info("timer finished here", "name", name)
+		t.startRinging(cmp.Or(name, "Timer"))
+		t.publish()
+		t.Changed.Emit(struct{}{})
+	}
 }
 
 // Event is a timer event from Home Assistant.
@@ -228,12 +482,21 @@ func (t *Timers) publish() {
 // nothing. Whatever is already ringing carries on, since that no longer depends on Home Assistant.
 func (t *Timers) Forget() {
 	t.mu.Lock()
-	n := len(t.held)
-	t.held = map[string]*timer{}
+	n := 0
+	// The device's own timers stay. They finish from this clock and are meant to run with Home
+	// Assistant away — that is what makes them local — so dropping them because Home Assistant
+	// stopped listening threw away the one kind that was still counting down to something real.
+	for id, c := range t.held {
+		if c.local {
+			continue
+		}
+		delete(t.held, id)
+		n++
+	}
 	t.mu.Unlock()
 
 	if n > 0 {
-		slog.Info("timers forgotten", "count", n)
+		slog.Info("Home Assistant's timers forgotten", "count", n)
 	}
 	t.show()
 	t.publish()
@@ -289,50 +552,34 @@ func (t *Timers) forget(id string) {
 // many of them went off.
 func (t *Timers) finished(e esphome.TimerEvent) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-
 	delete(t.held, e.TimerID)
-	if t.stop != nil {
-		return
-	}
-	t.rang = cmp.Or(e.Name, "Timer")
-
-	var ctx context.Context
-	ctx, t.stop = context.WithCancel(context.Background())
-	safe.Go("timer alarm", func() { t.ring(ctx) })
+	t.mu.Unlock()
+	t.startRinging(cmp.Or(e.Name, "Timer"))
 }
 
-// ring sounds until it is stopped or ringFor is up. Music is ducked rather than suspended: it is one
-// room of what may be a whole house, and the tone is audible over it.
-func (t *Timers) ring(ctx context.Context) {
-	defer func() {
-		t.mu.Lock()
-		t.stop, t.rang = nil, ""
-		t.mu.Unlock()
-		t.show()
-		t.Changed.Emit(struct{}{})
-	}()
+// startRinging rings for a timer that has run out, or joins the ringing already going: one alarm
+// covers however many of them went off, whoever set them.
+func (t *Timers) startRinging(name string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 
-	t.alarm.Play(led.EffectPulse, alarmColor)
-	defer t.alarm.Clear()
-
-	sound := speaker.Sound()
-	sound.Backgrounds().Duck(true)
-	defer sound.Backgrounds().Duck(false)
-
-	over := time.After(ringFor)
-	for {
-		sound.Interject(func(p *speaker.Player) { p.Chime(alarmLevel, speaker.ToneTimer...) })
-
-		select {
-		case <-ctx.Done():
-			return
-		case <-over:
-			slog.Info("timer rang out", "for", ringFor)
-			return
-		case <-time.After(ringEvery):
-		}
+	if t.stop != nil {
+		// One ring covers them all, but a timer finishing into a ring somebody silenced is a new
+		// reason to make a noise, and it is owed one.
+		ring.Again()
+		return
 	}
+	t.rang = name
+	t.stop = ring.Start("timer", speaker.ToneTimer, t.rungOut)
+}
+
+// rungOut is the bell telling the timers their ring is over, however that came about.
+func (t *Timers) rungOut() {
+	t.mu.Lock()
+	t.stop, t.rang = nil, ""
+	t.mu.Unlock()
+	t.show()
+	t.Changed.Emit(struct{}{})
 }
 
 // show draws the soonest timer, or clears the ring when there is none. It sends nothing when the

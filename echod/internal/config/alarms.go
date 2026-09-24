@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 )
 
 // Alarms are the device's own alarms, and the Home Assistant helpers it follows as alarms.
@@ -17,8 +18,33 @@ type Alarms struct {
 	// SnoozeMinutes is how long Snooze puts an alarm off.
 	SnoozeMinutes int `json:"snooze_minutes,omitempty"`
 
+	// Snoozed is the alarms put off and not yet rung, as absolute times. A snooze used to live only
+	// in memory, so a restart between pressing Snooze and the alarm coming back lost it silently —
+	// and somebody who pressed Snooze has been told the alarm is coming back.
+	//
+	// An absolute time rather than a remaining duration, so it survives the device being off as well
+	// as the process restarting, and means the same thing whatever the clock did in between.
+	Snoozed []Snooze `json:"snoozed,omitempty"`
+
 	// Sound is what an alarm rings with, by name; empty is the first of the speaker's alarm sounds.
 	Sound string `json:"sound,omitempty"`
+
+	// SunriseMinutes is how long before an alarm the screen starts to light, nothing for not at all:
+	// the default, for alarms that do not choose their own (Alarm.Sunrise) and for the Home Assistant
+	// helpers followed as alarms. The light comes up from almost nothing to the brightness the screen
+	// is set to, so the room is lit before the sound starts.
+	SunriseMinutes int `json:"sunrise_minutes,omitempty"`
+
+	// SunriseFace draws the sun with a face on it, which is a matter of taste rather than of waking up.
+	SunriseFace bool `json:"sunrise_face,omitempty"`
+
+	// RingVolume is how loud alarms and timers ring, in the media volume's steps, and nothing else
+	// follows it. A ring used to go out at the media volume, so music left muted or turned right down
+	// made an alarm silent without anybody having chosen that. Zero is allowed and is silent: then
+	// somebody did choose it, and the screen says so.
+	//
+	// Unset until the device first runs with it; see Ring.
+	RingVolume *int `json:"ring_volume,omitempty"`
 }
 
 // Alarm is one alarm set on the device.
@@ -30,6 +56,75 @@ type Alarm struct {
 	Days  uint8  `json:"days,omitempty"`
 	Label string `json:"label,omitempty"`
 	On    bool   `json:"on"`
+
+	// Remind makes it a reminder rather than an alarm: its label is said once and left on the screen,
+	// instead of a ring that goes on until somebody stops it.
+	Remind bool `json:"remind,omitempty"`
+
+	// RingOn is the other devices a reminder goes to, by name, or RingEverywhere for all of them. It
+	// always goes off here as well.
+	RingOn []string `json:"ring_on,omitempty"`
+
+	// Sunrise is this alarm's wake light, in minutes before it rings. Nothing follows the device's
+	// default (Alarms.SunriseMinutes), which is what every alarm had before each could choose;
+	// SunriseOff is none for this alarm whatever the default says.
+	Sunrise int `json:"sunrise,omitempty"`
+
+	// Date is the day a one-off goes off, as DateLayout in the device's own time zone. Without one, a
+	// one-off goes off the next time the clock reaches Hour:Minute. Ignored for an alarm that repeats.
+	Date string `json:"date,omitempty"`
+}
+
+// DateLayout is how an alarm's date is written.
+const DateLayout = "2006-01-02"
+
+// OnDate is the moment a dated one-off goes off, in the device's own time zone, and false for an
+// alarm with no date or one that repeats.
+func (a Alarm) OnDate() (time.Time, bool) {
+	if a.Date == "" || a.Days != DaysOnce {
+		return time.Time{}, false
+	}
+	d, err := time.ParseInLocation(DateLayout, a.Date, time.Local)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return time.Date(d.Year(), d.Month(), d.Day(), a.Hour, a.Minute, 0, 0, time.Local), true
+}
+
+// When is how an alarm's days read on a screen: its date for a dated one-off, as "Tue, Sep 29", and
+// DaysLabel otherwise.
+func (a Alarm) When() string {
+	if t, ok := a.OnDate(); ok {
+		return t.Format("Mon, Jan 2")
+	}
+	return DaysLabel(a.Days)
+}
+
+// RingEverywhere in RingOn sends a reminder to every device in the house.
+const RingEverywhere = "everywhere"
+
+// SunriseOff in Alarm.Sunrise turns an alarm's wake light off.
+const SunriseOff = -1
+
+// SunriseFor is how many minutes of light come before al, nothing for none. A reminder has none: it
+// is not somebody waking up, and a room lit for twenty minutes before "take the medication" at two
+// in the afternoon is the bug this replaced.
+func (a Alarms) SunriseFor(al Alarm) int {
+	switch {
+	case al.Remind || al.Sunrise < 0:
+		return 0
+	case al.Sunrise > 0:
+		return al.Sunrise
+	}
+	return max(a.SunriseMinutes, 0)
+}
+
+// Snooze is one alarm put off until At. Key is the alarm it came from, so a snooze that fires can be
+// told apart from the alarm's own next time.
+type Snooze struct {
+	Key   string    `json:"key"`
+	Label string    `json:"label,omitempty"`
+	At    time.Time `json:"at"`
 }
 
 const (
@@ -44,6 +139,20 @@ func (a Alarms) Snooze() int {
 		return DefaultSnoozeMinutes
 	}
 	return a.SnoozeMinutes
+}
+
+// Ring is how loud alarms and timers ring. Unset, it starts from the media volume the device is at
+// now, so nobody's alarm gets louder or quieter by itself when this setting arrives - unless that
+// volume is zero, which would carry exactly the silent alarm this exists to prevent, and then it is
+// the default volume instead.
+func (a Alarms) Ring(media int) int {
+	if a.RingVolume != nil {
+		return *a.RingVolume
+	}
+	if media <= 0 {
+		return DefaultVolume
+	}
+	return min(media, VolumeSteps)
 }
 
 // Named sets of days.
@@ -105,6 +214,17 @@ type AlarmsWriter struct{ st *Store }
 
 // Put adds an alarm, or replaces the one with its ID.
 func (w AlarmsWriter) Put(a Alarm) error {
+	a.RingOn = slices.Clone(a.RingOn)
+	// A date belongs to a one-off only: an alarm set to repeat keeps none, or setting it back to once
+	// would bring back a day that was chosen for something else.
+	if a.Days != DaysOnce {
+		a.Date = ""
+	}
+	// A dated one-off turned back on after its day has gone by is a plain one-off again: kept, its date
+	// is a moment in the past, and the list would show it on while nothing could ever ring it.
+	if at, ok := a.OnDate(); ok && a.On && !at.After(time.Now()) {
+		a.Date = ""
+	}
 	return w.st.Update(func(c *Config) {
 		if i := slices.IndexFunc(c.Alarms.List, func(x Alarm) bool { return x.ID == a.ID }); i >= 0 {
 			c.Alarms.List[i] = a
@@ -126,7 +246,28 @@ func (w AlarmsWriter) SnoozeMinutes(n int) error {
 	return w.st.Update(func(c *Config) { c.Alarms.SnoozeMinutes = n })
 }
 
+// Snoozed replaces the list of alarms put off. It is written when one is made, fires or is dropped,
+// and never on a tick: the whole config is marshalled and fsynced on every set.
+func (w AlarmsWriter) Snoozed(list []Snooze) error {
+	return w.st.Update(func(c *Config) { c.Alarms.Snoozed = slices.Clone(list) })
+}
+
+// SunriseMinutes sets how long before an alarm the screen starts to light; nothing for not at all.
+func (w AlarmsWriter) SunriseMinutes(n int) error {
+	return w.st.Update(func(c *Config) { c.Alarms.SunriseMinutes = n })
+}
+
+func (w AlarmsWriter) SunriseFace(on bool) error {
+	return w.st.Update(func(c *Config) { c.Alarms.SunriseFace = on })
+}
+
 // Sound sets what alarms ring with, by name.
+// RingVolume sets how loud alarms and timers ring, 0 to VolumeSteps.
+func (w AlarmsWriter) RingVolume(n int) error {
+	n = min(max(n, 0), VolumeSteps)
+	return w.st.Update(func(c *Config) { c.Alarms.RingVolume = &n })
+}
+
 func (w AlarmsWriter) Sound(name string) error {
 	return w.st.Update(func(c *Config) { c.Alarms.Sound = name })
 }

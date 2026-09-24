@@ -24,7 +24,7 @@ func (s software) Toggle() (bool, error) {
 }
 
 // The press is only news to the key driver, so the daemon toggles.
-func (software) HardwareToggles() bool { return false }
+func (software) HardwareActs(bool) bool { return false }
 
 func (software) Lag() time.Duration { return 0 }
 
@@ -37,3 +37,7 @@ func (noLED) Bright() (bool, error) { return true, nil }
 func platformMute() (Mute, error) { return software{}, nil }
 
 func platformLight() (LED, error) { return noLED{}, nil }
+
+// The Spot's cut is the daemon's own, so a mute saved from last time has to be in force before
+// capture opens rather than when the mute feature starts. See privacy.Seed.
+func seedSoftwareCut(muted bool) { softwareCut.Store(muted) }

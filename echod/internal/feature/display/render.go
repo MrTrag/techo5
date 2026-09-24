@@ -9,7 +9,6 @@ import (
 	"image/draw"
 	"log/slog"
 	"math"
-	"strings"
 	"time"
 
 	"golang.org/x/image/font"
@@ -19,10 +18,13 @@ import (
 
 	"github.com/HuskerMinion/techo5/echod/internal/config"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/alarm"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/announce"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/btaudio"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/dashboard"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/home"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/media"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/phone"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/remind"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/security"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/timer"
 )
@@ -47,6 +49,15 @@ type scene struct {
 	// volume is shown while it moves: the step out of media.VolumeSteps.
 	volume     int
 	showVolume bool
+
+	// The dashboard page, drawn instead of the clock while showDash is set: how it is shown, and
+	// when streamed, what arrived.
+	showDash   bool
+	dashMode   config.DashboardMode
+	dash       dashboard.View
+	drawn      dashboard.Drawn
+	dashScroll int
+	dashAdjust dashAdjusting // a level a finger is sliding
 
 	// bt is the Bluetooth audio state: the pairing page replaces everything while it is on, and a
 	// connected device is named in the footer.
@@ -113,6 +124,44 @@ type scene struct {
 	// (the idle wait has already been checked); slideshowOverlay is its clock/date size.
 	slideshowScreensaver *image.RGBA
 	slideshowOverlay     string
+
+	// slideshowTrouble is why the slideshow has no photo, once it has given up looking; it sits in
+	// the footer so a folder that went away is visible rather than silently retried.
+	slideshowTrouble string
+
+	// missed is a ring that fell due while the device could not sound it, said in the footer.
+	missed string
+
+	// strip is the music in a strip at the foot of the clock page, rather than on its own page; faved
+	// is the star having been pressed for what is playing.
+	strip bool
+	faved bool
+
+	// announceReady is whether this house has a word set, without which announcements go nowhere;
+	// announceRecording whether this device has its microphone open for one now; announcePeers how
+	// many other devices are listening for them.
+	announceReady     bool
+	announceRecording bool
+	announcePeers     int
+
+	// announcement is one that arrived and is still being shown, with showAnnouncement saying so.
+	announcement     announce.Message
+	showAnnouncement bool
+
+	// reminder is one going off, with showReminder saying so; reminderFrom is the device it was set
+	// on when that was another one, and empty for this device's own.
+	reminder     remind.Reminder
+	showReminder bool
+	reminderFrom string
+
+	// setupAsking is a browser waiting to be let into the setup page. It is said on the screen so
+	// that a request for a press is never something only the browser knows about.
+	setupAsking bool
+
+	// sunrise is how far the light before an alarm has come, 0 to 1, and sunriseFace whether the sun
+	// is drawn with a face on it.
+	sunrise     float64
+	sunriseFace bool
 }
 
 // renderer draws scenes onto one canvas. Faces are made once: parsing a font is cheap, but
@@ -137,8 +186,47 @@ type renderer struct {
 	shellKey baseKey
 }
 
+// The two large answers at the foot of a page that demands one: Stop and Snooze, Decline and
+// Answer, Not now and Allow. All three pages put them in the same place, so a finger learns one
+// position, and all three draw them with the same rounded button. In the Show 5's pixels.
+const (
+	actionGap    = 24  // between the two
+	actionBottom = 30  // under them
+	actionHeight = 120 // how tall they are
+	actionReach  = 20  // above them, a tap still decides nothing
+	actionRadius = 28  // rounded enough to read as a button at this size
+)
+
+// actionBand is the top and bottom of those answers. Anchored to the foot of the screen rather than
+// measured from the top, so a taller panel sets them under the words instead of stretching them
+// down the page.
+func (r *renderer) actionBand() (y0, y1 int) {
+	y1 = r.h - r.s(actionBottom)
+	return y1 - r.s(actionHeight), y1
+}
+
+// actionHalves splits the band into the two answers, left and right.
+func (r *renderer) actionHalves() (left, right image.Rectangle) {
+	y0, y1 := r.actionBand()
+	half := r.s(actionGap) / 2
+	return image.Rect(r.margin, y0, r.w/2-half, y1), image.Rect(r.w/2+half, y0, r.w-r.margin, y1)
+}
+
+// actionDecided is whether a tap this far down the screen is an answer at all. A tap on the words
+// above decides nothing, so reading a page cannot answer it.
+func (r *renderer) actionDecided(y int) bool {
+	y0, _ := r.actionBand()
+	return y >= y0-r.s(actionReach)
+}
+
+// drawnFor is the panel width every fixed size in this package is written in: the Echo Show 5's, in
+// landscape. A wider panel scales them up rather than leaving the layout in one corner of it.
+const drawnFor = 960
+
 func newRenderer(dst *image.RGBA) *renderer {
-	r := &renderer{paint: paint{dst: dst, w: dst.Rect.Dx(), h: dst.Rect.Dy()}, margin: 40}
+	// Built in place: paint carries a mutex, so it must never be assembled elsewhere and copied in.
+	r := &renderer{paint: paint{dst: dst, w: dst.Rect.Dx(), h: dst.Rect.Dy(), sNum: dst.Rect.Dx(), sDen: drawnFor}}
+	r.margin = r.s(40)
 	bold, err := opentype.Parse(gobold.TTF)
 	if err != nil {
 		slog.Error("parsing the bold font failed", "err", err)
@@ -147,11 +235,12 @@ func newRenderer(dst *image.RGBA) *renderer {
 	if err != nil {
 		slog.Error("parsing the regular font failed", "err", err)
 	}
-	face := func(f *opentype.Font, size float64) font.Face {
+	// Sizes are points at 72 DPI, which makes them pixels, so they scale with everything else.
+	face := func(f *opentype.Font, size int) font.Face {
 		if f == nil {
 			return nil
 		}
-		fc, err := opentype.NewFace(f, &opentype.FaceOptions{Size: size, DPI: 72, Hinting: font.HintingFull})
+		fc, err := opentype.NewFace(f, &opentype.FaceOptions{Size: float64(r.s(size)), DPI: 72, Hinting: font.HintingFull})
 		if err != nil {
 			slog.Error("making a font face failed", "size", size, "err", err)
 			return nil
@@ -165,6 +254,10 @@ func newRenderer(dst *image.RGBA) *renderer {
 	r.body = face(regular, 42)
 	r.small = face(regular, 34)
 	r.tiny = face(regular, 26)
+	if r.scaled() {
+		fc := sheetFacesAt(r.s)
+		r.fc = &fc
+	}
 	return r
 }
 
@@ -173,12 +266,22 @@ func newRenderer(dst *image.RGBA) *renderer {
 func (r *renderer) draw(s scene) {
 	draw.Draw(r.dst, r.dst.Rect, image.NewUniform(walnut), image.Point{}, draw.Src)
 
+	// Registered first so it runs last: the header goes over every page, including the ones below
+	// that return early.
+	defer r.header(s)
+
 	if s.call.Phase != phone.Idle {
 		r.callPage(s)
 		return
 	}
 	if s.ring.any() {
 		r.ringingPage(s)
+		return
+	}
+	// A browser waiting to be let in: the answer is a tap here, since this device has no button for
+	// it. Under a call and under a ringing alarm, both of which are somebody already being answered.
+	if s.setupAsking {
+		r.setupAskPage(s)
 		return
 	}
 	if s.bt.Pairing {
@@ -195,6 +298,23 @@ func (r *renderer) draw(s scene) {
 		}
 		return
 	}
+	// The two strips sit over whatever is on the screen rather than taking it: the clock, the music
+	// and the photos all carry on behind them. A call and a ringing alarm are above them, since both
+	// are waiting on somebody.
+	defer func() {
+		switch {
+		case s.announceRecording:
+			r.recordingStrip(s)
+		case s.showAnnouncement:
+			r.announcementStrip(s)
+		}
+		// The card is in the middle and the strips along the bottom, so a reminder and an
+		// announcement can both be up at once.
+		if s.showReminder {
+			r.reminderCard(s)
+		}
+	}()
+
 	if s.showSheet {
 		r.settingsScreen(s)
 		if s.showVolume {
@@ -224,6 +344,13 @@ func (r *renderer) draw(s scene) {
 		}
 		return
 	}
+	if s.showDash {
+		r.dashboardPage(s)
+		if s.showVolume {
+			r.volumeBar(s)
+		}
+		return
+	}
 
 	switch s.phase {
 	case "listening":
@@ -235,7 +362,11 @@ func (r *renderer) draw(s scene) {
 		r.cornerClock(s)
 		r.words(s.heard, s.reply, 70)
 	default:
-		if s.slideshowScreensaver != nil {
+		if s.sunrise > 0 {
+			// The light before an alarm takes the whole screen: the panel is the lamp in the room, and
+			// a screen filled with warm color is worth more than the backlight on its own.
+			r.sunrisePage(s, s.sunrise, s.sunriseFace)
+		} else if s.slideshowScreensaver != nil {
 			r.slideshowScreensaverPage(s)
 		} else if s.nowPlaying {
 			r.nowPlaying(s)
@@ -247,6 +378,9 @@ func (r *renderer) draw(s scene) {
 		}
 	}
 	r.footer(s)
+	if s.strip && s.phase == "idle" && s.sunrise == 0 {
+		r.musicStrip(s)
+	}
 	if s.showDrawer {
 		r.drawer(s)
 	}
@@ -270,7 +404,7 @@ func (r *renderer) volumeBar(s scene) {
 	r.text(r.small, pct, r.w-r.margin-r.width(r.small, pct), top+38, cream)
 }
 
-// timeAndDate draws the hour, AM/PM and date centred, with the hour's baseline at base and an
+// timeAndDate draws the hour, AM/PM and date centered, with the hour's baseline at base and an
 // optional suffix appended to the date line (an alarm note, on the ordinary idle page). Shared by
 // bigClock and the screensaver's normal-size overlay, which wants the clock alone.
 func (r *renderer) timeAndDate(now time.Time, base int, dateSuffix string) {
@@ -278,7 +412,7 @@ func (r *renderer) timeAndDate(now time.Time, base int, dateSuffix string) {
 	ampm := clockSuffix(now)
 	hw := r.width(r.clock, hour)
 	aw := r.width(r.ampm, ampm)
-	gap := 18
+	gap := r.s(18)
 	if ampm == "" {
 		gap = 0
 	}
@@ -287,20 +421,24 @@ func (r *renderer) timeAndDate(now time.Time, base int, dateSuffix string) {
 	r.text(r.ampm, ampm, x+hw+gap, base, amber)
 
 	date := now.Format("Monday, January 2") + dateSuffix
-	r.text(r.small, date, (r.w-r.width(r.small, date))/2, base+70, dim)
+	r.text(r.small, date, (r.w-r.width(r.small, date))/2, base+r.s(70), dim)
 }
 
 // bigClock is the idle screen: the time across the middle, the date beneath, and under that the running
 // timers. With timers the clock moves up to make room. The next alarm, when it is within a day, follows
 // the date.
 func (r *renderer) bigClock(s scene) {
-	base := r.h/2 + 60
+	base := r.h/2 + r.s(60)
 	timers := false
 	for _, t := range s.timers {
 		timers = timers || t.Active
 	}
 	if timers {
-		base -= 36
+		base -= r.s(36)
+	}
+	if s.strip {
+		// The music strip takes the foot of the panel; the clock and date move up out of its way.
+		base -= r.s(30)
 	}
 
 	suffix := ""
@@ -313,41 +451,41 @@ func (r *renderer) bigClock(s scene) {
 	}
 	r.timeAndDate(s.now, base, suffix)
 	if timers {
-		r.timersLine(s, base+128)
+		r.timersLine(s, base+r.s(128))
 	}
 
-	// The weather, top left, when Home Assistant has told us where to look.
-	if w := s.weather; w.Temp != "" || w.Condition != "" {
-		line := w.Temp
-		if c := conditionWords(w.Condition); c != "" {
-			if line != "" {
-				line += "  ·  "
-			}
-			line += c
+	r.weatherCorner(s)
+}
+
+// weatherCorner is the weather where it has always been, top left, with the drawing of it that the
+// forecast page has had all along. The icon is read before the words are: a glance at the corner of
+// a clock is not reading, and the screen already knew how to draw it.
+func (r *renderer) weatherCorner(s scene) {
+	w := s.weather
+	if w.Temp == "" && w.Condition == "" {
+		return
+	}
+	line := w.Temp
+	if c := conditionWords(w.Condition); c != "" {
+		if line != "" {
+			line += "  ·  "
 		}
-		r.text(r.small, line, r.margin, r.margin+26, dim)
+		line += c
 	}
+	x := r.margin
+	if w.Condition != "" && conditionWords(w.Condition) != "" {
+		r.weatherIcon(w.Condition, r.margin+weatherMark/2, r.margin+15, weatherMark)
+		x += weatherMark + 14
+	}
+	r.text(r.small, line, x, r.margin+26, dim)
 }
 
-// conditionWords turns Home Assistant's weather state into words for the screen.
-func conditionWords(c string) string {
-	switch c {
-	case "", "unknown", "unavailable":
-		return ""
-	case "clear-night":
-		return "Clear"
-	case "partlycloudy":
-		return "Partly cloudy"
-	case "lightning-rainy":
-		return "Thunderstorms"
-	case "snowy-rainy":
-		return "Sleet"
-	case "exceptional":
-		return "Severe"
-	}
-	// "sunny", "cloudy", "rainy", "pouring", "fog", "hail", "snowy", "windy", "lightning"…
-	return strings.ToUpper(c[:1]) + c[1:]
-}
+// weatherMark is how big the corner's icon is: the height of the line it sits beside, so it reads as
+// part of it rather than as a picture somebody put there.
+const weatherMark = 46
+
+// conditionWords is home.ConditionWords, by its old name here.
+func conditionWords(c string) string { return home.ConditionWords(c) }
 
 // cornerClock keeps the time in view while words have the screen.
 func (r *renderer) cornerClock(s scene) {
@@ -355,17 +493,25 @@ func (r *renderer) cornerClock(s scene) {
 	r.text(r.small, t, r.w-r.margin-r.width(r.small, t), r.margin+26, dim)
 }
 
+// cornerClockDated is the corner clock with the day under it, for a screen somebody looks at for
+// minutes rather than glances at: while music plays the big clock is gone, and the date went with it.
+func (r *renderer) cornerClockDated(s scene) {
+	r.cornerClock(s)
+	d := s.now.Format("Mon, Jan 2")
+	r.text(r.tiny, d, r.w-r.margin-r.width(r.tiny, d), r.margin+r.s(54), dim)
+}
+
 // status is a phase title with an indicator that breathes while the device waits.
 func (r *renderer) status(s scene, title string, breathe bool) {
 	r.cornerClock(s)
-	r.text(r.title, title, r.margin, 120, amber)
+	r.text(r.title, title, r.margin, r.s(120), amber)
 	if breathe {
 		// A bar under the title, its length rising and falling with a period of 1.6 s.
 		t := float64(s.now.Sub(s.since).Milliseconds()) / 1600
 		f := 0.55 + 0.45*math.Sin(2*math.Pi*t)
 		full := r.w - 2*r.margin
-		draw.Draw(r.dst, image.Rect(r.margin, 140, r.margin+full, 146), image.NewUniform(ember), image.Point{}, draw.Src)
-		draw.Draw(r.dst, image.Rect(r.margin, 140, r.margin+int(float64(full)*f), 146), image.NewUniform(amber), image.Point{}, draw.Src)
+		draw.Draw(r.dst, image.Rect(r.margin, r.s(140), r.margin+full, r.s(146)), image.NewUniform(ember), image.Point{}, draw.Src)
+		draw.Draw(r.dst, image.Rect(r.margin, r.s(140), r.margin+int(float64(full)*f), r.s(146)), image.NewUniform(amber), image.Point{}, draw.Src)
 	}
 }
 
@@ -406,19 +552,84 @@ func (r *renderer) words(heard, reply string, top int) {
 	}
 }
 
-// footer is the bottom edge: what is playing, and whether the microphones are cut.
+// headerH is the strip at the very top of the panel that the header keeps itself inside.
+//
+// Most pages begin their own content at the margin — the weather corner, the corner clock, the
+// ringing page's title all start there — so the header sits above them and no page has to make room
+// for it. Two pages do draw this high: the weather page's art and the settings sheet's card. The
+// weather page is drawn over, which is what the pill is for; the sheet is left alone entirely.
+const headerH = 36
+
+// header is the top edge: what is true of the device whatever page is showing.
+//
+// It is drawn last and over everything, including a call and a ringing alarm. Those are not
+// exceptions to tell somebody about a cut microphone — they are the moments it matters most, since a
+// ringing alarm that cannot hear "stop" looks exactly like one that can.
+//
+// The strip is filled before the words are drawn, so the line stays readable over a photo, a camera
+// view or a sunrise. On an ordinary page that fill is the background and nothing shows but the words.
+func (r *renderer) header(s scene) {
+	// The settings sheet is the one page that says this better itself: it has a Microphone row,
+	// reading "Muted" or "Listening", with the switch that changes it. A strip over the top of the
+	// sheet would say the same thing worse and cut the top off its card.
+	if s.showSheet {
+		return
+	}
+
+	// The microphone is the only thing here so far. It is a switch so the next one has somewhere
+	// obvious to go, and so two of them can never overprint each other.
+	var line string
+	switch {
+	case s.muted:
+		line = "microphone off"
+	default:
+		return
+	}
+
+	// A pill behind the words rather than a band across the panel. The weather page and the sunrise
+	// draw art that reaches the top edge, and a full-width fill cuts a slot through it; a pill only
+	// takes the space the words need, and on a plain page it is the background and does not show.
+	w := r.width(r.tiny, line)
+	pad := r.s(14)
+	x := (r.w - w) / 2
+	r.roundButton(image.Rect(x-pad, r.s(4), x+w+pad, r.s(32)), float64(r.s(14)), walnut)
+	r.text(r.tiny, line, x, r.s(25), amber)
+}
+
+// playingWord is what the footer says about the music: empty when nothing is playing.
+func playingWord(s scene) string {
+	switch {
+	case s.strip:
+		return "" // the strip says it, and the footer is under it
+	case s.playing:
+		return "♪ playing"
+	case s.paused:
+		return "♪ paused"
+	}
+	return ""
+}
+
+// playingButton is where the footer's word for the music sits: the right end of the bottom edge. The
+// whole of it is the target, because the word moves when a connected device is named beside it.
+func (r *renderer) playingButton() image.Rectangle {
+	return image.Rect(r.w-r.s(280), r.h-r.s(42), r.w, r.h-r.s(4))
+}
+
+// footer is the bottom edge: what is playing, and what the page underneath is having trouble with.
+//
+// The microphone used to be here. It moved to the header, because the footer is drawn by two of the
+// pages and the microphone is true on all of them.
 func (r *renderer) footer(s scene) {
 	y := r.h - 24
-	if s.muted {
-		r.text(r.tiny, "microphone off", r.margin, y, amber)
-	}
-	var right string
 	switch {
-	case s.playing:
-		right = "♪ playing"
-	case s.paused:
-		right = "♪ paused"
+	case s.setupAsking:
+		r.text(r.tiny, "setup: a browser is asking to be let in", r.margin, y, amber)
+	case s.missed != "":
+		r.text(r.tiny, s.missed, r.margin, y, amber)
+	case s.slideshowTrouble != "":
+		r.text(r.tiny, s.slideshowTrouble, r.margin, y, dim)
 	}
+	right := playingWord(s)
 	if s.bt.Connected != "" {
 		if right != "" {
 			right += "  ·  "

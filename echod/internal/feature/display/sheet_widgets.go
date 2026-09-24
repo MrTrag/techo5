@@ -20,10 +20,10 @@ import (
 // The settings screen's parts, shared by the Show and the Spot: its categories, rows and their
 // controls, lists of choices, scrolling, the zones taps are matched to, and the anti-aliased shapes
 // they are drawn from. Every shape is a rounded rectangle, circle or stroke with soft shadows,
-// drawn from the five palette colours, so it follows whichever theme is in force.
+// drawn from the five palette colors, so it follows whichever theme is in force.
 
 // The palette the settings screen draws with: the ground, the accent, text, dim text and rules. The
-// Show sets them from its theme (applyTheme); the Spot from its own colours.
+// Show sets them from its theme (applyTheme); the Spot from its own colors.
 var (
 	walnut = color.RGBA{0x1c, 0x15, 0x11, 0xff}
 	amber  = color.RGBA{0xe9, 0xa2, 0x3b, 0xff}
@@ -49,7 +49,50 @@ type paint struct {
 	// indicator follows the circle's edge.
 	fc    *sheetFaces
 	round bool
+
+	// The drawn dashboard's tiles where they were last drawn, and how far it can scroll.
+	dashTiles   []dashTile
+	dashContent int
+
+	// sNum and sDen scale this screen's fixed sizes against the panel the layout was drawn for. The
+	// Echo Show 5 is that panel and stays 1:1; the Show 8 is 4:3 of it across.
+	//
+	// Positions taken from w and h need no scaling and must not be given any — they already land in
+	// the right place on any panel, and that is most of this layout. What needs it is everything
+	// absolute: a padding, a row height, a corner radius, the thickness of a line, the size of a
+	// piece of text. Zero means 1:1, so a paint that never sets these behaves exactly as before.
+	sNum, sDen int
 }
+
+// s scales a fixed size to this screen. Every size written as a literal in this package is in the
+// Show 5's pixels, because that is the panel the layout was drawn on and measured against.
+func (p *paint) s(n int) int {
+	if p.sDen == 0 || p.sNum == p.sDen {
+		return n
+	}
+	if n < 0 {
+		return -((-n*p.sNum + p.sDen/2) / p.sDen)
+	}
+	return (n*p.sNum + p.sDen/2) / p.sDen
+}
+
+// The settings screen's fixed sizes, scaled to the screen in hand. The Base values beside them are
+// the Show 5's, which is the panel every number in this package was chosen on.
+func (p *paint) railW() int       { return p.s(railWBase) }
+func (p *paint) navTop() int      { return p.s(navTopBase) }
+func (p *paint) navH() int        { return p.s(navHBase) }
+func (p *paint) navGap() int      { return p.s(navGapBase) }
+func (p *paint) cardIn() int      { return p.s(cardInBase) }
+func (p *paint) cardRad() float64 { return float64(p.s(cardRadBase)) }
+func (p *paint) headerH() int     { return p.s(headerHBase) }
+func (p *paint) rowH() int        { return p.s(rowHBase) }
+func (p *paint) rowIn() int       { return p.s(rowInBase) }
+
+// scaled reports whether this screen differs from the one the layout was drawn for.
+// sf is s for the float sizes the rounded-shape helpers take: radii, blurs and stroke widths.
+func (p *paint) sf(n int) float64 { return float64(p.s(n)) }
+
+func (p *paint) scaled() bool { return p.sDen != 0 && p.sNum != p.sDen }
 
 // faces is the text sizes the settings parts draw with: the device's own, or the Show's.
 func (r *paint) faces() sheetFaces {
@@ -97,7 +140,7 @@ func (r *paint) wrap(face font.Face, s string, maxW int) []string {
 	return lines
 }
 
-// shift lightens (positive) or darkens (negative) a colour by d per channel.
+// shift lightens (positive) or darkens (negative) a color by d per channel.
 func shift(c color.RGBA, d int) color.RGBA {
 	f := func(v uint8) uint8 {
 		n := int(v) + d
@@ -120,7 +163,7 @@ func dark() bool {
 // The settings screen regrouped by category: a rail of categories on the left with the chosen one
 // raised out of it, and that category's settings on a card floating over the ground. Every shape is
 // an anti-aliased rounded rectangle, circle or stroke with soft shadows, drawn from the theme's five
-// colours, so it follows whichever theme is chosen.
+// colors, so it follows whichever theme is chosen.
 
 type category int
 
@@ -159,7 +202,7 @@ const (
 	ctlButton                      // an action
 	ctlDanger                      // an action to think twice about
 	ctlDays                        // the seven days of the week, each on or off
-	ctlSwatches                    // a strip of colours for one role of the theme
+	ctlSwatches                    // a strip of colors for one role of the theme
 )
 
 type settingRow struct {
@@ -184,7 +227,7 @@ const (
 	partPlus              // a stepper's +
 	partExtra             // the second button a choice can carry (Updates' Check now)
 	partRow               // the row itself, away from its control, on a row with rowTap
-	partDay               // a day of ctlDays, or a colour of ctlSwatches; the zone's opt is which
+	partDay               // a day of ctlDays, or a color of ctlSwatches; the zone's opt is which
 )
 
 type zoneKind int
@@ -247,16 +290,19 @@ func (r *paint) zoneAt(x, y int) (zone, bool) {
 
 func (r *paint) addZone(z zone) { r.pending = append(r.pending, z) }
 
+// These are the settings screen's fixed sizes in the Show 5's pixels, which is the panel this
+// layout was drawn on. Read them through the methods below, which scale them to the screen in
+// hand; nothing should use a Base value directly.
 const (
-	railW   = 244
-	navTop  = 20
-	navH    = 54
-	navGap  = 8
-	cardIn  = 14 // the card's margin from the screen's edges
-	cardRad = 22
-	headerH = 82
-	rowH    = 60
-	rowIn   = 30 // text inset inside the card
+	railWBase   = 244
+	navTopBase  = 20
+	navHBase    = 54
+	navGapBase  = 8
+	cardInBase  = 14 // the card's margin from the screen's edges
+	cardRadBase = 22
+	headerHBase = 82
+	rowHBase    = 60
+	rowInBase   = 30 // text inset inside the card
 )
 
 type sheetFaces struct{ header, label, labelBold, sub, value, nav, navBold, button font.Face }
@@ -266,21 +312,26 @@ var (
 	sheetFace sheetFaces
 )
 
-// faces are the settings screen's own sizes of the Go fonts the rest of the screen uses.
+// faces are the settings screen's own sizes of the Go fonts the rest of the screen uses, at the size
+// the layout was drawn for.
 func faces() sheetFaces {
-	facesOnce.Do(func() {
-		bold, _ := opentype.Parse(gobold.TTF)
-		regular, _ := opentype.Parse(goregular.TTF)
-		f := func(fn *opentype.Font, size float64) font.Face {
-			fc, _ := opentype.NewFace(fn, &opentype.FaceOptions{Size: size, DPI: 72, Hinting: font.HintingFull})
-			return fc
-		}
-		sheetFace = sheetFaces{
-			header: f(bold, 36), label: f(regular, 29), labelBold: f(bold, 29), sub: f(regular, 21),
-			value: f(regular, 25), nav: f(regular, 24), navBold: f(bold, 24), button: f(bold, 23),
-		}
-	})
+	facesOnce.Do(func() { sheetFace = sheetFacesAt(func(n int) int { return n }) })
 	return sheetFace
+}
+
+// sheetFacesAt builds the same set through a scale, for a panel that is not the one these sizes were
+// chosen on. Not cached: a process draws on one screen, so this is built once per renderer.
+func sheetFacesAt(s func(int) int) sheetFaces {
+	bold, _ := opentype.Parse(gobold.TTF)
+	regular, _ := opentype.Parse(goregular.TTF)
+	f := func(fn *opentype.Font, size int) font.Face {
+		fc, _ := opentype.NewFace(fn, &opentype.FaceOptions{Size: float64(s(size)), DPI: 72, Hinting: font.HintingFull})
+		return fc
+	}
+	return sheetFaces{
+		header: f(bold, 36), label: f(regular, 29), labelBold: f(bold, 29), sub: f(regular, 21),
+		value: f(regular, 25), nav: f(regular, 24), navBold: f(bold, 24), button: f(bold, 23),
+	}
 }
 
 // headerAction is a button in the card's header, drawn from the right in order.
@@ -311,27 +362,33 @@ func (r *paint) scrollLimits() (card, pick int) {
 // rowList draws rows down list, inside card, scrolled up by scroll pixels, and returns how far they
 // can scroll. Rows are drawn whole, then what lies above and below the list inside the card's width
 // is put back from under (the frame as it was before the rows), which clips them without clipping
-// every primitive; bg is the card's colour at the list's edges, for the fades.
+// every primitive; bg is the card's color at the list's edges, for the fades.
 func (r *paint) rowList(card, list image.Rectangle, rows []settingRow, scroll int, bg color.RGBA, under []uint8) int {
-	maxScroll := max(len(rows)*rowH-list.Dy(), 0)
+	maxScroll := max(len(rows)*r.rowH()-list.Dy(), 0)
 	scroll = min(max(scroll, 0), maxScroll)
 	mark := len(r.pending)
 	for i, row := range rows {
-		top := list.Min.Y + i*rowH - scroll
-		if top+rowH <= list.Min.Y || top >= list.Max.Y {
+		top := list.Min.Y + i*r.rowH() - scroll
+		if top+r.rowH() <= list.Min.Y || top >= list.Max.Y {
 			continue
 		}
 		r.settingRow(card, top, row)
 		if i < len(rows)-1 {
-			r.rule(card.Min.X+rowIn, card.Max.X-rowIn, top+rowH, 0.6)
+			r.rule(card.Min.X+r.rowIn(), card.Max.X-r.rowIn(), top+r.rowH(), 0.6)
 		}
 	}
 	if maxScroll > 0 {
 		r.restore(under, image.Rect(card.Min.X, 0, card.Max.X, list.Min.Y-1))
 		r.restore(under, image.Rect(card.Min.X, list.Max.Y, card.Max.X, r.h))
-		for i := mark; i < len(r.pending); i++ {
-			r.pending[i].r = r.pending[i].r.Intersect(list)
+		// A row half off the end of the list keeps only the part inside it; one clipped away
+		// entirely is dropped, since a zone with no area is a tap target nobody can hit.
+		kept := r.pending[:mark]
+		for _, z := range r.pending[mark:] {
+			if z.r = z.r.Intersect(list); !z.r.Empty() {
+				kept = append(kept, z)
+			}
 		}
+		r.pending = kept
 		r.scrollHints(list, scroll, maxScroll, bg)
 	}
 	return maxScroll
@@ -442,9 +499,9 @@ func (r *paint) picker(p pickerView, scroll int) int {
 		scroll = 0
 	}
 
-	r.roundShadow(card, cardRad, 26, 10, shadowAlpha()*1.2)
-	r.roundFill(card, cardRad, surface(4), surface(3))
-	r.roundHighlight(card, cardRad)
+	r.roundShadow(card, r.cardRad(), 26, 10, shadowAlpha()*1.2)
+	r.roundFill(card, r.cardRad(), surface(4), surface(3))
+	r.roundHighlight(card, r.cardRad())
 	// The card before its choices go on, to clip a scrolled list back to its window after.
 	var under []uint8
 	if scrolls {
@@ -524,22 +581,22 @@ func (r *paint) settingRow(card image.Rectangle, top int, row settingRow) {
 	if row.bold {
 		face = fc.labelBold
 	}
-	right, cy := card.Max.X-26, top+rowH/2
+	right, cy := card.Max.X-r.s(26), top+r.rowH()/2
 	// The label and its line under it keep clear of the control: on a narrow card they give up their
 	// ends to an ellipsis rather than run under it.
-	room := right - r.controlWidth(row) - 16 - (card.Min.X + rowIn)
+	room := right - r.controlWidth(row) - r.s(16) - (card.Min.X + r.rowIn())
 	row.label, row.sub = r.fit(face, row.label, room), r.fit(fc.sub, row.sub, room)
 	if row.sub == "" {
-		r.text(face, row.label, card.Min.X+rowIn, top+40, cream)
+		r.text(face, row.label, card.Min.X+r.rowIn(), top+r.s(40), cream)
 	} else {
-		r.text(face, row.label, card.Min.X+rowIn, top+30, cream)
-		r.text(fc.sub, row.sub, card.Min.X+rowIn, top+53, dim)
+		r.text(face, row.label, card.Min.X+r.rowIn(), top+r.s(30), cream)
+		r.text(fc.sub, row.sub, card.Min.X+r.rowIn(), top+r.s(53), dim)
 	}
 
-	whole := image.Rect(card.Min.X+8, top, card.Max.X-8, top+rowH)
+	whole := image.Rect(card.Min.X+r.s(8), top, card.Max.X-r.s(8), top+r.rowH())
 	// A value never runs into the label: it keeps its start and loses its end to an ellipsis.
-	labelEnd := card.Min.X + rowIn + max(r.width(face, row.label), r.width(fc.sub, row.sub))
-	fit := func(text string, rightEdge int) string { return r.fit(fc.value, text, rightEdge-labelEnd-24) }
+	labelEnd := card.Min.X + r.rowIn() + max(r.width(face, row.label), r.width(fc.sub, row.sub))
+	fit := func(text string, rightEdge int) string { return r.fit(fc.value, text, rightEdge-labelEnd-r.s(24)) }
 	add := func(r0 image.Rectangle, p part) {
 		if row.id != "" {
 			r.addZone(zone{r: r0, kind: zoneRow, id: row.id, part: p})
@@ -556,7 +613,7 @@ func (r *paint) settingRow(card image.Rectangle, top int, row settingRow) {
 		}
 		if row.rowTap {
 			add(whole, partRow)
-			add(image.Rect(x-14, top, card.Max.X-8, top+rowH), partMain)
+			add(image.Rect(x-14, top, card.Max.X-r.s(8), top+r.rowH()), partMain)
 			break
 		}
 		add(whole, partMain) // the whole row flips the switch: a small target otherwise
@@ -578,7 +635,7 @@ func (r *paint) settingRow(card image.Rectangle, top int, row settingRow) {
 			}
 			r.text(fc.button, name, b.Min.X+(chipW-r.width(fc.button, name))/2, cy+8, ink)
 			if row.id != "" {
-				r.addZone(zone{r: image.Rect(b.Min.X-chipGap/2, top, b.Max.X+chipGap/2, top+rowH), kind: zoneRow, id: row.id, part: partDay, opt: i})
+				r.addZone(zone{r: image.Rect(b.Min.X-chipGap/2, top, b.Max.X+chipGap/2, top+r.rowH()), kind: zoneRow, id: row.id, part: partDay, opt: i})
 			}
 		}
 	case ctlStepper:
@@ -594,7 +651,7 @@ func (r *paint) settingRow(card image.Rectangle, top int, row settingRow) {
 		if row.button != "" {
 			bx := r.pillButton(x-12, cy, row.button, btnSecondary)
 			add(whole, partMain)
-			add(image.Rect(bx-6, top, x-6, top+rowH), partExtra)
+			add(image.Rect(bx-6, top, x-6, top+r.rowH()), partExtra)
 			break
 		}
 		add(whole, partMain)
@@ -610,7 +667,7 @@ func (r *paint) settingRow(card image.Rectangle, top int, row settingRow) {
 		if row.rowTap {
 			add(whole, partMain) // the whole row does what its button does
 		}
-		add(image.Rect(x-8, top+4, card.Max.X-12, top+rowH-4), partMain)
+		add(image.Rect(x-8, top+4, card.Max.X-12, top+r.rowH()-4), partMain)
 	}
 }
 
@@ -646,7 +703,7 @@ func (r *paint) controlWidth(row settingRow) int {
 	return 0
 }
 
-// toggle draws a switch ending at right, centred on cy, and returns its left edge.
+// toggle draws a switch ending at right, centered on cy, and returns its left edge.
 func (r *paint) toggle(right, cy int, on bool) int {
 	track := image.Rect(right-66, cy-17, right, cy+17)
 	if on {
@@ -706,36 +763,54 @@ const (
 	btnDanger                       // an action to think twice about
 )
 
-// danger is the colour of an action to think twice about, whatever the theme.
+// danger is the color of an action to think twice about, whatever the theme.
 var danger = color.RGBA{0xe5, 0x48, 0x4d, 0xff}
+
+// roundButton fills a rounded button in one color, lit and shadowed the way every raised thing on
+// these screens is. Separate from buttonFace because a few answers carry a color of their own that
+// means something — the phone's red and green — rather than taking the theme's accent.
+func (r *paint) roundButton(b image.Rectangle, rad float64, fill color.RGBA) {
+	r.roundShadow(b, rad, 8, 3, shadowAlpha()*0.8)
+	r.roundFill(b, rad, shift(fill, 14), shift(fill, -14))
+	r.roundHighlight(b, rad)
+}
+
+// buttonFace draws a button's shape and returns the color its label should be drawn in.
+//
+// Size and radius are the caller's, because a button is the same thing whether it is the pill on a
+// settings row or one of the two large answers on the setup page. Drawing them from one place is
+// what keeps them looking like the same control: the Show's answers used to be square beveled
+// boxes and looked like they belonged to another program.
+func (r *paint) buttonFace(b image.Rectangle, rad float64, style buttonStyle) color.RGBA {
+	switch style {
+	case btnPrimary:
+		r.roundButton(b, rad, amber)
+		return onAccent()
+	case btnSecondary:
+		r.roundShadow(b, rad, 6, 2, shadowAlpha()*0.5)
+		r.roundFill(b, rad, surface(6), surface(4))
+		r.roundStroke(b, rad, 1, ember)
+		r.roundHighlight(b, rad)
+	case btnDanger:
+		r.roundFill(b, rad, surface(4), surface(3))
+		r.roundStroke(b, rad, 1.6, danger)
+		return danger
+	}
+	return cream
+}
 
 // pillButton draws an action ending at right and returns its left edge.
 func (r *paint) pillButton(right, cy int, label string, style buttonStyle) int {
 	fc := r.faces()
-	w := r.width(fc.button, label) + 44
-	b := image.Rect(right-w, cy-20, right, cy+20)
-	fg := cream
-	switch style {
-	case btnPrimary:
-		r.roundShadow(b, 20, 8, 3, shadowAlpha()*0.8)
-		r.roundFill(b, 20, shift(amber, 14), shift(amber, -14))
-		r.roundHighlight(b, 20)
-		fg = onAccent()
-	case btnSecondary:
-		r.roundShadow(b, 20, 6, 2, shadowAlpha()*0.5)
-		r.roundFill(b, 20, surface(6), surface(4))
-		r.roundStroke(b, 20, 1, ember)
-		r.roundHighlight(b, 20)
-	case btnDanger:
-		r.roundFill(b, 20, surface(4), surface(3))
-		r.roundStroke(b, 20, 1.6, danger)
-		fg = danger
-	}
-	r.text(fc.button, label, b.Min.X+22, cy+8, fg)
+	w := r.width(fc.button, label) + r.s(44)
+	half := r.s(20)
+	b := image.Rect(right-w, cy-half, right, cy+half)
+	fg := r.buttonFace(b, float64(half), style)
+	r.text(fc.button, label, b.Min.X+r.s(22), cy+r.s(8), fg)
 	return b.Min.X
 }
 
-// icon is a category's line drawing, about 26 pixels across, centred on (cx, cy).
+// icon is a category's line drawing, about 26 pixels across, centered on (cx, cy).
 func (r *paint) icon(c category, cx, cy int, col color.RGBA) {
 	x, y := float64(cx), float64(cy)
 	const w = 2.6
@@ -789,7 +864,7 @@ func shadowAlpha() float64 {
 	return 0.22
 }
 
-// onAccent is text that reads on the accent: the ground on a light accent, the text colour on a dark one.
+// onAccent is text that reads on the accent: the ground on a light accent, the text color on a dark one.
 func onAccent() color.RGBA {
 	if 0.299*float64(amber.R)+0.587*float64(amber.G)+0.114*float64(amber.B) > 128 {
 		return shift(walnut, -8)
@@ -860,7 +935,7 @@ func (r *paint) span(y, x0, x1 int, c color.RGBA) {
 func (r *paint) roundFill(b image.Rectangle, rad float64, top, bottom color.RGBA) {
 	x0, y0, x1, y1 := rectF(b)
 	// Only the corners are worked out a pixel at a time; between them each row is solid. The rows
-	// just outside the top and bottom edges are left alone: no pixel centre there is covered.
+	// just outside the top and bottom edges are left alone: no pixel center there is covered.
 	corner := min(int(math.Ceil(rad))+1, b.Dx()/2)
 	for y := b.Min.Y; y < b.Max.Y; y++ {
 		c := lerp(top, bottom, clamp01((float64(y)-y0)/(y1-y0)))
@@ -933,7 +1008,7 @@ func (r *paint) roundShadowIn(b image.Rectangle, rad, blur float64, dy int, alph
 	}
 }
 
-// rule is a thin horizontal line in the rules colour.
+// rule is a thin horizontal line in the rules color.
 func (r *paint) rule(x0, x1, y int, alpha float64) {
 	for x := x0; x < x1; x++ {
 		r.blendAt(x, y, ember, alpha)

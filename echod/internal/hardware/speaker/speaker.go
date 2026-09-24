@@ -103,6 +103,12 @@ type Player struct {
 	stale  atomic.Bool
 	mono   []float32
 
+	// tone is the listener's own shelves, waiting to be picked up: the chain belongs to the write
+	// loop, so a setting changed from anywhere else is left here and applied there. applied is what
+	// the chain is carrying now, and is the write loop's alone.
+	tone    atomic.Value // asp.Tone
+	applied asp.Tone
+
 	// standby is whether the amplifier rests between sounds. Read by the write loop every period,
 	// so a change from Home Assistant takes effect at once.
 	standby atomic.Bool
@@ -119,6 +125,19 @@ type Player struct {
 
 	mu      sync.Mutex
 	pending []int16 // interleaved stereo waiting to go out
+
+	// bed is a track's audio, queued apart from pending so an answer or an announcement can sound
+	// over it rather than after it: the two are summed as they go out, as a Source is. Same stereo,
+	// same media volume; a track ducks its own samples before they are queued.
+	bed []int16
+
+	// bell is a ring's chime, queued apart from everything else because it goes out at a level of
+	// its own: bellStep rather than the media volume. ringing holds that level for the whole of a
+	// ring rather than only while a chime sounds, so the music under it does not change tuning
+	// between one chime and the next. See fill.
+	bell     []int16
+	bellStep atomic.Int32
+	ringing  atomic.Bool
 
 	// written counts frames handed to the card, which is what a Source places audio against.
 	written atomic.Uint64
@@ -341,7 +360,7 @@ func (p *Player) apply(seq []kctl) {
 	}
 }
 
-// Run feeds the stream until ctx is cancelled, writing silence when nothing is queued.
+// Run feeds the stream until ctx is canceled, writing silence when nothing is queued.
 func (p *Player) Run(ctx context.Context) error {
 	pb, _ := p.device()
 	if pb == nil {
@@ -447,11 +466,25 @@ func (p *Player) wants() bool {
 // send writes one period, putting the same buffer back after an underrun rather than refilling. fill
 // has already taken these frames off the queue, so starting over would play the period after them and
 // lose these.
+//
+// The driver may also take only part of it: a signal that lands mid-write, and the runtime sends one
+// to preempt goroutines, ends the write with however many frames had gone in. The rest follow.
 func (p *Player) send(ctx context.Context, to io.Writer, buf []byte) error {
 	for {
-		_, err := to.Write(buf)
+		n, err := to.Write(buf)
 		if err == nil {
-			return nil
+			if n >= len(buf) {
+				return nil
+			}
+			if n <= 0 {
+				// Nothing taken and nothing wrong would loop here for good.
+				return io.ErrShortWrite
+			}
+			buf = buf[n:]
+			continue
+		}
+		if errors.Is(err, syscall.EINTR) {
+			continue
 		}
 		if err != alsa.ErrUnderrun {
 			return err
@@ -475,6 +508,18 @@ func (p *Player) fill(buf []byte) bool {
 	if len(p.pending) == 0 {
 		p.pending = nil
 	}
+	bedTake := min(len(p.bed), period*Channels)
+	bed := p.bed[:bedTake]
+	p.bed = p.bed[bedTake:]
+	if len(p.bed) == 0 {
+		p.bed = nil
+	}
+	rang := min(len(p.bell), period*Channels)
+	bell := p.bell[:rang]
+	p.bell = p.bell[rang:]
+	if len(p.bell) == 0 {
+		p.bell = nil
+	}
 	p.mu.Unlock()
 
 	// The queue emptied part way through this buffer, so silence is spliced into whatever was
@@ -497,22 +542,41 @@ func (p *Player) fill(buf []byte) bool {
 	// The write loop runs whether or not anything is playing, since the amplifier hisses when nothing
 	// drives the DAC, and tuning silence costs what tuning music costs. The block after the audio stops
 	// still goes through: that is the filter's own length, and it holds the tail.
-	fed := take > 0 || len(rendered) > 0
+	fed := take > 0 || bedTake > 0 || len(rendered) > 0 || rang > 0
 	drain := fed || p.fed
 	p.fed = fed
 
 	// The tuning is for the driver, so the line-out is left with what it was sent.
 	tuned := mono && p.chain != nil && p.on.Load() && drain
 
-	// The vendor's volume is two halves: the gain its EQ bucket carries, in front of the tuning, and
-	// the curve's attenuation after it. Without this half the tuning runs at its quietest calibration
-	// however far up the dial it is.
-	makeup := float32(1)
-	if tuned {
-		makeup = float32(p.tuning.Makeup(float64(p.step.Load()) / VolumeSteps))
+	// There is one gain after the tuning, so two levels are made from it: the output goes at the
+	// louder of the two, and whichever lane is quieter is scaled down by the difference before the
+	// mix. The music comes out at the media volume either way, and a muted one stays muted under
+	// the alarm. On the tuned path the compressor narrows that difference a little, since it works
+	// on the sum; the lane that sets the output level is exact.
+	gain, step := p.Volume(), int(p.step.Load())
+	mediaK, bellK := float32(1), float32(0)
+	if rang > 0 || p.ringing.Load() {
+		bs := int(p.bellStep.Load())
+		bg := p.gainFor(bs)
+		if bg > gain {
+			mediaK, bellK, gain, step = gain/bg, 1, bg, bs
+		} else if gain > 0 {
+			bellK = bg / gain
+		}
 	}
 
-	gain := p.Volume()
+	// The vendor tunes by volume: each bucket has a filter of its own, and on the Show the quiet ones
+	// carry more bass and treble rather than simply less of everything. Telling the chain where the
+	// dial is picks the one it meant.
+	if tuned {
+		p.chain.Volume(float64(step) / VolumeSteps)
+		if want, ok := p.tone.Load().(asp.Tone); ok && want != p.applied {
+			p.chain.SetTone(want)
+			p.applied = want
+		}
+	}
+
 	for i, j := 0, 0; i < period*Channels; i, j = i+Channels, j+1 {
 		var l, r int32
 		if i < len(chunk) {
@@ -521,18 +585,35 @@ func (p *Player) fill(buf []byte) bool {
 		if i+1 < len(chunk) {
 			r = int32(chunk[i+1])
 		}
+		if i < len(bed) {
+			l += int32(bed[i])
+		}
+		if i+1 < len(bed) {
+			r += int32(bed[i+1])
+		}
 		if i < len(rendered) {
 			l += int32(rendered[i])
 		}
 		if i+1 < len(rendered) {
 			r += int32(rendered[i+1])
 		}
+		if mediaK != 1 || bellK != 0 {
+			var bl, br float32
+			if i < len(bell) {
+				bl = float32(bell[i])
+			}
+			if i+1 < len(bell) {
+				br = float32(bell[i+1])
+			}
+			l = int32(float32(l)*mediaK + bl*bellK)
+			r = int32(float32(r)*mediaK + br*bellK)
+		}
 		if mono {
 			l = (l + r) / 2
 			r = l
 		}
 		if tuned {
-			p.mono[j] = float32(clamp(l)) / full * makeup
+			p.mono[j] = float32(clamp(l)) / full
 			continue
 		}
 		binary.LittleEndian.PutUint16(buf[i*2:], uint16(limit(float32(l)*OutputBoost*gain)))
@@ -657,6 +738,16 @@ func (p *Player) SetASP(on bool) bool {
 	}
 	p.on.Store(on)
 	return on
+}
+
+// SetTone hands the write loop the listener's own shelves. It is the tuning's own stage, so it does
+// nothing on a device playing untuned — there is no chain to put it in.
+func (p *Player) SetTone(t asp.Tone) { p.tone.Store(t) }
+
+// Tone is what the shelves are set to.
+func (p *Player) Tone() asp.Tone {
+	t, _ := p.tone.Load().(asp.Tone)
+	return t
 }
 
 // ASP reports whether the driver tuning is being applied.
@@ -807,6 +898,43 @@ func (p *Player) SetVolume(step int) {
 	p.volume.Store(math.Float32bits(gainForStep(p.Output(), step)))
 }
 
+// gainFor is the linear gain for a step on whatever the audio is going to now.
+func (p *Player) gainFor(step int) float32 {
+	step = max(0, min(step, VolumeSteps))
+	if p.sink.Load() != nil {
+		return sinkGain(step)
+	}
+	return gainForStep(p.Output(), step)
+}
+
+// Bell mixes a ring's chime into the bell's own queue, to go out at step rather than at the media
+// volume. Dropped with no device, as Play drops.
+func (p *Player) Bell(step int, level float64, notes ...Note) {
+	if pb, _ := p.device(); pb == nil {
+		return
+	}
+	var out []int16
+	for _, n := range notes {
+		out = append(out, tone(n, level)...)
+	}
+	p.bellStep.Store(int32(max(0, min(step, VolumeSteps))))
+	p.mu.Lock()
+	p.bell = mix(p.bell, out)
+	p.mu.Unlock()
+}
+
+// Ringing holds the bell's level for as long as a ring lasts, and ending it drops any chime still
+// queued, so a ring stopped mid-chime goes quiet at once.
+func (p *Player) Ringing(on bool, step int) {
+	p.bellStep.Store(int32(max(0, min(step, VolumeSteps))))
+	p.ringing.Store(on)
+	if !on {
+		p.mu.Lock()
+		p.bell = nil
+		p.mu.Unlock()
+	}
+}
+
 // Step is the current volume step.
 func (p *Player) Step() int { return int(p.step.Load()) }
 
@@ -840,4 +968,56 @@ func (p *Player) Close() error {
 		_ = hold.Close()
 	}
 	return err
+}
+
+// Bed is the Player's queue for a track, apart from the one replies and announcements use, so the two
+// sound together. It has the queue's own methods, and a track is written as if it had the speaker to
+// itself: Queued counts only the track, and draining one leaves the other alone.
+type Bed struct{ p *Player }
+
+// Bed is the track's queue.
+func (p *Player) Bed() *Bed { return &Bed{p: p} }
+
+// Play queues interleaved stereo samples, dropped as Player.Play drops them with no device.
+func (b *Bed) Play(samples []int16) {
+	p := b.p
+	if pb, _ := p.device(); pb == nil {
+		if n := p.deaf.Add(1); n == 1 || n%100 == 0 {
+			slog.Warn("audio dropped, no playback device", "times", n)
+		}
+		return
+	}
+	p.mu.Lock()
+	p.bed = append(p.bed, samples...)
+	p.mu.Unlock()
+}
+
+// Take empties the track's queue and hands back what had not been played.
+func (b *Bed) Take() []int16 {
+	b.p.mu.Lock()
+	defer b.p.mu.Unlock()
+	bed := b.p.bed
+	b.p.bed = nil
+	return bed
+}
+
+// Adjust rewrites the track's queue in place.
+func (b *Bed) Adjust(rewrite func([]int16)) {
+	b.p.mu.Lock()
+	defer b.p.mu.Unlock()
+	rewrite(b.p.bed)
+}
+
+// Queued is how many frames of the track are waiting.
+func (b *Bed) Queued() int {
+	b.p.mu.Lock()
+	defer b.p.mu.Unlock()
+	return len(b.p.bed) / Channels
+}
+
+// Drain discards the track's queue.
+func (b *Bed) Drain() {
+	b.p.mu.Lock()
+	b.p.bed = nil
+	b.p.mu.Unlock()
 }

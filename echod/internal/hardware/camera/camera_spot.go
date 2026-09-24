@@ -11,7 +11,7 @@
 // pixel clock select doubles every sample), and both sync polarities at 0.
 //
 // Frames are 640x480 RGGB at about 30 a second. Every other one is demosaiced (bilinear) to RGBA with
-// grey-world white balance and levels; the sensor's automatic exposure is off in its init table, so
+// gray-world white balance and levels; the sensor's automatic exposure is off in its init table, so
 // the loop here sets shutter and gain.
 package camera
 
@@ -21,6 +21,7 @@ import (
 	"image"
 	"log/slog"
 	"math"
+	"runtime"
 	"syscall"
 	"time"
 	"unsafe"
@@ -228,9 +229,12 @@ func open() (*device, error) {
 	d.setupISP()
 	setupParallel(d.sen, d.mipi)
 
-	var window, config [256]byte
-	ctl := [4]uint32{socketSub, 0, uint32(uintptr(unsafe.Pointer(&window[0]))), uint32(uintptr(unsafe.Pointer(&config[0])))}
-	if err := ioctl(d.sens, ioc(3, sensMagic, nrControl, 16), unsafe.Pointer(&ctl[0])); err != nil {
+	window, config := heapNew[[256]byte](), heapNew[[256]byte]()
+	ctl := [4]uint32{socketSub, 0, ptr32(window), ptr32(config)}
+	err = ioctl(d.sens, ioc(3, sensMagic, nrControl, 16), unsafe.Pointer(&ctl[0]))
+	runtime.KeepAlive(window)
+	runtime.KeepAlive(config)
+	if err != nil {
 		return fail(fmt.Errorf("sensor control: %w", err))
 	}
 	d.shutter, d.gain = 400, 96
@@ -243,13 +247,16 @@ func open() (*device, error) {
 // setFeature is KDIMGSENSORIOC_X_FEATURECONCTROL with one integer parameter (eight bytes: the kernel
 // is 64-bit).
 func (d *device) setFeature(id uint32, v uint64) {
-	var para [8]byte
+	para, size := heapNew[[8]byte](), heapNew[uint32]()
 	for i := range para {
 		para[i] = byte(v >> (8 * i))
 	}
-	size := uint32(len(para))
-	ctl := [4]uint32{socketSub, id, uint32(uintptr(unsafe.Pointer(&para[0]))), uint32(uintptr(unsafe.Pointer(&size)))}
-	if err := ioctl(d.sens, ioc(3, sensMagic, nrFeature, 16), unsafe.Pointer(&ctl[0])); err != nil {
+	*size = uint32(len(para))
+	ctl := [4]uint32{socketSub, id, ptr32(para), ptr32(size)}
+	err := ioctl(d.sens, ioc(3, sensMagic, nrFeature, 16), unsafe.Pointer(&ctl[0]))
+	runtime.KeepAlive(para)
+	runtime.KeepAlive(size)
+	if err != nil {
 		slog.Warn("camera: sensor feature", "id", id, "err", err)
 	}
 }
@@ -305,14 +312,20 @@ func (d *device) allocBuffers() error {
 	if err != nil {
 		return fmt.Errorf("mmap ion buffer: %w", err)
 	}
-	cfg := ionMMData{MMCmd: ionMMConfigBuffer, Config: ionMMConfig{Handle: a.Handle, ModuleID: m4uPortIMGO}}
-	c := ionCustom{Cmd: ionCmdMultimedia, Arg: uint32(uintptr(unsafe.Pointer(&cfg)))}
-	if err := ioctl(d.ion, ioc(3, 'I', 6, unsafe.Sizeof(c)), unsafe.Pointer(&c)); err != nil {
+	cfg := heapNew[ionMMData]()
+	*cfg = ionMMData{MMCmd: ionMMConfigBuffer, Config: ionMMConfig{Handle: a.Handle, ModuleID: m4uPortIMGO}}
+	c := ionCustom{Cmd: ionCmdMultimedia, Arg: ptr32(cfg)}
+	err = ioctl(d.ion, ioc(3, 'I', 6, unsafe.Sizeof(c)), unsafe.Pointer(&c))
+	runtime.KeepAlive(cfg)
+	if err != nil {
 		return fmt.Errorf("ion config buffer: %w", err)
 	}
-	phys := ionSysData{SysCmd: ionSysGetPhys, Phys: ionSysGetPhysP{Handle: a.Handle}}
-	c = ionCustom{Cmd: ionCmdSystem, Arg: uint32(uintptr(unsafe.Pointer(&phys)))}
-	if err := ioctl(d.ion, ioc(3, 'I', 6, unsafe.Sizeof(c)), unsafe.Pointer(&c)); err != nil {
+	phys := heapNew[ionSysData]()
+	*phys = ionSysData{SysCmd: ionSysGetPhys, Phys: ionSysGetPhysP{Handle: a.Handle}}
+	c = ionCustom{Cmd: ionCmdSystem, Arg: ptr32(phys)}
+	err = ioctl(d.ion, ioc(3, 'I', 6, unsafe.Sizeof(c)), unsafe.Pointer(&c))
+	runtime.KeepAlive(phys)
+	if err != nil {
 		return fmt.Errorf("ion get phys: %w", err)
 	}
 	if phys.Phys.PhyAddr == 0 {
@@ -491,7 +504,7 @@ func (d *device) autoExpose(raw []byte) {
 	}
 	ratio := math.Min(math.Max(float64(aeTarget)/float64(max(mean, 1)), 0.5), 2)
 	want := float64(d.shutter*d.gain) * ratio
-	shutter, gain := d.shutter, d.gain
+	var shutter, gain int
 	switch {
 	case want <= float64(aeFrame*aeMinGain):
 		shutter, gain = int(want/aeMinGain), aeMinGain
@@ -519,7 +532,7 @@ func (d *device) autoExpose(raw []byte) {
 
 // ---- conversion ----
 
-// tone is how a frame was levelled.
+// tone is how a frame was leveled.
 type tone struct {
 	gainR, gainB float64
 	black, white int // 8-bit raw levels mapped to black and white
@@ -527,13 +540,13 @@ type tone struct {
 
 // convert demosaics one RGGB frame to RGBA at full size.
 func convert(raw []byte) (*image.RGBA, tone) {
-	t := levels(raw)
-	return demosaic(raw, t), t
+	t := stats(raw)
+	return render(raw, t), t
 }
 
-// levels measures grey-world white balance on the 2x2 cells, and the black and white points from the
+// stats measures gray-world white balance on the 2x2 cells, and the black and white points from the
 // green histogram (0.2 % and 99.5 %).
-func levels(raw []byte) tone {
+func stats(raw []byte) tone {
 	var sumR, sumG, sumB uint64
 	var hist [256]int
 	n := 0
@@ -584,9 +597,9 @@ func (t tone) lut(gain float64) *[1024]uint8 {
 	return &l
 }
 
-// demosaic is bilinear on RGGB: each pixel's missing colours are averaged from its neighbours.
+// render is bilinear on RGGB: each pixel's missing colors are averaged from its neighbors.
 // Values carry two extra bits (times 4) into the lookups.
-func demosaic(raw []byte, t tone) *image.RGBA {
+func render(raw []byte, t tone) *image.RGBA {
 	w, h := sensorW, sensorH
 	lr, lg, lb := t.lut(t.gainR), t.lut(1), t.lut(t.gainB)
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
@@ -644,10 +657,5 @@ func demosaic(raw []byte, t tone) *image.RGBA {
 	return img
 }
 
-// Full is the frame at full size: the same picture as RGBA, which is already the sensor's size.
-func (f *Frame) Full() *image.RGBA {
-	if f.RGBA == nil && f.raw != nil {
-		f.RGBA = demosaic(f.raw, f.tone)
-	}
-	return f.RGBA
-}
+// Full is the frame at full size: the same picture as Image, which is already the sensor's size.
+func (f *Frame) Full() *image.RGBA { return f.Image() }

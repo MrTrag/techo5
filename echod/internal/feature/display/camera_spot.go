@@ -6,7 +6,6 @@ import (
 	"image"
 	"image/color"
 	"math"
-	"strings"
 	"time"
 
 	"github.com/HuskerMinion/techo5/echod/internal/feature/home"
@@ -46,12 +45,6 @@ func stepCamera(current string, by int) {
 	home.Get().ShowCamera(cams[i].Entity, cameraStep)
 }
 
-// aboutGoingHome is "go home", "home screen", "main screen": whatever is up comes down.
-func aboutGoingHome(heard string) bool {
-	h := strings.ToLower(heard)
-	return strings.Contains(h, "go home") || strings.Contains(h, "home screen") || strings.Contains(h, "main screen")
-}
-
 // cameraView fills the circle with the camera's latest frame.
 func (r *roundRenderer) cameraView(s roundScene) {
 	r.clear()
@@ -63,7 +56,7 @@ func (r *roundRenderer) cameraView(s roundScene) {
 		if v.Error != "" {
 			msg = "No picture"
 		}
-		r.centred(r.title, msg, 250, colDim)
+		r.centered(r.title, msg, 250, colDim)
 		if v.Error != "" {
 			r.paragraph(r.small, v.Error, 290, colDim, 2)
 		}
@@ -71,8 +64,8 @@ func (r *roundRenderer) cameraView(s roundScene) {
 	// The name on a dark band near the top, readable over any picture.
 	if v.Name != "" {
 		w := r.width(r.label, v.Name)
-		r.line(float64(centre-w/2-10), 62, float64(centre+w/2+10), 62, 32, color.RGBA{0, 0, 0, 150})
-		r.centred(r.label, v.Name, 69, colText)
+		r.line(float64(center-w/2-10), 62, float64(center+w/2+10), 62, 32, color.RGBA{0, 0, 0, 150})
+		r.centered(r.label, v.Name, 69, colText)
 	}
 }
 
@@ -89,14 +82,14 @@ func (r *roundRenderer) coverCircle(img *image.RGBA, mirror bool) {
 	rr := float64(rimIn) * float64(rimIn)
 	stride := img.Stride
 	for y := 0; y < side; y++ {
-		dy := float64(y) + 0.5 - centre
+		dy := float64(y) + 0.5 - center
 		sy := int(offY + (float64(y)+0.5)*inv)
 		if sy >= sh {
 			sy = sh - 1
 		}
 		row := img.Pix[sy*stride:]
 		for x := 0; x < side; x++ {
-			dx := float64(x) + 0.5 - centre
+			dx := float64(x) + 0.5 - center
 			if dx*dx+dy*dy > rr {
 				continue
 			}
@@ -118,8 +111,8 @@ func (r *roundRenderer) coverCircle(img *image.RGBA, mirror bool) {
 
 // cameraDot is the camera-in-use mark at the top of the rim.
 func (r *roundRenderer) cameraDot() {
-	r.discAt(centre, float64(centre-(rimIn+rimOut)/2), 9, colIconGround)
-	r.discAt(centre, float64(centre-(rimIn+rimOut)/2), 6, colCameraOn)
+	r.discAt(center, float64(center-(rimIn+rimOut)/2), 9, colIconGround)
+	r.discAt(center, float64(center-(rimIn+rimOut)/2), 6, colCameraOn)
 }
 
 // cameraIndex is where entity is on the camera list, or 0.
@@ -139,65 +132,6 @@ func pickCamera(sel int) {
 		return
 	}
 	home.Get().ShowCamera(cams[sel].Entity, cameraStep)
-}
-
-// cameraList is every camera by name, all at once: a tap on one shows it, and the one showing is
-// green. No turning, so what is chosen is never under the finger.
-func (r *roundRenderer) cameraList(s roundScene) {
-	names := make([]string, len(s.cameras))
-	current := -1
-	for i, c := range s.cameras {
-		names[i] = c.Name
-		if c.Entity == s.camera.Entity {
-			current = i
-		}
-	}
-	r.pickList("CAMERAS", names, current, colCameraOn, "No cameras")
-}
-
-// listTop and listRow place n rows of a pick list in the circle: as tall as fits, centred.
-func listGeometry(n int) (top, row int) {
-	row = 40
-	if n > 8 {
-		row = 300 / n
-	}
-	top = centre - n*row/2 + 18
-	return top, row
-}
-
-// listRowAt is which row of n a tap at y is on, or -1.
-func listRowAt(y, n int) int {
-	top, row := listGeometry(n)
-	i := (y - (top - row/2 - 8)) / row
-	if y < top-row/2-8 || i < 0 || i >= n {
-		return -1
-	}
-	return i
-}
-
-// pickList draws a title and rows to tap.
-func (r *roundRenderer) pickList(title string, names []string, current int, col color.RGBA, empty string) {
-	r.clear()
-	top, row := listGeometry(len(names))
-	r.centred(r.label, title, top-row/2-18, col)
-	if len(names) == 0 {
-		r.paragraph(r.body, empty, 240, colDim, 3)
-		return
-	}
-	face := r.body
-	if row < 34 {
-		face = r.small
-	}
-	for i, n := range names {
-		y := top + i*row
-		c := colText
-		if i == current {
-			c = col
-			w := r.width(face, n)
-			r.line(float64(centre-w/2-16), float64(y-8), float64(centre+w/2+16), float64(y-8), float64(row-6), color.RGBA{30, 36, 44, 255})
-		}
-		r.centred(face, clip(face, r, n, 330), y, c)
-	}
 }
 
 // discImage draws img inside a circle of radius rad at (cx, cy), scaled to cover it.
@@ -228,7 +162,7 @@ func (r *roundRenderer) discImage(img *image.RGBA, cx, cy, rad float64) {
 			sx := min(max(int(offX+(float64(x)+0.5-(cx-rad))*inv), 0), sw-1)
 			k := sy*img.Stride + sx*4
 			j := (y*side + x) * 4
-			// Over the ground (premultiplied): a logo's transparent corners keep the face's colour.
+			// Over the ground (premultiplied): a logo's transparent corners keep the face's color.
 			a := uint32(img.Pix[k+3])
 			for c := 0; c < 3; c++ {
 				r.dst.Pix[j+c] = uint8(min(uint32(img.Pix[k+c])+uint32(r.dst.Pix[j+c])*(255-a)/255, 255))

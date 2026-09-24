@@ -22,7 +22,7 @@ func rggb(r, g, b byte) []byte {
 	return raw
 }
 
-// A tinted flat field comes out grey: the white balance evens the channels, and the demosaic fills
+// A tinted flat field comes out gray: the white balance evens the channels, and the demosaic fills
 // every pixel, edges included.
 func TestConvertBalancesAFlatField(t *testing.T) {
 	img, tone := convert(rggb(40, 80, 60))
@@ -33,7 +33,7 @@ func TestConvertBalancesAFlatField(t *testing.T) {
 		j := (p[1]*sensorW + p[0]) * 4
 		r, g, b := int(img.Pix[j]), int(img.Pix[j+1]), int(img.Pix[j+2])
 		if abs(r-g) > 6 || abs(b-g) > 6 {
-			t.Errorf("pixel %v is %d,%d,%d, not grey", p, r, g, b)
+			t.Errorf("pixel %v is %d,%d,%d, not gray", p, r, g, b)
 		}
 	}
 }
@@ -44,11 +44,11 @@ func TestLevels(t *testing.T) {
 	for i := 0; i < sensorW*40; i++ {
 		raw[i] = 200
 	}
-	tn := levels(raw)
+	tn := stats(raw)
 	if tn.white < 150 {
 		t.Errorf("white point %d, want the bright rows near it", tn.white)
 	}
-	if dark := levels(rggb(2, 2, 2)); dark.white-dark.black < 24 {
+	if dark := stats(rggb(2, 2, 2)); dark.white-dark.black < 24 {
 		t.Errorf("a black frame spans %d..%d, want at least 24 levels", dark.black, dark.white)
 	}
 }

@@ -21,6 +21,11 @@ type mbclState struct {
 	bands []*bandState
 	full  *limiter
 	work  [][]float32
+
+	// inGain is the file's own inVol, the system gain in front of the whole compressor, linear. The
+	// Show's tuning puts 13 dB here and the limiters below are set expecting it; dropping it leaves
+	// them idle and the result thin. The Dot's is 0, so this is 1 there.
+	inGain float32
 }
 
 // bandState is one band's compressor followed by its limiter, the comp_ and lim_ settings the file
@@ -30,6 +35,11 @@ type bandState struct {
 	compThreshDB  float64
 	compRatio     float64
 	compGainMinDB float64
+
+	// compGain and limGain are the band's own comp_inVol and lim_inVol, linear: gain in front of the
+	// compressor, and in front of the limiter after it.
+	compGain float32
+	limGain  float32
 
 	env    float64
 	gainDB float64
@@ -79,32 +89,58 @@ func (l *limiter) pushLow(i int, want float64) {
 
 func newMBCL(m mbcl, rate int) (*mbclState, error) {
 	if !m.PreFilterBypass {
-		return nil, fmt.Errorf("asp: %s wants a prefilter we do not have", mbclFile)
+		return nil, fmt.Errorf("asp: this tuning wants a prefilter we do not have")
 	}
 
 	s := &mbclState{
-		split: newCrossover(m.Crossovers, rate),
-		full:  newLimiter(m.Full.LimThresh, millis(m.Full.LimRelease), rate),
+		split:  newCrossover(m.Crossovers, rate),
+		full:   newLimiter(m.Full.LimThresh, millis(m.Full.LimRelease), rate),
+		inGain: float32(dbToLinear(m.InVol)),
 	}
 
+	// A band may ask for no compression, and some firmware says so with a ratio of zero rather than
+	// one. The Echo Show 8 compresses its lower two bands at 3:1 and leaves the upper two alone, in
+	// all three of its playback profiles; its VOIP profile sets all four, so the zeros there are a
+	// choice and not an omission.
+	//
+	// One is the identity: the reduction below works out as (1 - 1/ratio), which is exactly zero at
+	// 1:1, so clamping is the whole of the bypass and the inner loop needs no special case. Zero
+	// itself cannot be let through, because 1/0 is an infinity and the band would ask for infinite
+	// gain. Each band's limiter runs either way, and that is what actually holds the tuning's bass
+	// lift down.
+	compressed := 0
 	for _, b := range m.Bands {
-		if b.CompInVol != 0 || b.LimInVol != 0 {
-			return nil, fmt.Errorf("asp: %s asks for band input gain we do not apply", mbclFile)
-		}
-		if b.CompRatio < 1 {
-			return nil, fmt.Errorf("asp: %s has a compression ratio of %g", mbclFile, b.CompRatio)
+		ratio := b.CompRatio
+		if ratio < 1 {
+			ratio = 1
+		} else {
+			compressed++
 		}
 		s.bands = append(s.bands, &bandState{
 			compThreshDB:  b.CompThresh,
-			compRatio:     b.CompRatio,
+			compRatio:     ratio,
 			compGainMinDB: b.CompGainMin,
+			compGain:      float32(dbToLinear(b.CompInVol)),
+			limGain:       float32(dbToLinear(b.LimInVol)),
 			attack:        smoothing(attack, rate),
 			relCo:         smoothing(millis(b.LimRelease), rate),
 			lim:           newLimiter(b.LimThresh, millis(b.LimRelease), rate),
 		})
 	}
+
+	// A file whose every band is uncompressed is the one this check was written for: the Show 5's
+	// MBCL.cfg sits beside the files its AFE.cfg names, is referenced by none of them, and has every
+	// ratio at zero. Loading it because the name matched would put the tuning's bass lift on the
+	// driver with nothing compressing it at all.
+	if compressed == 0 {
+		return nil, fmt.Errorf("asp: this tuning compresses none of its %d bands", len(m.Bands))
+	}
 	return s, nil
 }
+
+// dbToLinear is a gain in dB as a multiplier; 0 dB is 1, which is what a file that asks for nothing
+// gives.
+func dbToLinear(db float64) float64 { return math.Pow(10, db/20) }
 
 // newLimiter sizes the lookahead and the attack together: the gain has exactly the lookahead to reach
 // what a peak asks for, so it covers almost all of that distance in that many samples.
@@ -156,6 +192,13 @@ func (s *mbclState) process(x []float32) {
 		}
 	}
 
+	// The file's own system gain goes in front of everything: the thresholds below were set with it.
+	if s.inGain != 1 {
+		for i := range x {
+			x[i] *= s.inGain
+		}
+	}
+
 	s.split.process(x, s.work)
 	for i, b := range s.bands {
 		b.process(s.work[i])
@@ -171,8 +214,14 @@ func (s *mbclState) process(x []float32) {
 	s.full.process(x)
 }
 
-// process compresses one band and then holds it under its own ceiling.
+// process compresses one band and then holds it under its own ceiling, with whatever gain the file
+// puts in front of each of those.
 func (b *bandState) process(x []float32) {
+	if b.compGain != 1 {
+		for i := range x {
+			x[i] *= b.compGain
+		}
+	}
 	for i, v := range x {
 		level := b.track(float64(v))
 
@@ -184,6 +233,11 @@ func (b *bandState) process(x []float32) {
 
 		b.gainDB = approach(b.gainDB, want, b.attack, b.relCo)
 		x[i] = float32(float64(v) * math.Pow(10, b.gainDB/20))
+	}
+	if b.limGain != 1 {
+		for i := range x {
+			x[i] *= b.limGain
+		}
 	}
 	b.lim.process(x)
 }

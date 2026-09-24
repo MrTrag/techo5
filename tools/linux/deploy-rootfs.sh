@@ -51,7 +51,11 @@ done
 [ -n "$HOST" ] || [ -n "$KEEP" ] || { echo "HOST is not set: HOST=<the device's address> $0 ..., or $0 --out rootfs.tar.gz" >&2; exit 1; }
 [ -z "$KEEP" ] || [ -z "$ONDEVICE" ] || { echo "--out builds on this computer; it does not go with --on-device" >&2; exit 1; }
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-[ -n "$VERSION" ] || VERSION="dev-$(git -C "$ROOT" rev-parse --short HEAD)-$(date +%Y%m%d%H%M)"
+# The version is stamped into the daemon and reported to Home Assistant, which offers an update
+# whenever it differs from a release's, without asking which is newer. So the default has to rank:
+# 0.0.0-dev.<commit>.<time> sits below every release, where "dev-<commit>-<time>" ranked nowhere at
+# all and left the update card on for good (update.ValidVersion).
+[ -n "$VERSION" ] || VERSION="0.0.0-dev.$(git -C "$ROOT" rev-parse --short HEAD).$(date +%Y%m%d%H%M)"
 STAGE=$ROOT/bin/rootfs-stage
 SSH=(ssh -i "$KEY" -o StrictHostKeyChecking=no "root@$HOST")
 
@@ -70,8 +74,10 @@ if [ -n "${PREBUILT_DAEMON:-}" ]; then
 else
 	(cd "$ROOT/echod" && "$GO" build -tags "$BUILD_TAGS" -trimpath -ldflags "-s -w -X $pkg.Version=$VERSION -X $pkg.GitCommit=$commit -X $pkg.BuildDate=$date" -o "$ROOT/bin/echod-arm" ./cmd/echod)
 fi
+# audioprobe lives in the daemon's module so it shares the daemon's ALSA code rather than a copy of it.
 for c in fbprobe audioprobe rebootto btbridge; do
-	(cd "$ROOT" && "$GO" build -trimpath -ldflags "-s -w" -o "$ROOT/bin/$c-arm" "./cmd/$c")
+	m=$ROOT; [ -d "$ROOT/echod/cmd/$c" ] && m=$ROOT/echod
+	(cd "$m" && "$GO" build -trimpath -ldflags "-s -w" -o "$ROOT/bin/$c-arm" "./cmd/$c")
 done
 unset GOOS GOARCH GOARM CGO_ENABLED
 

@@ -17,9 +17,9 @@ import (
 
 	"github.com/HuskerMinion/techo5/echod/internal/component"
 	"github.com/HuskerMinion/techo5/echod/internal/config"
-	"github.com/HuskerMinion/techo5/echod/internal/feature/alarm"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/media"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/phone"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/ring"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/timer"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/wakeword"
 	"github.com/HuskerMinion/techo5/echod/internal/hardware/buttons"
@@ -52,6 +52,32 @@ var (
 func Get() *Voice {
 	once.Do(func() { shared = build() })
 	return shared
+}
+
+// owner is asked whether the press of the action button happening now belongs to something other
+// than the assistant. It is registered rather than called for, because the only thing that owns a
+// press — the setup page, which a press on the device lets a browser into — sits above this package
+// and cannot be imported from here.
+var owner struct {
+	mu sync.Mutex
+	fn func() bool
+}
+
+// OwnsPress registers something that may own a press of the action button. While it says it does,
+// the press starts no turn: on a device with no screen the press that answers the setup page arrives
+// here as an ordinary tap, and there is nothing else to tell the button apart.
+func OwnsPress(fn func() bool) {
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	owner.fn = fn
+}
+
+// pressOwned is whether the press now being handled is somebody else's.
+func pressOwned() bool {
+	owner.mu.Lock()
+	fn := owner.fn
+	owner.mu.Unlock()
+	return fn != nil && fn()
 }
 
 // build makes the satellite and the conversation together: the satellite's callbacks are the
@@ -90,6 +116,12 @@ func build() *Voice {
 		}
 		switch e.Kind {
 		case buttons.Tap:
+			// The press may not be the assistant's at all: the setup page lets a browser in on a press on
+			// the device, and on a device with no screen there is nothing else to say so. A press meant
+			// for a settings page must not put the microphone on the network.
+			if pressOwned() {
+				return
+			}
 			v.Action()
 		case buttons.Hold:
 			v.ActionHold()
@@ -111,7 +143,7 @@ func (v *Voice) Handle(ctx context.Context, c *esphome.Conn, msg proto.Message) 
 	return v.vs.Handle(ctx, c, msg)
 }
 
-// Run owns the conversation until ctx is cancelled. Nothing happens on a wake word until it is
+// Run owns the conversation until ctx is canceled. Nothing happens on a wake word until it is
 // running.
 func (v *Voice) Run(ctx context.Context) error {
 	v.turn.Run(ctx)
@@ -126,14 +158,31 @@ func (v *Voice) Ready() bool { return v.vs.Subscribed() }
 // Start asks for a turn as if that slot's wake word had fired, which is how detection and the
 // buttons both reach a pipeline. What that means from the phase the conversation is already in is
 // the conversation's decision, not the caller's.
-func (v *Voice) Start(slot int) { v.turn.Start(slot) }
+//
+// A wake word said over a ringing alarm or timer silences it first, the way a button press does:
+// whoever says it at a ringing alarm wants it quiet, and should not have to know the one word that
+// stops it. The turn goes on, over a quiet room, and "stop" in it ends the ring (see stopsRing).
+func (v *Voice) Start(slot int) {
+	if ring.IsSounding() && ring.Silence() {
+		slog.Info("wake word over a ring, silencing it")
+	}
+	v.turn.Start(slot)
+}
 
 // Busy reports whether a turn is running, for anything that has to leave the speaker alone while one
 // is.
 func (v *Voice) Busy() bool { return v.turn.Busy() }
 
+// Cancel stops a turn that is running, for a gesture that turned out to mean something else: the
+// second tap of a double, the way a long hold already undoes the turn its hold began.
+func (v *Voice) Cancel() {
+	if v.turn.Busy() {
+		v.turn.Cancel()
+	}
+}
+
 // Action is the action button: it gives up on whatever is happening, or starts something if nothing
-// is. Cancelling is the more useful half — it is the way out of a turn that is waiting on a pipeline
+// is. Canceling is the more useful half — it is the way out of a turn that is waiting on a pipeline
 // that is not going to answer.
 func (v *Voice) Action() {
 	// A call ringing or up is what the button is for until it is over: it answers or hangs up.
@@ -161,7 +210,7 @@ func (v *Voice) Action() {
 func (v *Voice) Interrupt() {
 	// "<wake word>, stop" over music: the stop word hears "stop" while the turn the wake word opened is
 	// still listening, and it is the music that was meant, not the question that has not been asked.
-	if v.turn.Phase() == phaseListening && !timer.Get().Ringing() && !alarm.Get().Ringing() {
+	if v.turn.Phase() == phaseListening && !ring.IsSounding() {
 		if playing, _ := media.Get().Playing(); playing {
 			slog.Info("stop word after the wake word: pausing the music")
 			v.turn.Cancel()
@@ -169,7 +218,7 @@ func (v *Voice) Interrupt() {
 			return
 		}
 	}
-	if !speaker.Sound().Busy() && !timer.Get().Ringing() && !alarm.Get().Ringing() {
+	if !speaker.Sound().Busy() && !ring.IsSounding() {
 		if playing, _ := media.Get().Playing(); !playing {
 			slog.Debug("stop word ignored, nothing to stop")
 			return
@@ -180,14 +229,14 @@ func (v *Voice) Interrupt() {
 
 // Stop ends whatever the device is doing audibly, and reports whether there was anything to end.
 //
-// One ladder, because there is one meaning: a turn is cancelled, a sound is silenced, a track is
+// One ladder, because there is one meaning: a turn is canceled, a sound is silenced, a track is
 // stopped. The action button falls through to starting a turn when it returns false; a stop word has
 // nothing to fall through to and simply does nothing.
 func (v *Voice) Stop() bool {
 	// Before the turn, because a timer or an alarm ringing over one is what the person is reaching for.
-	stopped := timer.Get().Stop()
-	stopped = alarm.Get().Stop() || stopped
-	if stopped {
+	// Only while one sounds: ring.End also takes down a reminder left on the screen, and that must
+	// not stand in for stopping the music or a turn.
+	if ring.IsSounding() && ring.End() {
 		return true
 	}
 
@@ -206,7 +255,8 @@ func (v *Voice) Stop() bool {
 		media.Get().Pause()
 		return true
 	}
-	return false
+	// Last: a reminder left on the screen, with nothing else going on, is what the press was for.
+	return ring.End()
 }
 
 // ActionHold is holding the action button, which reaches the second assistant. Holding does not

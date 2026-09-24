@@ -18,16 +18,19 @@ import (
 	"golang.org/x/image/math/fixed"
 
 	"github.com/HuskerMinion/techo5/echod/internal/config"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/announce"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/dashboard"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/home"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/phone"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/remind"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/timer"
 )
 
-// The round panel: everything is laid out from its centre, and nothing may sit where the circle
+// The round panel: everything is laid out from its center, and nothing may sit where the circle
 // cuts it off.
 const (
 	side   = 480
-	centre = side / 2
+	center = side / 2
 	rimOut = 236 // outer edge of the status ring
 	rimIn  = 222 // inner edge
 )
@@ -50,17 +53,25 @@ var (
 // ampmGap is the space between the time and its AM/PM.
 const ampmGap = 10
 
-// timeLine draws the time centred on the face at baseline, with its AM/PM beside it in the accent
+// timeLine draws the time centered on the face at baseline, with its AM/PM beside it in the accent
 // the way the Show sets it; on a 24-hour clock the time stands alone.
 func (r *roundRenderer) timeLine(now time.Time, baseline int) {
 	hm := clockHM(now)
-	r.centred(r.clock, hm, baseline, colText)
+	r.centered(r.clock, hm, baseline, colText)
 	if s := clockSuffix(now); s != "" {
-		r.text(r.title, s, centre+r.width(r.clock, hm)/2+ampmGap, baseline, colAccent)
+		r.text(r.title, s, center+r.width(r.clock, hm)/2+ampmGap, baseline, colAccent)
 	}
 }
 
 type roundScene struct {
+	// The dashboard face: whether it is up, how it is shown, and what it shows.
+	showDash   bool
+	dashMode   config.DashboardMode
+	dash       dashboard.View
+	drawn      dashboard.Drawn
+	dashScroll int
+	dashAdjust dashAdjusting
+
 	now          time.Time
 	phase        string // idle, listening, thinking, replying, lingering
 	heard, reply string
@@ -119,6 +130,37 @@ type roundScene struct {
 	slideshowScreensaver *image.RGBA
 	slideshowOverlay     string
 
+	// slideshowTrouble is why the slideshow has no photo, once it has given up looking.
+	slideshowTrouble string
+
+	// missed is a ring that fell due while the device could not sound it, said under the clock.
+	missed string
+
+	// announceReady is whether this house has a word set, announceRecording whether this device is
+	// taking an announcement now, announcePeers how many others are listening, and announcement one
+	// that arrived and is still showing.
+	announceReady     bool
+	announceRecording bool
+	announcePeers     int
+	announcement      announce.Message
+	showAnnouncement  bool
+
+	// reminder is one going off, with showReminder saying so; reminderFrom is the device it was set
+	// on when that was another one, and reminderScroll how far its words are dragged up.
+	reminder       remind.Reminder
+	showReminder   bool
+	reminderFrom   string
+	reminderScroll int
+
+	// setupAsking is a browser waiting to be let into the setup page, said on the face so that a
+	// request for a press is never something only the browser knows about.
+	setupAsking bool
+
+	// sunrise is how far the light before an alarm has come, 0 to 1, and sunriseFace whether the sun
+	// is drawn with a face on it.
+	sunrise     float64
+	sunriseFace bool
+
 	// sheetOpen is the settings screen up, sheetGrid its six categories rather than one; sheet what
 	// it shows.
 	sheetOpen, sheetGrid bool
@@ -129,6 +171,9 @@ type roundRenderer struct {
 	paint                            // the canvas, and the settings screen's tap zones
 	clock, title, body, small, label font.Face
 	tiny                             font.Face
+
+	// reminderMax is how far a reminder's words could scroll in the frame last drawn; under zmu.
+	reminderMax int
 }
 
 func newRoundRenderer(dst *image.RGBA) *roundRenderer {
@@ -161,12 +206,41 @@ func newRoundRenderer(dst *image.RGBA) *roundRenderer {
 func (r *roundRenderer) draw(s roundScene) {
 	draw.Draw(r.dst, r.dst.Rect, image.NewUniform(colBackground), image.Point{}, draw.Src)
 
+	// Muted is drawn last, over whatever the face turns out to be: see mutedRim.
+	defer func() {
+		if s.muted {
+			r.mutedRim()
+		}
+	}()
+
 	if s.call.Phase != phone.Idle {
 		r.callFace(s)
 		return
 	}
 	if s.ringing.any() {
 		r.ringFace(s)
+		return
+	}
+	// A browser waiting to be let in: the answer is a tap here, since this device has no button for
+	// it. Under a call and under a ringing alarm, both of which are somebody already being answered.
+	if s.setupAsking {
+		r.setupAskFace(s)
+		return
+	}
+	// This device taking an announcement, then one that arrived: both take the face, since a circle
+	// has no corner to put them in. Under a call and under a ringing alarm, which wait on somebody.
+	if s.announceRecording {
+		r.recordingFace(s)
+		return
+	}
+	// A reminder over an announcement: it was set for now, for somebody here, and it stays until it
+	// is dealt with, where an announcement goes by itself.
+	if s.showReminder {
+		r.reminderFace(s)
+		return
+	}
+	if s.showAnnouncement {
+		r.announceFace(s)
 		return
 	}
 	if s.sheetOpen {
@@ -182,11 +256,19 @@ func (r *roundRenderer) draw(s roundScene) {
 		r.volume(s)
 	case s.phase == "listening" || s.phase == "thinking" || s.phase == "replying" || s.phase == "lingering":
 		r.conversation(s)
+	case s.showDash:
+		r.dashFace(s)
+		r.rim(s) // the page clears the panel; the rim still says muted or listening
 	case s.nowPlaying:
 		r.nowPlayingFace(s)
 	case s.slideshowScreensaver != nil:
 		r.slideshowScreensaverFace(s)
 	default:
+		if s.sunrise > 0 {
+			// The light before an alarm takes the whole face: the panel is the lamp in the room.
+			r.sunriseFace(s, s.sunrise, s.sunriseFace)
+			break
+		}
 		if s.slideshow != nil {
 			r.slideshowBackground(s.slideshow)
 		}
@@ -200,12 +282,24 @@ func (r *roundRenderer) draw(s roundScene) {
 	}
 }
 
-// rim is the status ring: red while muted, the conversation's colour while one runs, the soonest
+// rim is the status ring: red while muted, the conversation's color while one runs, the soonest
 // timer's time left, or a quiet track.
+// mutedRim says the microphones are cut, over the top of anything.
+//
+// This device has no mute light - its button is the keypad's power key and there is no lamp behind
+// it - so the rim is the only place the state can be seen at all. It used to be drawn with the rest
+// of the rim, which meant it disappeared behind a call, a ringing alarm, the settings sheet and an
+// announcement: every face that takes the whole circle. An announcement was the worst of them,
+// because a house full of devices announcing at each other is exactly when somebody reaches for the
+// mute button and wants to know whether it took.
+func (r *roundRenderer) mutedRim() {
+	r.arc(rimIn, rimOut, 0, 2*math.Pi, colMuted)
+}
+
 func (r *roundRenderer) rim(s roundScene) {
 	switch {
 	case s.muted:
-		r.arc(rimIn, rimOut, 0, 2*math.Pi, colMuted)
+		r.mutedRim()
 	case s.phase == "listening":
 		pulse := 0.55 + 0.45*math.Sin(float64(s.now.UnixMilli())/180)
 		r.arc(rimIn, rimOut, 0, 2*math.Pi, fade(colListening, pulse))
@@ -231,7 +325,7 @@ func (r *roundRenderer) rim(s roundScene) {
 func (r *roundRenderer) clockFace(s roundScene) {
 	now := s.now
 	r.timeLine(now, 240)
-	r.centred(r.small, now.Format("Monday, January 2"), 290, colDim)
+	r.centered(r.small, now.Format("Monday, January 2"), 290, colDim)
 
 	line := 332
 	if weatherLine(s.weather) != "" {
@@ -240,18 +334,27 @@ func (r *roundRenderer) clockFace(s roundScene) {
 	}
 	if len(s.timers) > 0 {
 		t := s.timers[0]
-		r.centred(r.body, "Timer "+clockDuration(t.Left), line, colTimer)
+		r.centered(r.body, "Timer "+clockDuration(t.Left), line, colTimer)
 		line += 34
 	}
+	if s.missed != "" {
+		r.centered(r.small, s.missed, line, colTimer)
+		line += 34
+	}
+	if s.slideshowTrouble != "" {
+		r.centered(r.small, s.slideshowTrouble, line, colDim)
+	}
 	switch {
+	case s.setupAsking:
+		r.centered(r.label, "A BROWSER IS ASKING", 118, colMuted)
 	case s.muted:
-		r.centred(r.label, "MICROPHONE OFF", 118, colMuted)
+		r.centered(r.label, "MICROPHONE OFF", 118, colMuted)
 	case s.btPairing:
-		r.centred(r.label, "BLUETOOTH PAIRING", 118, colBluetooth)
+		r.centered(r.label, "BLUETOOTH PAIRING", 118, colBluetooth)
 	case s.playing:
-		r.centred(r.label, "PLAYING", 118, colDim)
+		r.centered(r.label, "PLAYING", 118, colDim)
 	case s.paused:
-		r.centred(r.label, "PAUSED", 118, colDim)
+		r.centered(r.label, "PAUSED", 118, colDim)
 	}
 }
 
@@ -265,7 +368,7 @@ func (r *roundRenderer) conversation(s roundScene) {
 	}
 	y := 150
 	if title != "" {
-		r.centred(r.title, title, y, col)
+		r.centered(r.title, title, y, col)
 		y += 50
 	}
 	if s.heard != "" {
@@ -286,17 +389,17 @@ func (r *roundRenderer) volume(s roundScene) {
 	const from, span = 1.25 * math.Pi, 1.5 * math.Pi
 	r.arc(170, 190, from, from+span, colTrack)
 	r.arc(170, 190, from, from+span*frac, colListening)
-	r.centred(r.clock, fmt.Sprintf("%d", s.volume), 270, colText)
-	r.centred(r.small, "VOLUME", 320, colDim)
+	r.centered(r.clock, fmt.Sprintf("%d", s.volume), 270, colText)
+	r.centered(r.small, "VOLUME", 320, colDim)
 }
 
 // arc fills the ring between radii r0 and r1 from angle a0 to a1, clockwise from straight up, with
 // a one-pixel soft edge on both circles.
 func (r *roundRenderer) arc(r0, r1 float64, a0, a1 float64, c color.RGBA) {
-	r.ringAt(centre, centre, r0, r1, a0, a1, c)
+	r.ringAt(center, center, r0, r1, a0, a1, c)
 }
 
-// ringAt is arc about any centre.
+// ringAt is arc about any center.
 func (r *roundRenderer) ringAt(cx, cy, r0, r1 float64, a0, a1 float64, c color.RGBA) {
 	full := a1-a0 >= 2*math.Pi-1e-9
 	b := r.dst.Rect
@@ -435,20 +538,20 @@ func (r *roundRenderer) width(face font.Face, s string) int {
 	return font.MeasureString(face, s).Round()
 }
 
-// centred2 is centred about x rather than the middle of the panel.
-func (r *roundRenderer) centred2(face font.Face, s string, x, baseline int, c color.Color) {
+// centered2 is centered about x rather than the middle of the panel.
+func (r *roundRenderer) centered2(face font.Face, s string, x, baseline int, c color.Color) {
 	r.text(face, s, x-r.width(face, s)/2, baseline, c)
 }
 
-func (r *roundRenderer) centred(face font.Face, s string, baseline int, c color.Color) {
+func (r *roundRenderer) centered(face font.Face, s string, baseline int, c color.Color) {
 	if s == "" {
 		return
 	}
-	r.text(face, s, centre-r.width(face, s)/2, baseline, c)
+	r.text(face, s, center-r.width(face, s)/2, baseline, c)
 }
 
 // paragraph wraps s to the width of the circle at each line's height and draws up to maxLines,
-// centred. It returns the baseline after the last line.
+// centered. It returns the baseline after the last line.
 func (r *roundRenderer) paragraph(face font.Face, s string, baseline int, c color.Color, maxLines int) int {
 	lineH := face.Metrics().Height.Round() + 4
 	words := strings.Fields(s)
@@ -467,7 +570,7 @@ func (r *roundRenderer) paragraph(face font.Face, s string, baseline int, c colo
 		if n == maxLines-1 && len(words) > 0 {
 			line += "…"
 		}
-		r.centred(face, line, baseline, c)
+		r.centered(face, line, baseline, c)
 		baseline += lineH
 	}
 	return baseline
@@ -475,11 +578,11 @@ func (r *roundRenderer) paragraph(face font.Face, s string, baseline int, c colo
 
 // chord is the width of the circle at height y.
 func chord(y int) int {
-	dy := float64(y - centre)
-	if math.Abs(dy) >= centre {
+	dy := float64(y - center)
+	if math.Abs(dy) >= center {
 		return 0
 	}
-	return int(2 * math.Sqrt(float64(centre*centre)-dy*dy))
+	return int(2 * math.Sqrt(float64(center*center)-dy*dy))
 }
 
 func clockDuration(d time.Duration) string {

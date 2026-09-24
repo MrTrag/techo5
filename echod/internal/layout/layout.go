@@ -90,7 +90,7 @@ const (
 
 	// TrialProp marks that a process this boot already took an update and has not committed it.
 	// Deliberately not a persist property: it has to survive init restarting echod, which is what
-	// makes a second attempt recognisable, and it has to be forgotten across a reboot, which is what
+	// makes a second attempt recognizable, and it has to be forgotten across a reboot, which is what
 	// gives the boot hook its turn.
 	TrialProp = "echolocal.trial"
 
@@ -121,7 +121,8 @@ const StatePath = StateDir + "/state.json"
 const ModelDir = StateDir + "/models"
 
 // RecordingDir holds the kept turn audio, one WAV and one metadata file per turn, named by turn id.
-const RecordingDir = StateDir + "/recordings"
+// A variable rather than a constant so that a test can keep recordings somewhere harmless.
+var RecordingDir = StateDir + "/recordings"
 
 // MAC normalizes an address into the form Home Assistant compares against, and reports "" for
 // anything that would not identify a device. idme writes twelve hex digits with no separators.
@@ -227,8 +228,8 @@ func Color(productID2, serial string) string {
 	}
 }
 
-// Slug turns a display name into a node name: an mDNS hostname, and the prefix Home Assistant
-// builds entity ids from. "Living Room" becomes "living-room".
+// Slug turns a display name into a node name: the mDNS hostname and the ESPHome node's own name.
+// "Living Room" becomes "living-room". It is not what an entity id is built from — see EntitySlug.
 func Slug(name string) string {
 	var b strings.Builder
 	dash := false

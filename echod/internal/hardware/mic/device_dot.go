@@ -10,6 +10,10 @@ const (
 	// Mics is how many of the nine channels are microphones. ch7 and ch8 are the playback loopback.
 	Mics = 7
 
+	// maxMics is the largest Mics this build has to hold, so the beamformer can size its
+	// arrays at compile time. One device per build here, so it is Mics itself.
+	maxMics = 7
+
 	// RefFirst is the first loopback channel and Refs how many follow it, left then right.
 	RefFirst = 7
 	Refs     = 2
@@ -20,7 +24,7 @@ const (
 
 	// CancelOnMix runs the echo canceller on the mix rather than the center microphone. Measured on a
 	// Dot (techo5-dot docs/microphones.md, 2026-09-15): the average of seven with one canceller heard
-	// speech over music 5.4 dB better than the cancelled center microphone, at the same cost.
+	// speech over music 5.4 dB better than the canceled center microphone, at the same cost.
 	CancelOnMix = true
 )
 
@@ -33,3 +37,6 @@ const MediaService = "media"
 // VendorBeamformer offers the vendor's own beamformer when its coefficients are on the vendor
 // partition: the sets the daemon reads (lib/subband) are the Dot's.
 const VendorBeamformer = true
+
+// resetsOnMute is false: the mute here leaves the converter alone.
+func resetsOnMute() bool { return false }

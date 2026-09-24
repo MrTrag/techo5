@@ -16,6 +16,13 @@ type source struct {
 	days  uint8     // repeating weekdays; with none it rings once, at once if set, else the next hour:min
 	once  time.Time // a fixed moment, for helpers with a date and for snoozes
 	local bool      // set on the device, so ringing a one-off turns it off
+
+	// remind is a reminder, said once rather than rung, and ringOn the other devices it goes to.
+	remind bool
+	ringOn []string
+
+	// sunrise is how many minutes of light come before it, nothing for none.
+	sunrise int
 }
 
 // next is the first time at or after from that s rings, and false if it never will again.
@@ -51,6 +58,26 @@ func due(sources []source, last, now time.Time) []source {
 		out = append(out, s)
 	}
 	return out
+}
+
+// splitSnoozes divides snoozes into those still to come and those whose moment has gone by without
+// them ringing.
+//
+// A one-off whose time is past is not merely late, it is inert: next reports nothing for it ever
+// again, so due skips it, soonest skips it, and nothing removes it. It used to stay in the list for
+// good while the settings sheet drew "Snoozed until" and a time that had been and gone.
+//
+// Being late by itself is not the fault — due may ring something up to stale minutes late, and that
+// one prunes itself by firing. This runs after the firing, so what is left has genuinely missed.
+func splitSnoozes(snoozed []source, now time.Time) (live, missed []source) {
+	for _, s := range snoozed {
+		if s.once.IsZero() || s.once.After(now) {
+			live = append(live, s)
+			continue
+		}
+		missed = append(missed, s)
+	}
+	return live, missed
 }
 
 // soonest is the next ring among sources after now.

@@ -9,7 +9,7 @@
 // map and the dead ends; cmd/camframe is the standalone version of this file.
 //
 // Frames arrive as 1600x1200 packed 10-bit Bayer at about 14 frames a second and are handed out
-// two ways: an 800x600 RGBA made on every frame (one pixel per Bayer cell, grey-world white
+// two ways: an 800x600 RGBA made on every frame (one pixel per Bayer cell, gray-world white
 // balance, a gamma curve) for the live view and the stream, and the packed frame itself, which
 // Full() demosaics to 1600x1200 on demand for stills. The sensor runs only while something holds
 // it (Acquire), and a little longer, so a run of snapshots does not restart it each time.
@@ -21,24 +21,71 @@ import (
 	"image"
 	"log/slog"
 	"math"
+	"runtime"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/HuskerMinion/techo5/echod/internal/layout"
 )
 
+// sensorSpec is what differs between the two Echo Show 5 generations. Everything else — the
+// imgsensor driver that powers the sensor and writes its register table, the CSI-2 receiver, the
+// timing generator, the DMA, the picture pipeline — is the same on both.
+//
+// The 2nd gen (cronos) has an OmniVision OV02B10: 1600x1200 at about 14 frames a second, the first
+// pixel of each Bayer cell red. The 1st gen (checkers) has an OV9734: 1280x720 at up to 30, the
+// first pixel blue, and its own exposure limits (framelength 802 lines less a margin of 4, shutter
+// from 1 line; both from the driver in the kernel source). The gain scale and its 15.5x ceiling are
+// the same on both, and both use one MIPI lane with an 85 ns settle.
+//
+// The Show 8 (crown) has the OV9734 as well, so it takes the same profile. Its own kernel says so
+// while powering the camera up, read off a unit 2026-09-22:
+//
+//	[kdSetDriver] :[0][1][1][ov9734_mipi_raw][32]
+//	[PowerON]pinSetIdx:0, currSensorName: ov9734_mipi_raw
+//
+// Worth recording why this needed saying at all: while a Show 8 was still being read as a 1st gen
+// Show 5, it picked the right sensor by accident. Telling the boards apart is what turned that into
+// a choice someone had to make, and the symptom of making it wrongly is a camera that opens, streams
+// nothing, and times out.
+type sensorSpec struct {
+	w, h       int  // what the sensor hands over
+	outW, outH int  // one pixel per Bayer cell: the live view and the stream
+	minShut    int  // shortest exposure the driver takes, in lines
+	frameLines int  // shutter lines that fit a frame at the sensor's own rate
+	blueFirst  bool // the first pixel of each cell is blue, not red
+}
+
+// hasOV9734 is whether this board carries the OV9734 rather than the OV02B10.
+func hasOV9734() bool { return layout.Checkers() || layout.Crown() }
+
+func pickSensor(ov9734 bool) sensorSpec {
+	if ov9734 {
+		return sensorSpec{w: 1280, h: 720, outW: 640, outH: 360, minShut: 1, frameLines: 798, blueFirst: true}
+	}
+	return sensorSpec{w: 1600, h: 1200, outW: 800, outH: 600, minShut: 4, frameLines: 1200}
+}
+
+var sensor = pickSensor(hasOV9734())
+
 // Width and Height are the frames handed out.
-const Width, Height = 800, 600
+var Width, Height = sensor.outW, sensor.outH
 
 // ---- the hardware ----
 
-const (
-	sensorW, sensorH = 1600, 1200
+var (
+	sensorW, sensorH = sensor.w, sensor.h
 	bytesPerLine     = sensorW * 10 / 8 // packed 10-bit Bayer: four pixels in five bytes
 	frameBytes       = bytesPerLine * sensorH
-	slots            = 3 // DMA targets in rotation: a finished frame rests two periods
+)
+
+const (
+	slots = 3 // DMA targets in rotation: a finished frame rests two periods
 
 	sensMagic   = 'i'
 	nrOpen      = 0
@@ -248,9 +295,12 @@ func open() (*device, error) {
 	setupCSI2(d.sen, d.mipi)
 
 	// Preview mode; the sensor's mode table ends with stream-on.
-	var window, config [256]byte
-	ctl := [4]uint32{sensorMain, 0, uint32(uintptr(unsafe.Pointer(&window[0]))), uint32(uintptr(unsafe.Pointer(&config[0])))}
-	if err := ioctl(d.sens, ioc(3, sensMagic, nrControl, 16), unsafe.Pointer(&ctl[0])); err != nil {
+	window, config := heapNew[[256]byte](), heapNew[[256]byte]()
+	ctl := [4]uint32{sensorMain, 0, ptr32(window), ptr32(config)}
+	err = ioctl(d.sens, ioc(3, sensMagic, nrControl, 16), unsafe.Pointer(&ctl[0]))
+	runtime.KeepAlive(window)
+	runtime.KeepAlive(config)
+	if err != nil {
 		d.close()
 		return nil, fmt.Errorf("sensor control: %w", err)
 	}
@@ -265,13 +315,16 @@ func open() (*device, error) {
 // setFeature is KDIMGSENSORIOC_X_FEATURECONCTROL with one integer parameter. The kernel is 64-bit
 // and reads the parameter as an unsigned long, so eight bytes go over.
 func (d *device) setFeature(id uint32, v uint64) {
-	var para [8]byte
+	para, size := heapNew[[8]byte](), heapNew[uint32]()
 	for i := range para {
 		para[i] = byte(v >> (8 * i))
 	}
-	size := uint32(len(para))
-	ctl := [4]uint32{sensorMain, id, uint32(uintptr(unsafe.Pointer(&para[0]))), uint32(uintptr(unsafe.Pointer(&size)))}
-	if err := ioctl(d.sens, ioc(3, sensMagic, nrFeature, 16), unsafe.Pointer(&ctl[0])); err != nil {
+	*size = uint32(len(para))
+	ctl := [4]uint32{sensorMain, id, ptr32(para), ptr32(size)}
+	err := ioctl(d.sens, ioc(3, sensMagic, nrFeature, 16), unsafe.Pointer(&ctl[0]))
+	runtime.KeepAlive(para)
+	runtime.KeepAlive(size)
+	if err != nil {
 		slog.Warn("camera: sensor feature", "id", id, "err", err)
 	}
 }
@@ -281,15 +334,19 @@ func (d *device) setFeature(id uint32, v uint64) {
 // first — up to a frame at the sensor's rate — then gain, then longer shutters at the cost of
 // frame rate, then the rest of the gain.
 const (
-	aeTarget   = 290 // mean of the 10-bit frame to aim for: a lit room, no clipping to speak of
-	aeDelay    = 3   // frames between changes: a new exposure takes two frames to show
-	aeMinShut  = 4
-	aeFrame    = 1200 // shutter lines that fit a frame at the sensor's own rate
+	aeTarget   = 290  // mean of the 10-bit frame to aim for: a lit room, no clipping to speak of
+	aeDelay    = 3    // frames between changes: a new exposure takes two frames to show
 	aeMaxShut  = 4000 // beyond this the frame rate drops under 5 a second
 	aeMinGain  = 64   // 1x
 	aeMidGain  = 384  // 6x, before trading frame rate
 	aeMaxGain  = 992  // the driver's ceiling, 15.5x
 	aeDeadband = 6    // no change inside target ± this
+)
+
+// The shortest exposure the sensor takes and the lines that fit one of its frames: its own.
+var (
+	aeMinShut = sensor.minShut
+	aeFrame   = sensor.frameLines
 )
 
 func (d *device) autoExpose(bayer []byte) {
@@ -311,12 +368,12 @@ func (d *device) autoExpose(bayer []byte) {
 		ratio = 0.5
 	}
 	want := float64(d.shutter*d.gain) * ratio
-	shutter, gain := d.shutter, d.gain
+	var shutter, gain int
 	switch {
 	case want <= float64(aeFrame*aeMinGain):
 		shutter, gain = int(want/aeMinGain), aeMinGain
 	case want <= float64(aeFrame*aeMidGain):
-		shutter, gain = aeFrame, int(want/aeFrame)
+		shutter, gain = aeFrame, int(want)/aeFrame
 	case want <= float64(aeMaxShut*aeMidGain):
 		shutter, gain = int(want/aeMidGain), aeMidGain
 	default:
@@ -386,14 +443,20 @@ func (d *device) allocBuffers() error {
 	if err != nil {
 		return fmt.Errorf("mmap ion buffer: %w", err)
 	}
-	cfg := ionMMData{MMCmd: ionMMConfigBuffer, Config: ionMMConfig{Handle: a.Handle, ModuleID: m4uPortIMGO}}
-	c := ionCustom{Cmd: ionCmdMultimedia, Arg: uint32(uintptr(unsafe.Pointer(&cfg)))}
-	if err := ioctl(d.ion, ioc(3, 'I', 6, unsafe.Sizeof(c)), unsafe.Pointer(&c)); err != nil {
+	cfg := heapNew[ionMMData]()
+	*cfg = ionMMData{MMCmd: ionMMConfigBuffer, Config: ionMMConfig{Handle: a.Handle, ModuleID: m4uPortIMGO}}
+	c := ionCustom{Cmd: ionCmdMultimedia, Arg: ptr32(cfg)}
+	err = ioctl(d.ion, ioc(3, 'I', 6, unsafe.Sizeof(c)), unsafe.Pointer(&c))
+	runtime.KeepAlive(cfg)
+	if err != nil {
 		return fmt.Errorf("ion config buffer: %w", err)
 	}
-	phys := ionSysData{SysCmd: ionSysGetPhys, Phys: ionSysGetPhysP{Handle: a.Handle}}
-	c = ionCustom{Cmd: ionCmdSystem, Arg: uint32(uintptr(unsafe.Pointer(&phys)))}
-	if err := ioctl(d.ion, ioc(3, 'I', 6, unsafe.Sizeof(c)), unsafe.Pointer(&c)); err != nil {
+	phys := heapNew[ionSysData]()
+	*phys = ionSysData{SysCmd: ionSysGetPhys, Phys: ionSysGetPhysP{Handle: a.Handle}}
+	c = ionCustom{Cmd: ionCmdSystem, Arg: ptr32(phys)}
+	err = ioctl(d.ion, ioc(3, 'I', 6, unsafe.Sizeof(c)), unsafe.Pointer(&c))
+	runtime.KeepAlive(phys)
+	if err != nil {
 		return fmt.Errorf("ion get phys: %w", err)
 	}
 	if phys.Phys.PhyAddr == 0 {
@@ -454,9 +517,9 @@ func (d *device) setupISP() {
 	cam.wr(regImgoFbc, 0)
 	cam.wr(regImgoBase, d.mva)
 	cam.wr(regImgoOfst, 0)
-	cam.wr(regImgoXsize, bytesPerLine-1)
-	cam.wr(regImgoYsize, sensorH-1)
-	cam.wr(regImgoStride, bytesPerLine)
+	cam.wr(regImgoXsize, uint32(bytesPerLine-1))
+	cam.wr(regImgoYsize, uint32(sensorH-1))
+	cam.wr(regImgoStride, uint32(bytesPerLine))
 	cam.wr(regCtlImgoSize, uint32(sensorW)<<16|uint32(sensorH))
 	if cam.rd(regImgoCon) == 0 {
 		cam.wr(regImgoCon, 0x80000040)
@@ -576,7 +639,7 @@ func (d *device) skip() bool { return false }
 
 // ---- conversion ----
 
-// tone is how a frame was levelled: white balance gains and the value that maps to white.
+// tone is how a frame was leveled: white balance gains and the value that maps to white.
 type tone struct {
 	gainR, gainB float64
 	white        int     // on the 11-bit scale of a summed green pair
@@ -596,54 +659,70 @@ func unpackLine(line []byte, dst []uint16) {
 	}
 }
 
-// convert turns one packed frame into an 800x600 RGBA picture: one pixel per RGGB cell (the
-// two greens summed), grey-world white balance, the darkest 0.1% at black (within reason), the top
-// percentile at white, gamma 1/1.8 or steeper for a backlit frame. The tone it settled on comes back for Full.
+// convert turns one packed frame into a half-size RGBA picture and the tone it was leveled with.
 func convert(raw []byte) (*image.RGBA, tone) {
-	img := image.NewRGBA(image.Rect(0, 0, Width, Height))
-	cells := make([]uint16, Width*Height*3)
+	t := stats(raw)
+	return render(raw, t), t
+}
+
+// stats levels one frame: gray-world white balance, the darkest 0.1% at black (within reason), the
+// top percentile at white, gamma 1/1.8 or steeper for a backlit frame.
+func stats(raw []byte) tone { return sample(raw, statsStep) }
+
+// statsStep is how many cells the measurement moves on by. Levels and white balance come from a
+// sixteenth of the frame; sampling every cell measures the same picture for four times the work.
+const statsStep = 2
+
+func sample(raw []byte, step int) tone {
 	row0 := make([]uint16, sensorW)
 	row1 := make([]uint16, sensorW)
-	var sumR, sumG, sumB uint64
-	var hist, centre [2048]int
-	for y := 0; y < Height; y++ {
+	var sumR, sumG, sumB uint32
+	var hist, center [2048]int
+	taken, middle := 0, 0
+	for y := 0; y < Height; y += step {
 		unpackLine(raw[(2*y)*bytesPerLine:(2*y+1)*bytesPerLine], row0)
 		unpackLine(raw[(2*y+1)*bytesPerLine:(2*y+2)*bytesPerLine], row1)
-		for x := 0; x < Width; x++ {
+		down := y >= Height/4 && y < Height*3/4
+		for x := 0; x < Width; x += step {
 			r := row0[2*x]
 			g := row0[2*x+1] + row1[2*x]
 			b := row1[2*x+1]
-			i := (y*Width + x) * 3
-			cells[i], cells[i+1], cells[i+2] = r<<1, g, b<<1
-			sumR += uint64(r)
-			sumG += uint64(g)
-			sumB += uint64(b)
+			if sensor.blueFirst {
+				r, b = b, r
+			}
+			sumR += uint32(r)
+			sumG += uint32(g)
+			sumB += uint32(b)
 			hist[g]++
-			if x >= Width/4 && x < Width*3/4 && y >= Height/4 && y < Height*3/4 {
-				centre[g]++
+			taken++
+			if down && x >= Width/4 && x < Width*3/4 {
+				center[g]++
+				middle++
 			}
 		}
 	}
-	n := float64(Width * Height)
+	n := float64(taken)
 	t := tone{gainR: 1, gainB: 1, white: 1, gamma: gammaNormal}
 	avgR, avgG, avgB := float64(sumR)*2/n, float64(sumG)/n, float64(sumB)*2/n
 	if avgR > 1 && avgB > 1 {
-		t.gainR, t.gainB = avgG/avgR, avgG/avgB
+		// Quantised so a steady scene keeps asking for the tables it already has.
+		t.gainR = math.Round(avgG/avgR*256) / 256
+		t.gainB = math.Round(avgG/avgB*256) / 256
 	}
 	seen, low := 0, -1
 	for v := 0; v < len(hist); v++ {
 		seen += hist[v]
-		if low < 0 && seen >= int(n)/1000 {
+		if low < 0 && seen >= taken/1000 {
 			low = v
 		}
-		if seen >= int(n)*99/100 {
+		if seen >= taken*99/100 {
 			t.white = v
 			break
 		}
 	}
-	median, half := 0, (Width/2)*(Height/2)/2
-	for v, seen := 0, 0; v < len(centre); v++ {
-		if seen += centre[v]; seen >= half {
+	median, half := 0, middle/2
+	for v, seen := 0, 0; v < len(center); v++ {
+		if seen += center[v]; seen >= half {
 			median = v
 			break
 		}
@@ -653,19 +732,44 @@ func convert(raw []byte) (*image.RGBA, tone) {
 	}
 	t.gamma = gammaFor(median, t.white)
 	t.black = blackFor(low, t.white)
-	luts := t.tables()
-	for i, j := 0, 0; i < len(cells); i, j = i+3, j+4 {
-		img.Pix[j] = luts[0][cells[i]]
-		img.Pix[j+1] = luts[1][cells[i+1]]
-		img.Pix[j+2] = luts[2][cells[i+2]]
-		img.Pix[j+3] = 255
+	return t
+}
+
+// render paints the half-size picture: one pixel per Bayer cell, the two greens summed.
+func render(raw []byte, t tone) *image.RGBA {
+	img := image.NewRGBA(image.Rect(0, 0, Width, Height))
+	lut := t.tables()
+	row0 := make([]uint16, sensorW)
+	row1 := make([]uint16, sensorW)
+	for y := 0; y < Height; y++ {
+		unpackLine(raw[(2*y)*bytesPerLine:(2*y+1)*bytesPerLine], row0)
+		unpackLine(raw[(2*y+1)*bytesPerLine:(2*y+2)*bytesPerLine], row1)
+		pix := img.Pix[y*img.Stride:]
+		for x := 0; x < Width; x++ {
+			r := row0[2*x]
+			g := row0[2*x+1] + row1[2*x]
+			b := row1[2*x+1]
+			if sensor.blueFirst {
+				r, b = b, r
+			}
+			j := x * 4
+			pix[j] = lut[0][r<<1]
+			pix[j+1] = lut[1][g]
+			pix[j+2] = lut[2][b<<1]
+			pix[j+3] = 255
+		}
 	}
-	return img, t
+	return img
 }
 
 // tables are per-channel lookups from an 11-bit level to an 8-bit output: gain, scale to white,
 // gamma.
 func (t tone) tables() *[3][2048]uint8 {
+	lutCache.Lock()
+	defer lutCache.Unlock()
+	if lutCache.built != nil && lutCache.t == t {
+		return lutCache.built
+	}
 	var lut [3][2048]uint8
 	for ch, gain := range []float64{t.gainR, 1, t.gainB} {
 		for v := 0; v < 2048; v++ {
@@ -679,15 +783,24 @@ func (t tone) tables() *[3][2048]uint8 {
 			lut[ch][v] = uint8(math.Pow(f, t.gamma)*255 + 0.5)
 		}
 	}
+	lutCache.t, lutCache.built = t, &lut
 	return &lut
 }
 
+var lutCache struct {
+	sync.Mutex
+	t     tone
+	built *[3][2048]uint8
+}
+
 // Full demosaics the frame at the sensor's own 1600x1200: bilinear, each pixel's missing two
-// colours averaged from its neighbours, levelled the way the half-size picture was. It costs a
+// colors averaged from its neighbors, leveled the way the half-size picture was. It costs a
 // few hundred milliseconds on this SoC, so it is for stills, not the stream.
 func (f *Frame) Full() *image.RGBA {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.raw == nil {
-		return f.RGBA
+		return f.rgba
 	}
 	w, h := sensorW, sensorH
 	px := make([]uint16, w*h)
@@ -707,7 +820,7 @@ func (f *Frame) Full() *image.RGBA {
 		}
 		return uint32(px[y*w+x])
 	}
-	luts := f.tone.tables()
+	luts := f.level().tables()
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
@@ -730,6 +843,9 @@ func (f *Frame) Full() *image.RGBA {
 				b = c
 				g = (at(x-1, y) + at(x+1, y) + at(x, y-1) + at(x, y+1)) / 4
 				r = (at(x-1, y-1) + at(x+1, y-1) + at(x-1, y+1) + at(x+1, y+1)) / 4
+			}
+			if sensor.blueFirst {
+				r, b = b, r
 			}
 			// The tables run on the 11-bit scale of a summed green pair; single samples double up.
 			j := (y*w + x) * 4

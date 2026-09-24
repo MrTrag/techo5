@@ -62,7 +62,7 @@ func (g *Group) Add(svc Service, opts ...Option) {
 	})
 }
 
-// Run starts everything and blocks until ctx is cancelled and every service has stopped.
+// Run starts everything and blocks until ctx is canceled and every service has stopped.
 //
 // A required service that cannot be acquired is fatal: Run returns its error without starting what
 // follows, because a device missing something it cannot work without is better off restarting than
@@ -136,6 +136,16 @@ func run(ctx context.Context, svc Service) (err error) {
 	return svc.Run(ctx)
 }
 
+// ErrRestart is a service asking to be started again. It is not a fault: the supervisor restarts it
+// from the shortest delay, without walking the backoff up and without an error in the log.
+//
+// It exists because some services stop on purpose. The capture service is the one that does: on a
+// board whose mute latch resets the microphone chip, the daemon hands the capture device back so the
+// stream can be opened again, and the read already waiting in the kernel fails as the descriptor
+// goes. That read error is the mechanism working, not a crash, and reporting it as a crash both
+// misleads whoever reads the log and counts against a service that is behaving.
+var ErrRestart = errors.New("restart requested")
+
 // supervise runs one service, restarting it if that is its policy.
 func (g *Group) supervise(ctx context.Context, e *entry) {
 	wait := e.policy.backoff
@@ -165,27 +175,55 @@ func (g *Group) supervise(ctx context.Context, e *entry) {
 			return
 		}
 
+		// Asked for rather than fallen over: see ErrRestart.
+		asked := errors.Is(err, ErrRestart)
+
 		// A service that stayed up a good while is having a bad moment rather than a bad life, so it
-		// starts again from the shortest delay.
-		if ran >= e.policy.steady {
+		// starts again from the shortest delay. So does one that asked to be restarted.
+		if asked || ran >= e.policy.steady {
 			wait = e.policy.backoff
 		}
 
-		e.set(StateRetrying, err)
-		slog.Error("service failed, restarting", "service", e.svc.Name(),
-			"err", err, "ran", ran.Round(time.Millisecond), "in", wait)
-
-		select {
-		case <-ctx.Done():
-			e.set(StateStopped, nil)
-			return
-		case <-time.After(wait):
+		if asked {
+			e.set(StateRetrying, nil)
+			slog.Info("service restarting as asked", "service", e.svc.Name(),
+				"ran", ran.Round(time.Millisecond), "in", wait)
+		} else {
+			e.set(StateRetrying, err)
+			slog.Error("service failed, restarting", "service", e.svc.Name(),
+				"err", err, "ran", ran.Round(time.Millisecond), "in", wait)
 		}
 
-		if next := wait * 2; next <= e.policy.maxBackoff {
-			wait = next
+		if !e.reacquire(ctx, &wait) {
+			e.set(StateStopped, nil)
+			return
+		}
+		e.countRestart()
+		slog.Info("service restarted", "service", e.svc.Name(), "restarts", e.status().Restarts)
+	}
+}
+
+// reacquire waits out the backoff and starts the service again, going round once more for as long as
+// Start keeps failing. It reports false only when the context ended, and the caller then stops.
+//
+// Looping here rather than falling back into supervise is the point: a service whose Start failed has
+// not got its device, its socket or its listener back, so Run would be called on a half-built service
+// and reach a nil field on its first line. That panic is caught by run's recover, which makes a
+// failed acquire look like a service that crashed and gets it counted as a restart — a restart policy
+// standing in for the thing not being available yet. Waiting for an acquire that works keeps the
+// backoff honest and the logs readable.
+func (e *entry) reacquire(ctx context.Context, wait *time.Duration) bool {
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(*wait):
+		}
+
+		if next := *wait * 2; next <= e.policy.maxBackoff {
+			*wait = next
 		} else {
-			wait = e.policy.maxBackoff
+			*wait = e.policy.maxBackoff
 		}
 
 		// Let go of whatever it was holding before asking for it again: the point of a restart is
@@ -197,8 +235,7 @@ func (g *Group) supervise(ctx context.Context, e *entry) {
 			slog.Error("service could not be reacquired", "service", e.svc.Name(), "err", err)
 			continue
 		}
-		e.countRestart()
-		slog.Info("service restarted", "service", e.svc.Name(), "restarts", e.status().Restarts)
+		return true
 	}
 }
 

@@ -32,13 +32,17 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/component"
 	"github.com/HuskerMinion/techo5/echod/internal/config"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/alarm"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/announce"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/btaudio"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/hastate"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/dashboard"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/home"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/media"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/mute"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/phone"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/remind"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/security"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/setup"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/timer"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/voice"
 	"github.com/HuskerMinion/techo5/echod/internal/hardware/ambient"
@@ -82,6 +86,7 @@ type Display struct {
 	light *esphome.Light
 	auto  *esphome.Switch
 	clock *esphome.Select
+	lang  *esphome.Select
 
 	mu      sync.Mutex
 	on      bool
@@ -92,6 +97,20 @@ type Display struct {
 	viewAt  time.Time
 	volume  int
 	volAt   time.Time
+
+	// The dashboard page: asked for, when last touched, whether the last frame drew it, whether the
+	// touchscreen was put in follow mode for it, and a finger that started at its left edge.
+	dash                  bool
+	dashTouched           time.Time
+	dashShowing           bool
+	dashFollow            bool
+	dashEdge              int // edgeNone, or the edge the finger on it started at
+	dashEdgeAt            image.Point
+	dashAwayUntil         time.Time // the idle dashboard put away, the clock up until then
+	dashScroll            int       // how far down the drawn dashboard is scrolled
+	dashScrollFor         string    // the dashboard it is scrolled on
+	dashDrag              drawnDrag // a finger moving on the drawn dashboard
+	dashAdjust            dashAdjusting
 
 	poke chan struct{}
 
@@ -126,6 +145,18 @@ type Display struct {
 	touchedAt time.Time
 	nightDark bool
 
+	// nightGlow is the screen turned down to a night light by the night schedule, until a touch or
+	// the end of the night brings it back.
+	nightGlow bool
+
+	// nightHours and atNight are the night's settings in Home Assistant, glowLevel the night light's
+	// brightness.
+	nightHours, atNight *esphome.Select
+	glowLevel           *esphome.Number
+
+	// wide is the Show 8's bigger, brighter panel, which glows harder at the same backlight.
+	wide bool
+
 	// slideshowIdleSince is when the screen last became the plain idle page (nothing else showing);
 	// zero while it is not. Screensaver mode waits for this to run long enough before taking over.
 	slideshowIdleSince time.Time
@@ -147,6 +178,31 @@ type Display struct {
 	weatherUntil time.Time
 	// radar is the rain map in place of the forecast, while the weather page is up.
 	radar bool
+
+	// away is the now-playing page put away by a swipe, and awayTrack/awayStation are what was playing
+	// when it went: the next track brings it back, so a dismissal costs nothing and never strands the
+	// buttons.
+	away        bool
+	awayTrack   string
+	awayStation string
+
+	// strip is the music strip's setting in Home Assistant; stripKey/stripSince are the track the strip
+	// is timing and when it started, stripFullUntil a tap on the strip's song bringing the full page
+	// back, and showingStrip whether the last frame had it, for the touch handler.
+	strip          *esphome.Select
+	stripKey       string
+	stripSince     time.Time
+	stripFullUntil time.Time
+	showingStrip   bool
+
+	// favedKey is the track the star was last pressed for, so the star shows it was saved.
+	favedKey string
+
+	// showingPlaying and showingPaused are what the last painted screen was: the now-playing page, and
+	// whether the music on it was paused. The touch handler acts on what is on the screen, rather than
+	// working the same thing out a second way and drifting from it.
+	showingPlaying bool
+	showingPaused  bool
 
 	// ringPreview shows the ringing page silently until then.
 	ringPreview time.Time
@@ -187,6 +243,11 @@ func build() *Display {
 	d.light.OnCommand = d.command
 	d.auto.OnCommand = func(on bool) { d.setAuto(on, true) }
 	d.clock = clockSelect(d.wake)
+	d.strip = stripSelect(d.wake)
+	d.nightHours = nightHoursSelect()
+	d.atNight = atNightSelect(d)
+	d.glowLevel = glowNumber(d)
+	d.lang = langSelect()
 	voice.Changed.Listen(d.changed)
 	media.Get().OnVolume.Listen(d.volumeMoved)
 	ambient.Get().Lux.Listen(d.lux)
@@ -223,19 +284,28 @@ func build() *Display {
 	phone.Get().Changed.Listen(func(phone.State) { d.wake() })
 	security.Get().Changed.Listen(func(struct{}) { d.wake() })
 	alarm.Get().Changed.Listen(func(struct{}) { d.wake() })
+	remind.Get().Changed.Listen(func(struct{}) { d.wake() })
 	timer.Get().Changed.Listen(func(struct{}) { d.wake() })
+	onMissed(d.wake)
 	home.Get().Changed.Listen(func(struct{}) { d.wake() })
+	dashboard.Get().Changed.Listen(func(struct{}) { d.wake() })
 	return d
 }
 
 func (d *Display) Name() string { return "screen" }
 
-func (d *Display) Entities() []esphome.Entity { return []esphome.Entity{d.light, d.auto, d.clock} }
+func (d *Display) Entities() []esphome.Entity {
+	return []esphome.Entity{d.light, d.auto, d.clock, d.lang, d.strip, d.nightHours, d.atNight, d.glowLevel}
+}
 
 // Restore lights the panel the way it was left. Before the framebuffer is opened: the backlight is
 // its own device.
 func (d *Display) Restore(c config.Config) {
 	setClock24(d.clock, c.Screen.Clock24)
+	d.strip.Set(stripOptions[stripIndex()])
+	d.nightHours.Set(nightHoursText(c.Screen.Night))
+	d.atNight.Set(atNightOptions[atNightIndex()])
+	d.glowLevel.Set(float32(d.glowSetting()))
 	d.setAuto(c.Screen.Auto, false)
 	d.apply(c.Screen.On, c.Screen.Brightness, false)
 }
@@ -257,6 +327,11 @@ func (d *Display) apply(on bool, pct int, save bool) {
 	pct = min(max(pct, 0), 100)
 	d.mu.Lock()
 	d.on, d.ceiling = on, pct
+	// Somebody chose this, so the night no longer owns the screen: without this, a screen switched off
+	// during the night was switched back on when the night ended.
+	if save {
+		d.nightDark = false
+	}
 	d.mu.Unlock()
 	d.relight(true)
 
@@ -301,6 +376,14 @@ func (d *Display) relight(jump bool) {
 			}
 		}
 		target = math.Max(target, floor)
+		if d.nightGlow {
+			target = float64(d.glowBacklight()) // relight holds mu
+		}
+	}
+	// The light before an alarm takes the backlight over while it runs: it starts under anything the
+	// room would otherwise ask for and ends at the screen's own brightness.
+	if p := sunriseProgress(time.Now()); p > 0 && d.on {
+		target = float64(d.ceiling) * screen.BacklightMax / 100 * sunriseLevel(p)
 	}
 	if jump || d.level == 0 {
 		d.level = target
@@ -356,16 +439,12 @@ func (d *Display) changed(s voice.State) {
 		}
 		// "Go home": whatever page is up comes down, back to the clock, and music stops rather than
 		// holding the now-playing page.
-		if h := strings.ToLower(s.Heard); strings.Contains(h, "go home") || strings.Contains(h, "home screen") || strings.Contains(h, "main screen") {
+		if aboutGoingHome(s.Heard) {
 			d.weatherArmed, d.weatherUntil = false, time.Time{}
 			d.sheet, d.quiet = false, true
+			d.dash = false
 			go home.Get().HideCamera()
-			go func() {
-				if playing, paused := media.Get().Playing(); playing || paused {
-					home.Get().Stop()
-					media.Get().Stop()
-				}
-			}()
+			go d.endMusic()
 			slog.Info("screen: home by voice")
 		}
 	}
@@ -375,23 +454,6 @@ func (d *Display) changed(s voice.State) {
 	}
 	d.mu.Unlock()
 	d.wake()
-}
-
-// aboutRadar is whether what was heard asked for the rain map rather than the forecast.
-func aboutRadar(heard string) bool {
-	h := strings.ToLower(heard)
-	return strings.Contains(h, "radar") || strings.Contains(h, "rain map") || strings.Contains(h, "weather map")
-}
-
-// aboutWeather is whether what was heard asked about the weather.
-func aboutWeather(heard string) bool {
-	h := strings.ToLower(heard)
-	for _, w := range []string{"weather", "forecast", "temperature", "rain", "snow", "how hot", "how cold", "radar", "storm"} {
-		if strings.Contains(h, w) {
-			return true
-		}
-	}
-	return false
 }
 
 // volumeMoved is the level changing on purpose; the screen shows it for a moment.
@@ -419,10 +481,29 @@ func (d *Display) gesture(g touch.Gesture) {
 		}
 		return
 	}
+	// A night light's first touch only brings the screen up, as a dark screen's does: nobody can
+	// see what they are pressing on a screen this dim.
+	d.mu.Lock()
+	glowing := d.nightGlow
+	d.nightGlow = false
+	d.mu.Unlock()
+	if glowing {
+		d.relight(true)
+		d.wake()
+		return
+	}
 	// A call: its page takes every tap.
 	if st := phone.Get().State(); st.Phase != phone.Idle {
 		if g.Kind == touch.Tap {
-			d.callTap(g.X, g.Y, st)
+			// Unless something is ringing behind it. The call keeps its buttons; the rest of the
+			// page stops the ring. Taps outside the buttons did nothing on this page before, so
+			// answering and hanging up are untouched — and a timer that finishes mid-call used to
+			// have no way out at all, since this page took every tap and the stop word was off.
+			if rs := d.ringing(time.Now()); rs.any() && d.r != nil && !d.r.actionDecided(g.Y) {
+				d.stopRing()
+			} else {
+				d.callTap(g.X, g.Y, st)
+			}
 		}
 		d.wake()
 		return
@@ -433,6 +514,52 @@ func (d *Display) gesture(g touch.Gesture) {
 		if g.Kind == touch.Tap {
 			d.ringTap(g.X, g.Y, st)
 		}
+		d.wake()
+		return
+	}
+
+	// A browser asking to be let in: its page takes every tap, and only the answers decide.
+	if setup.Get().Waiting() {
+		if g.Kind == touch.Tap {
+			if d.r != nil {
+				if allow, answered := d.r.askTap(g.X, g.Y); answered {
+					setup.Get().Answer(allow)
+				}
+			}
+		}
+		d.wake()
+		return
+	}
+
+	// The microphone open for an announcement: the strip along the bottom is the way to end it, a tap
+	// sending what was said and a hold throwing it away. Only the strip — the rest of the screen is
+	// the clock and the music, which an announcement deliberately does not take over.
+	if announce.Get().Recording() && d.r != nil && onAnnounceStrip(g.X, g.Y, d.r.w, d.r.h) {
+		switch g.Kind {
+		case touch.Tap:
+			go announce.Get().Finish()
+		case touch.Hold:
+			go announce.Get().Cancel()
+		}
+		d.wake()
+		return
+	}
+
+	// One that arrived: a tap on the strip puts it away, the same as on the round face. It does not
+	// have to be put away here — the clock and the music are carrying on behind it and it goes by
+	// itself — but having to wait out something already heard is the same annoyance on any screen.
+	if _, showing := announce.Get().Showing(); showing && g.Kind == touch.Tap &&
+		d.r != nil && onAnnounceStrip(g.X, g.Y, d.r.w, d.r.h) {
+		go announce.Get().Dismiss()
+		d.wake()
+		return
+	}
+
+	// A reminder: a tap on its card puts it away, here and on every device it went off on. Only the
+	// card, as with the strip, so a finger meant for the music behind it still reaches the music.
+	if _, showing := remind.Get().Showing(); showing && g.Kind == touch.Tap &&
+		d.r != nil && image.Pt(g.X, g.Y).In(d.r.reminderBox()) {
+		go remind.Get().Stop()
 		d.wake()
 		return
 	}
@@ -472,6 +599,16 @@ func (d *Display) gesture(g touch.Gesture) {
 		case touch.SwipeRight:
 			bt.SetPairing(false)
 		}
+		d.wake()
+		return
+	}
+
+	// The dashboard: every finger is its, including the one that takes it away.
+	d.mu.Lock()
+	dashUp := d.dashShowing
+	d.mu.Unlock()
+	if dashUp {
+		d.dashGesture(g)
 		d.wake()
 		return
 	}
@@ -554,19 +691,77 @@ func (d *Display) gesture(g touch.Gesture) {
 			d.wake()
 			return
 		}
-		if idle && d.nowPlaying() {
-			// The now-playing screen: a tap is play/pause.
-			if playing, _ := media.Get().Playing(); playing {
-				media.Get().Pause()
-			} else {
-				media.Get().Resume()
+		// The footer's word for the music is the way back to the player screen: while the track is paused
+		// and the screen has been put away, a tap on it shows what is playing rather than starting it from
+		// a screen that is not showing what it is.
+		d.mu.Lock()
+		showing, pausedMusic, away, inStrip := d.showingPlaying, d.showingPaused, d.away, d.showingStrip
+		d.mu.Unlock()
+		// And only when the page really is away: this is the way back to it, so taking a tap out of the
+		// bottom-right corner of the clock is worth it only when there is something to come back to.
+		// Not with the strip up, though: the word is not drawn then, and its corner is the strip's.
+		if d.r != nil && idle && pausedMusic && !showing && away && !inStrip &&
+			image.Pt(g.X, g.Y).In(d.r.playingButton()) {
+			d.mu.Lock()
+			d.away, d.awayTrack, d.awayStation = false, "", ""
+			d.mu.Unlock()
+			d.wake()
+			return
+		}
+		d.mu.Lock()
+		strip := d.showingStrip
+		d.mu.Unlock()
+		if idle && strip && d.r != nil && image.Pt(g.X, g.Y).In(d.r.stripRect()) {
+			// The strip: its buttons do what they say, the X ends the music, and the song brings the
+			// full page back for a while. Anywhere else on the strip is nothing, so a thumb that
+			// misses a button does not start a turn under it.
+			back, play, next, closeX := d.r.stripButtons()
+			at := image.Pt(g.X, g.Y)
+			switch {
+			case at.In(closeX):
+				go d.endMusic()
+			case at.In(back):
+				media.Get().Transport(media.TransportPrevious)
+			case at.In(play):
+				media.Get().Transport(media.TransportToggle)
+			case at.In(next):
+				media.Get().Transport(media.TransportNext)
+			case at.In(d.r.stripSong()):
+				d.mu.Lock()
+				d.stripFullUntil = time.Now().Add(stripFull)
+				d.away, d.awayTrack, d.awayStation = false, "", ""
+				d.mu.Unlock()
+				d.wake()
 			}
+			return
+		}
+		if idle && showing {
+			// The now-playing screen: each button does what it says, and a tap anywhere else is
+			// play/pause, because that is what a hand put on a screen like this means.
+			if d.r != nil {
+				back, _, next := d.r.transportButtons()
+				at := image.Pt(g.X, g.Y)
+				switch {
+				case at.In(d.r.doneButton()):
+					go d.endMusic()
+				case at.In(d.r.favButton()):
+					go d.favorite()
+				case at.In(back):
+					media.Get().Transport(media.TransportPrevious)
+				case at.In(next):
+					media.Get().Transport(media.TransportNext)
+				default:
+					media.Get().Transport(media.TransportToggle)
+				}
+				return
+			}
+			media.Get().Transport(media.TransportToggle)
 			return
 		}
 		voice.Get().Action()
 	case touch.SwipeLeft:
 		// From the right edge it brings the drawer in, on the tab it was last on.
-		if d.r != nil && g.X >= d.r.w-drawerEdge {
+		if d.r != nil && g.X >= d.r.w-d.r.drawerEdge() {
 			d.mu.Lock()
 			tab := d.drawerTab
 			d.mu.Unlock()
@@ -584,12 +779,90 @@ func (d *Display) gesture(g touch.Gesture) {
 			return
 		}
 		media.Get().Adjust(-1)
+	case touch.SwipeRight:
+		// From the left edge it brings the dashboard up, the drawer's gesture mirrored.
+		if d.r != nil && g.X < d.r.drawerEdge() && d.openDashboard() {
+			return
+		}
+		// Right puts the now-playing page away until the track changes. It is the one gesture left on that
+		// page that cannot be taken for play or pause, which a tap there has to be. It is not the drawer's
+		// way out: the drawer has closed on this swipe since long before there was a page to put away,
+		// because while it is in every finger belongs to drawerGesture.
+		d.mu.Lock()
+		sheet, showing, idle := d.sheet, d.showingPlaying, d.view.Phase == "idle"
+		d.mu.Unlock()
+		_, camera := home.Get().Camera()
+		if sheet || camera || !idle || !showing {
+			return
+		}
+		rd := home.Get().Radio()
+		d.mu.Lock()
+		d.away, d.awayTrack, d.awayStation = true, rd.Title, rd.Now
+		d.mu.Unlock()
+		d.wake()
 	}
 }
 
-// nowPlaying is whether the idle screen should be the radio's: something playing or paused, and
-// the radio wired up so the page has a name to show.
+// favorite saves what is playing to favorites, and marks the star once it is saved.
+func (d *Display) favorite() {
+	rd := home.Get().Radio()
+	if err := home.Get().FavoriteNow(); err != nil {
+		slog.Warn("saving to favorites failed", "err", err)
+		return
+	}
+	d.mu.Lock()
+	d.favedKey = rd.Title + "\x00" + rd.Now
+	d.mu.Unlock()
+	d.wake()
+}
+
+// endMusic is "go home" and the now-playing screen's Done: the music stops, a held track is let go,
+// and the page goes back to the clock.
+func (d *Display) endMusic() {
+	// Music Assistant's stream is carried, not this player's, so Playing never says it: asked of the
+	// speaker as well, as the Spot's stop already is.
+	if playing, paused := media.Get().Playing(); playing || paused || media.Get().ExternalPlaying() {
+		home.Get().Stop()
+		media.Get().Stop()
+	}
+	media.Get().ForgetHeld()
+	// And the page goes, as a swipe puts it away: a track somebody else is holding paused is still a
+	// page. It comes back for the next track.
+	rd := home.Get().Radio()
+	d.mu.Lock()
+	d.away, d.awayTrack, d.awayStation = true, rd.Title, rd.Now
+	d.mu.Unlock()
+	d.wake()
+}
+
+// putAway is whether the now-playing page is staying out of the way. A swipe puts it away and it stays
+// away only for the track it was put away on: a dismissal is temporary without needing a timer, and the
+// page comes back for the next song. Nothing playing at all clears it, so what comes next is not hidden
+// by a gesture made about something else.
+func (d *Display) putAway(rd home.Radio, wanted bool) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if !wanted || !d.away || rd.Title != d.awayTrack || rd.Now != d.awayStation {
+		d.away, d.awayTrack, d.awayStation = false, "", ""
+		return false
+	}
+	return true
+}
+
+// nowPlaying is whether the idle screen should be what is playing rather than the clock: something
+// on the speaker, and a name to put on the page.
+//
+// A stream this player did not start says so itself - Music Assistant over Sendspin - and it is the
+// reason the page exists at all, so it is asked first: its audio never passes through this player's own
+// stream, which is what Playing() reports on.
 func (d *Display) nowPlaying() bool {
+	if media.Get().ExternalPlaying() {
+		return true
+	}
+	if _, _, _, ok := media.Get().Held(); ok {
+		return true
+	}
 	if !home.Get().Radio().Configured {
 		return false
 	}
@@ -611,7 +884,7 @@ const radioCueFor = 20 * time.Second
 func (d *Display) showSheet(on bool) {
 	d.mu.Lock()
 	d.sheet = on
-	d.restartArm, d.picker, d.cardScroll, d.pickScroll, d.colours = time.Time{}, "", 0, 0, false
+	d.restartArm, d.picker, d.cardScroll, d.pickScroll, d.colors = time.Time{}, "", 0, 0, false
 	d.mu.Unlock()
 	slog.Info("settings sheet", "open", on)
 	d.wake()
@@ -640,13 +913,49 @@ func (d *Display) ceilingOrDefault() int {
 func (d *Display) night(now time.Time, on bool, view voice.State) bool {
 	in := inNight(config.Get().Screen.Night, now)
 	d.mu.Lock()
-	dark, touched := d.nightDark, d.touchedAt
+	dark, touched, viewAt := d.nightDark, d.touchedAt, d.viewAt
 	d.mu.Unlock()
+	if !in {
+		d.mu.Lock()
+		glowing := d.nightGlow
+		d.nightGlow = false
+		d.mu.Unlock()
+		if glowing {
+			slog.Info("screen: night over, night light off")
+			d.relight(true)
+		}
+	}
 	switch {
 	case in && on:
-		busy := view.Phase != "idle" || now.Sub(touched) < nightIdle || now.Sub(d.viewAt) < nightIdle || d.ringing(now).any() || phone.Get().Busy()
-		if playing, _ := media.Get().Playing(); playing || busy {
+		busy := view.Phase != "idle" || now.Sub(touched) < nightIdle || now.Sub(viewAt) < nightIdle ||
+			d.ringing(now).any() || phone.Get().Busy() || sunriseProgress(now) > 0 || reminderUp()
+		// Something playing is not somebody using the screen. At night it is rain or music to sleep
+		// to, and it kept a guest room's screen at full brightness all night; a touch or a word still
+		// brings the screen up to see what is playing.
+		if busy {
+			// Whatever keeps the screen up at night - a ring, a call, a turn, the light before an
+			// alarm - is seen at the screen's brightness, not the night light's.
+			d.mu.Lock()
+			glowing := d.nightGlow
+			d.nightGlow = false
+			d.mu.Unlock()
+			if glowing {
+				d.relight(true)
+				return true
+			}
 			return false
+		}
+		if config.Get().Screen.NightLight {
+			d.mu.Lock()
+			already := d.nightGlow
+			d.nightGlow = true
+			d.mu.Unlock()
+			if already {
+				return false
+			}
+			slog.Info("screen: night, down to a night light")
+			d.relight(true)
+			return true
 		}
 		slog.Info("screen: night, going dark")
 		d.mu.Lock()
@@ -915,6 +1224,10 @@ func (d *Display) OpenSheet(name string) bool {
 		d.showSheet(false)
 		d.openDrawer(drawerRadio)
 		return true
+	case "dashboard":
+		d.showSheet(false)
+		d.closeDrawer()
+		return d.openDashboard()
 	}
 	cat, ok := catByName(name)
 	if !ok {
@@ -945,6 +1258,9 @@ func (d *Display) Start(context.Context) error {
 	d.dev = dev
 	d.r = newRenderer(dev.Canvas())
 	w, h := dev.Size()
+	d.mu.Lock()
+	d.wide = w > 1000 || h > 1000
+	d.mu.Unlock()
 	d.logo = newSplash(w, h)
 	d.mu.Lock()
 	d.booting, d.started = true, time.Now()
@@ -963,7 +1279,7 @@ func (d *Display) Close() error {
 	return err
 }
 
-// Run redraws the screen until ctx is cancelled: on the second while idle, faster while a turn is
+// Run redraws the screen until ctx is canceled: on the second while idle, faster while a turn is
 // on or the volume is showing, and at once when something changes.
 func (d *Display) Run(ctx context.Context) error {
 	for {
@@ -987,8 +1303,16 @@ func (d *Display) frame() time.Duration {
 	now := time.Now()
 	ring := d.ringing(now)
 	call := phone.Get().State()
-	if (ring.any() || call.Phase != phone.Idle) && !on {
-		// A ring or a call lights a dark panel, night or not: its page is how it is answered or stopped.
+	_, reminding := remind.Get().Showing()
+	if (ring.any() || reminding || call.Phase != phone.Idle) && !on {
+		// A ring, a reminder or a call lights a dark panel, night or not: its page is how it is
+		// answered or stopped, and a reminder is its words on the screen.
+		d.apply(true, d.ceilingOrDefault(), false)
+		on = true
+	}
+	if !on && sunriseProgress(now) > 0 {
+		// The light before an alarm: the panel comes on dim and rises, so the room is lit before the
+		// sound starts. relight decides how much of the screen's brightness it is using.
 		d.apply(true, d.ceilingOrDefault(), false)
 		on = true
 	}
@@ -1019,6 +1343,14 @@ func (d *Display) frame() time.Duration {
 		d.booting, booting = false, false
 		slog.Info("splash done", "after", now.Sub(started).Round(time.Millisecond))
 	}
+	// A ring ends the splash whatever else is or is not ready. Waiting on Home Assistant's voice
+	// pipeline has no timeout, so a device that never reaches it stays on the logo for ever — and an
+	// alarm going off behind a logo is a screen that will not say what is making the noise or where
+	// to press to stop it. Nothing the splash is waiting for is needed to draw a ringing page.
+	if booting && ring.any() {
+		d.booting, booting = false, false
+		slog.Info("splash cut short: something is ringing", "after", now.Sub(started).Round(time.Millisecond))
+	}
 	d.mu.Unlock()
 	if booting {
 		d.r.drawSplash(d.logo, now.Sub(started))
@@ -1042,7 +1374,13 @@ func (d *Display) frame() time.Duration {
 		// A screen command: the screen it asked for is the answer, not the words.
 		s.phase, s.heard, s.reply = "idle", "", ""
 	}
-	s.playing, s.paused = media.Get().Playing()
+	// A stream this player is carrying is the room's when it is what is being heard: the page names it,
+	// and says what it is doing, though the audio never passes through this player's own stream. Both,
+	// not just playing: the page tests paused first, so a station left paused underneath would label
+	// somebody else's track as Paused - and a remote merely holding the speaker, with a station playing
+	// underneath it, is not the room's at all (see media.Player.Carried). A remote's track paused from
+	// here and since let go is shown paused too (see media.Player.Held).
+	s.playing, s.paused = media.Get().ScreenState()
 	s.muted, _ = mute.Get().Muted()
 	if !volAt.IsZero() && now.Sub(volAt) < volumeShow {
 		s.volume, s.showVolume = volume, true
@@ -1062,7 +1400,10 @@ func (d *Display) frame() time.Duration {
 	}
 	if s.showSheet {
 		s.sheet = d.gather(s, restartArm)
-		if d.cat == catSecurity {
+		// The category gather already took under the lock, rather than d.cat again: the sheet is
+		// opened on a category from whatever goroutine took the tap or the voice command, and
+		// reading it unlocked here is a race that would also let the frame disagree with itself.
+		if s.sheet.cat == catSecurity {
 			s.security = security.Get().State()
 		}
 		d.mu.Lock()
@@ -1083,7 +1424,9 @@ func (d *Display) frame() time.Duration {
 		d.mu.Unlock()
 	}
 	s.camera, s.showCamera = home.Get().Camera()
-	s.nowPlaying = (s.phase == "idle") && d.nowPlaying()
+	// Whether the idle screen wants to be what is playing. It is asked even when the page has been put
+	// away, because the track is what brings it back, so the radio is read either way.
+	wants := (s.phase == "idle") && d.nowPlaying()
 	d.mu.Lock()
 	s.showDrawer, s.drawerTab, s.drawerScroll, s.drawerPick, s.pickScroll = d.drawer && !s.showSheet && !s.showCamera, d.drawerTab, d.drawerScroll, d.drawerPick, d.pickScroll
 	d.mu.Unlock()
@@ -1093,9 +1436,18 @@ func (d *Display) frame() time.Duration {
 	if s.showDrawer && s.drawerTab == drawerCameras {
 		s.cameras = home.Get().Cameras()
 	}
-	if (s.showDrawer && s.drawerTab == drawerRadio) || s.nowPlaying {
+	if (s.showDrawer && s.drawerTab == drawerRadio) || wants {
 		s.radio = home.Get().Radio()
 	}
+	s.nowPlaying = wants && !d.putAway(s.radio, wants)
+	d.mu.Lock()
+	// Not under the sunrise light, which draws no strip: taps on a strip nobody can see would still act.
+	if wants && d.stripDue(now, s.radio, s.nowPlaying) && sunriseProgress(now) == 0 {
+		s.nowPlaying, s.strip = false, true
+	}
+	s.faved = d.favedKey != "" && d.favedKey == s.radio.Title+"\x00"+s.radio.Now
+	d.showingPlaying, d.showingPaused, d.showingStrip = s.nowPlaying, s.paused, s.strip
+	d.mu.Unlock()
 	s.weather = home.Get().Weather()
 	d.mu.Lock()
 	s.showWeather = (s.phase == "idle" || s.phase == "lingering") && now.Before(d.weatherUntil)
@@ -1111,10 +1463,35 @@ func (d *Display) frame() time.Duration {
 	// boring is the plain idle page — the same set of pages draw() checks before falling through to
 	// bigClock/nowPlaying. Background mode rides along with it; Screensaver only takes over once it
 	// has held for the configured wait, tracked by how long it has run continuously.
+	d.dashScene(&s, s.showSheet || s.showDrawer || ring.any() || call.Phase != phone.Idle)
 	boring := s.phase == "idle" && call.Phase == phone.Idle && !ring.any() && !s.bt.Pairing &&
-		!s.showWifi && !s.showSheet && !s.showCamera && !s.showRadar && !s.showWeather && !s.nowPlaying
+		!s.showWifi && !s.showSheet && !s.showCamera && !s.showRadar && !s.showWeather && !s.nowPlaying &&
+		!s.showDash
+	// A browser waiting to be let in is a page of its own, over whatever is on the screen: asking for
+	// the setup page is done from the settings screen, so the answer has to reach somebody who is
+	// still standing in it. It was set only on the idle page once, and the press could not be given
+	// without leaving settings first.
+	s.setupAsking = setup.Get().Waiting()
+
+	// The announcement state is read every frame like the setup page's, for the same reason: the
+	// drawer's button, the page an arriving one puts up and the line that says this microphone is
+	// open all have to be right wherever the screen happens to be.
+	s.announceReady = config.Get().Home.HouseWord != ""
+	s.announceRecording = announce.Get().Recording()
+	s.announcePeers = len(announce.Peers())
+	s.announcement, s.showAnnouncement = announce.Get().Showing()
+	s.reminder, s.showReminder = remind.Get().Showing()
+	if s.reminder.From != config.Get().Device.Name {
+		s.reminderFrom = s.reminder.From
+	}
+	s.missed = missedNote(now, false)
+
 	if boring {
 		s.slideshow = home.Get().SlideshowBackground()
+		if s.slideshow == nil {
+			s.slideshowTrouble = home.Get().SlideshowTrouble()
+		}
+		s.sunrise, s.sunriseFace = sunriseProgress(now), config.Get().Alarms.SunriseFace
 	}
 	d.mu.Lock()
 	if !boring {
@@ -1138,6 +1515,9 @@ func (d *Display) frame() time.Duration {
 	if s.showCamera {
 		return 250 * time.Millisecond // frames arrive as they are fetched; this keeps up
 	}
+	if s.showDash {
+		return time.Second // a streamed picture wakes it as it arrives
+	}
 	if ring.any() || call.Phase != phone.Idle {
 		return 500 * time.Millisecond
 	}
@@ -1158,4 +1538,11 @@ func (d *Display) frame() time.Duration {
 		return time.Until(now.Truncate(idleFrame).Add(idleFrame))
 	}
 	return activeFrame
+}
+
+// reminderUp is whether a reminder is on the screen, which keeps the panel from going dark for the
+// night under it.
+func reminderUp() bool {
+	_, up := remind.Get().Showing()
+	return up
 }

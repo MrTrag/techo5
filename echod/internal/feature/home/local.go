@@ -8,7 +8,6 @@ import (
 
 	"github.com/HuskerMinion/techo5/echod/internal/component"
 	"github.com/HuskerMinion/techo5/echod/internal/config"
-	"github.com/HuskerMinion/techo5/echod/internal/layout"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/hass"
 )
 
@@ -49,6 +48,9 @@ func RadioSources() []string {
 	var out []string
 	if config.Get().Home.Radio.Configured() {
 		out = append(out, config.RadioFavorites)
+	}
+	if len(config.Get().Home.Radio.Own) > 0 {
+		out = append(out, config.RadioOwn)
 	}
 	if hass.Get().Ready() {
 		out = append(out, config.RadioLocal, config.RadioPopular)
@@ -115,6 +117,8 @@ func SourceLabel(source string) string {
 		return "Local stations"
 	case config.RadioPopular:
 		return "Popular worldwide"
+	case config.RadioOwn:
+		return "On this device"
 	}
 	return source
 }
@@ -183,14 +187,6 @@ func stationsOf(m hass.Media, source string) []station {
 		}
 	}
 	return out
-}
-
-// speakerEntity is this device's media player in Home Assistant.
-func speakerEntity() string {
-	if s := config.Get().Home.Radio.Speaker; s != "" {
-		return s
-	}
-	return "media_player." + layout.Slug(config.Get().Device.Name) + "_speaker"
 }
 
 // playListed plays a Radio Browser station by its name in the list shown; false when it is not one.

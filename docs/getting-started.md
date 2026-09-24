@@ -18,11 +18,19 @@ The model number is on the bottom of the device, or in the Alexa app under the d
 | **Echo Show 5, 2nd gen** (2021) | `cronos` | AEOCN | [TECHO5](https://github.com/HuskerMinion/techo5) | Moderate: the unlock and LineageOS by hand, then a one-command installer |
 | **Echo Dot, 2nd gen** (2016) | `biscuit` | RS03QR | [TECHO5 Dot](https://github.com/HuskerMinion/techo5-dot) | Moderate: the unlock and Fire OS steps by hand, then a one-command installer |
 | **Echo Spot, 1st gen** (2017) | `rook` | VN94DQ | [TECHO5 Spot](https://github.com/HuskerMinion/techo5-spot) | Moderate: the unlock and LineageOS by hand, then a one-command installer |
-| **Echo Show 5, 1st gen** (2019) | `checkers` | — | Coming: in progress | Not yet: a first test build is being prepared |
-| **Echo Show 8, 1st gen** (2019) | — | — | Coming: planned | Not yet: work starts when test units arrive |
+| **Echo Show 5, 1st gen** (2019) | `checkers` | AEOCH | [TECHO5](https://github.com/HuskerMinion/techo5) | Moderate: the unlock and LineageOS by hand, then the same one-command installer |
+| **Echo Show 8, 1st gen** (2019) | `crown` | AEOCW | [TECHO5](https://github.com/HuskerMinion/techo5) | Moderate: the unlock and LineageOS by hand, then the same one-command installer |
 
-The Show 5 1st gen and Show 8 1st gen are coming, with nothing to install yet and no dates. Other
-Echos (the Dot 3rd gen and later, and so on) are **not** supported.
+All three Shows install with the same command and run the same build, which tells them apart when it
+starts; the installer picks each one's boot image out of the release. The Show 5 1st gen has been tested
+end to end, though on one unit so far. The Show 8 is newer still: it has been through an install, a slot
+update and a reboot on one unit, with the screen, microphones, wake word, speaker, camera, lens cover
+and mute latch all working, and nothing else has run on it for long. Two things a Show 8 owner should
+know before starting. the model number above is the one the unlock project lists for the
+1st gen, and a seller's own number may not tell the two generations apart, so go by the year as well
+when buying second-hand; the board a 1st gen reports is `crown`. And
+cycling the mute latch stops the camera until the unit is rebooted — the daemon says so when it happens.
+Other Echos (the Dot 3rd gen and later, and so on) are **not** supported.
 
 ## What every device needs
 
@@ -35,7 +43,8 @@ Echos (the Dot 3rd gen and later, and so on) are **not** supported.
 ## Set up your computer (once)
 
 The installers are Python 3 scripts that work the same on Windows, Linux and macOS. Nothing is compiled:
-they download the signed release, check every file against its checksum, and build the Dot and Spot boot
+they download the release, check the manifest's signature against the project's key and every file
+against its checksum, and build the Dot and Spot boot
 images from your own unit's backup. You need Python 3, the Android platform tools (`adb` and
 `fastboot`) and `git`:
 
@@ -53,18 +62,30 @@ images from your own unit's backup. You need Python 3, the Android platform tool
 Check with `python3 --version` and `adb version`. The unlock threads on XDA also need a (free) XDA
 account to download attachments.
 
-## Echo Show 5 (2nd gen)
+## Echo Show 5 (1st and 2nd gen)
 
-1. **Unlock it with amonet-cronos.** Follow
+The steps are the same for both; where they differ, the 1st gen (`checkers`) is called out.
+
+1. **Unlock it with amonet.** On a 2nd gen, follow
    [[UNLOCK][ROOT][TWRP][UNBRICK] Echo Show 5 2nd Gen (cronos)](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-show-5-2nd-gen-2021-cronos.4772596/)
    on XDA (source: [R0rt1z2/amonet, branch mt8163-cronos](https://github.com/R0rt1z2/amonet/tree/mt8163-cronos)).
    In short: with the Show on mains power, hold all three buttons until the screen says
    `=> FASTBOOT mode`, connect USB, and run the fastbrick step from the thread. It reboots into TWRP
    on its own; don't interrupt it.
+   **Use amonet v2.0.1 or later.** An older one can leave the bootloader still locked while
+   everything else looks like it worked, and the first sign is the installer being refused with
+   `the command you input is restricted on locked hw` when it writes the boot image. That is the
+   bootloader talking, not the installer (techo5 issue #19).
+   On a **1st gen**, the same thing with the `checkers` tools:
+   [[UNLOCK][ROOT][TWRP][UNBRICK] Echo Show 5 1st Gen (checkers)](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-show-5-1st-gen-2019-checkers.4762900/)
+   (amonet branch `mt8163-checkers`). A unit fresh out of the box may have shipped with firmware too
+   new to unlock, so read the version before letting it reach the internet.
    *Check:* the Show boots into TWRP.
 2. **Install LineageOS 18.1.** Follow
    [[ROM][UNOFFICIAL][11][cronos] LineageOS 18.1 for the Echo Show 5 (2021)](https://xdaforums.com/t/rom-unofficial-11-cronos-lineageos-18-1-for-the-amazon-echo-show-5-2021.4772598/).
-   Use a current build (0.4 or later; earlier ones lose audio after a few days).
+   Use a current build (0.4 or later; earlier ones lose audio after a few days). A **1st gen** takes
+   R0rt1z2's `checkers` build of the same LineageOS, dated 2026-09-04 or later: TECHO5's kernel is
+   rebuilt from that source, and the installer checks the version before it does anything.
    *Check:* LineageOS boots.
 3. **Prepare LineageOS:** join your Wi-Fi, then in Settings → About → tap Build number seven times,
    and in Developer options turn on **USB debugging**.
@@ -73,13 +94,15 @@ account to download attachments.
    ```
    git clone https://github.com/HuskerMinion/techo5
    cd techo5
-   python3 tools/install-show.py --serial <serial> --name "Kitchen" --dry-run
-   python3 tools/install-show.py --serial <serial> --name "Kitchen"
+   python3 tools/install-show.py --dry-run
+   python3 tools/install-show.py
    ```
-   `<serial>` is what `adb devices` shows. The dry run downloads and checks the
-   [latest release](https://github.com/HuskerMinion/techo5/releases/latest) (boot image with Bluetooth,
-   root filesystem); the second run replaces LineageOS with TECHO5 (it asks before erasing) and waits
-   for the first boot. Turning on **Rooted debugging** first lets it keep a backup of LineageOS's boot
+   It finds the Show on its own (and asks which, if more than one is plugged in), asks what to call
+   it in Home Assistant, and asks once, with a summary, before anything is erased. The dry run
+   downloads and checks the [latest release](https://github.com/HuskerMinion/techo5/releases/latest)
+   (boot image with Bluetooth, root filesystem); the second run replaces LineageOS with TECHO5 and
+   waits for the first boot, saying what it is waiting for as it goes. For a script, every question
+   has a switch: `--serial <serial> --name "Kitchen" --force`. Turning on **Rooted debugging** first lets it keep a backup of LineageOS's boot
    image. Every step by hand, and troubleshooting: [docs/install.md](install.md).
    *Check:* the screen shows the TECHO5 clock.
 5. **Add it to Home Assistant**: see [After installing](#after-installing-every-device).
@@ -141,10 +164,12 @@ loops. Every command runs the same on Windows, Linux and macOS once the Dot is u
    ```
    git clone https://github.com/HuskerMinion/techo5-dot
    cd techo5-dot
-   python3 tools/install-dot.py --serial <serial> --dry-run
-   python3 tools/install-dot.py --serial <serial> --name "Kitchen"
+   python3 tools/install-dot.py --dry-run
+   python3 tools/install-dot.py
    ```
-   `<serial>` is what `adb devices` shows. The dry run checks the Dot, backs up every partition that
+   It finds the Dot on its own (and asks which, if more than one is plugged in), and asks what to call
+   it in Home Assistant when it has no name yet. For a script: `--serial <serial> --name "Kitchen"`.
+   The dry run checks the Dot, backs up every partition that
    boots it into `backups/<serial>/` (keep that folder: it's the way back), downloads and checks the
    release, and builds this Dot's boot image, writing nothing to the Dot. The second run installs, with
    Bluetooth, and waits for the first boot to report healthy. (The installer also works straight from
@@ -203,12 +228,13 @@ is built on, runs on the unlocked Dot's Fire OS 6 with its own installer, and is
    Keep `backups/<serial>/`: it's the way back to LineageOS and Fire OS.
 6. **Install TECHO5 Spot**, booted back into LineageOS with rooted debugging on:
    ```
-   python3 tools/install-spot.py --serial <serial> --name "Kitchen" --build-only
-   python3 tools/install-spot.py --serial <serial> --name "Kitchen"
+   python3 tools/install-spot.py --serial <serial> --build-only
+   python3 tools/install-spot.py
    ```
    The first run captures what it needs from this Spot, downloads and checks the release, and builds
-   the boot image, touching nothing else. The second replaces LineageOS with TECHO5 (it asks before
-   erasing), with Bluetooth, and waits for the first boot. `--logo` also replaces the bootloader's
+   the boot image, touching nothing else. The second finds the Spot, asks what to call it in Home
+   Assistant, asks once, with a summary, before anything is erased, then replaces LineageOS with TECHO5,
+   with Bluetooth, and waits for the first boot. For a script: `--serial <serial> --name "Kitchen" --force`. `--logo` also replaces the bootloader's
    Amazon picture (needs `python3 -m pip install pillow`).
    *Check:* the round screen shows the TECHO5 clock.
 7. **Add it to Home Assistant**: see below.
@@ -232,6 +258,63 @@ is built on, runs on the unlocked Dot's Fire OS 6 with its own installer, and is
    - cameras, radio lists and weather from the device's Home Assistant actions (see each README);
    - multi-room audio through [Music Assistant](https://www.music-assistant.io/) (each device is a
      Sendspin player).
+
+   **What multi-room audio trusts.** The Sendspin player is on from the first boot and takes a
+   connection from anything on the network, with no key and no pairing — that is what lets Music
+   Assistant find a device and play to it with nothing to set up. It also means a program on your
+   Wi-Fi can play audio into the room and set the volume without being invited. It cannot listen: the
+   microphones are not part of it, and nothing it sends reaches Home Assistant.
+
+   That is a deliberate choice for a device on a home network, not an oversight, and it is the one
+   thing here that trusts the network rather than a key. If your Wi-Fi has guests on it, or anything
+   you would not hand a speaker to, turn the player off per device with the Sendspin switch in Home
+   Assistant.
+
+### If Home Assistant does not find it
+
+Home Assistant finds these devices over mDNS, the same way it finds ESPHome boards.
+
+- **A different subnet or VLAN.** mDNS does not cross subnets on its own. Either put Home Assistant
+  and the device on the same one, or set up an mDNS reflector on the router for `_esphomelib._tcp`
+  (and `_sendspin._tcp` for multi-room audio).
+- **Home Assistant in Docker.** A container on the default bridge network never sees mDNS, so nothing
+  is discovered. Run it with `network_mode: host` (Docker Compose) or `--network host`; macvlan works
+  too.
+- **Add it by hand instead.** Settings → Devices & services → ESPHome → Add device, then the device's
+  address, port 6053, and the encryption key from `backups/<serial>/`. This works without mDNS, as
+  long as Home Assistant can reach the address.
+
+### If it listens but does not answer out loud
+
+The device wakes, the screen shows the answer, and nothing is spoken. That is almost always the voice
+pipeline rather than the device: Home Assistant is replying in text only.
+
+1. **Settings → Voice assistants**, and open the pipeline this device uses. That is the one marked
+   Preferred, unless you picked another one in the device's Assistant list.
+2. Look at **Text-to-speech**. If it says None, choose an engine (Piper, Home Assistant Cloud, Google
+   Translate), press Update, and ask the device something again.
+3. **Still silent with an engine set?** Try Home Assistant's speech straight at the device: Settings →
+   Developer tools → Actions, search for `tts.speak`, put your text-to-speech entity in as the target,
+   the device's media player entity in Media player entity, type a message and press Perform action.
+   - If it speaks, the pipeline is what is wrong: back to step 2.
+   - If it stays silent, the device's own log says whether any audio arrived. Turn SSH on and read
+     `/data/techo5-linux/techo5.log` (`echod.log` on the Dot), or open an issue with the last 60
+     lines of it.
+4. **Reply delivery.** The device has a Reply delivery setting: *Whole file* fetches the reply and
+   plays it, *Streamed* plays it as it arrives. Whole file is the default because it survives a slow
+   network better, but it needs to be able to reach the address Home Assistant gives it for the audio.
+   Where it cannot, the device falls back to the streamed copy on its own (releases from 2026-09-20
+   on), and setting Reply delivery to **Streamed** makes that permanent.
+5. **Home Assistant on HTTPS with its own certificate.** If Home Assistant's address is `https://` with
+   a self-signed certificate, or one issued for a different name than the one the device is given,
+   the device refuses the download and the log says `x509: certificate`. The fix that keeps checking
+   is to give Home Assistant a certificate for the name it is reached by (or set its internal URL,
+   Settings → System → Network, to the plain `http://` address on your network). Otherwise turn on
+   **Skip certificate checks**, a diagnostic switch on the device in Home Assistant. It covers what
+   the device downloads for Home Assistant and the screen (replies and announcements, wake word
+   models, slideshow pictures), which is why it is off by default; the device's Settings screen shows
+   *Certificate checks: Off* while it is on. Updates never use it: they always check GitHub's
+   certificate and the release signature.
 
 ## Windows, Linux or macOS
 

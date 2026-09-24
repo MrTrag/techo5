@@ -58,7 +58,7 @@ resolutions.
 
 ## Next
 
-1. Unmute (button), rerun `camprobe` — confirms the sensor initialises and streams MIPI.
+1. Unmute (button), rerun `camprobe` — confirms the sensor initializes and streams MIPI.
 2. Find the ISP 3.0 register map: MT6735/MT8127 kernel trees (`drivers/misc/mediatek/imgsensor`
    siblings, `mt6735/isp_reg.h`, `camera_isp_reg.h`), or the MT8163 libcamdrv headers. Needed:
    SENINF (CSI-2 lane config, mux to CAM), TG (`TG_SEN_MODE`, `TG_VF_CON`, grab window),
@@ -66,7 +66,7 @@ resolutions.
 3. With the map: `cmd/camprobe -frame`: `ISP_RESET`, program SENINF+TG+IMGO for the preview
    mode's size and Bayer format, enqueue a buffer (physical address — the `camera-sysram` /
    `ISP_BUFFER_CTRL` ring, or ION), `CAM_CTL_START`, wait `IMGO_DONE`, dequeue, dump the RAW10
-   frame, demosaic in Go (nearest-neighbour is enough for a first picture).
+   frame, demosaic in Go (nearest-neighbor is enough for a first picture).
 4. Then a still-capture action for the daemon and a "show me" page. Video would be after that.
 
 ## The register map is found (2026-09-15 late)
@@ -124,7 +124,7 @@ or `/dev/camera-sysram`; the driver tracks it in a ring per DMA and reports `bFi
 4. Program: FMT_SEL (TG1 raw 10-bit, scenario pass-1), DMA_EN.IMGO_EN, IMGO base/xsize/ysize/
    stride for the preview mode, TG grab window from the sensor's `GET_CROP_INFO`, TG_SEN_MODE
    CMOS_EN, then TG_VF_CON.VFDATA_EN=1; wait `IMGO_DONE`; VFDATA_EN=0.
-5. Dump the RAW10 buffer, unpack, nearest-neighbour demosaic, PNG. Then the daemon's
+5. Dump the RAW10 buffer, unpack, nearest-neighbor demosaic, PNG. Then the daemon's
    "take a picture" action and a page.
 
 ## Sensor alive (2026-09-16)
@@ -250,7 +250,7 @@ as a camera entity; 10-bit output later.
 ## In the daemon (2026-09-16, later)
 
 `echod/internal/hardware/camera` is the streaming version of camframe: three DMA slots, the TG
-frame counter for sync, 800x600 RGBA out with grey-world white balance, sensor on only while
+frame counter for sync, 800x600 RGBA out with gray-world white balance, sensor on only while
 acquired (5 s linger), refused while the mute button is engaged. `feature/camera` serves
 `/camera.jpg` and `/camera.mjpeg` on port 8181 and is also the **ESPHome camera entity**: the
 library has no camera domain, so the feature sends `ListEntitiesCameraResponse` itself (a
@@ -308,6 +308,6 @@ OV02B10, `camera_spot.go` the Spot's. The Spot's path, found with a probe (`cmd/
   counter sync. The first DMA pass after a start can be empty: the first three frames are dropped.
 - Exposure is the daemon's (the init table turns the sensor's AEC off): SET_ESHUTTER (lines, 6..4095;
   longer than a frame slows the rate) and SET_GAIN (1/64), aiming the raw mean at 58. Every other frame
-  is demosaiced (bilinear, grey-world, 0.2/99.5 % levels, gamma 2.2): about 33 % of a core streaming.
+  is demosaiced (bilinear, gray-world, 0.2/99.5 % levels, gamma 2.2): about 33 % of a core streaming.
 - The Spot's mute is software, so `camera_common.go` checks it every 300 ms while the sensor runs: muted
   powers the sensor down and hands out one black frame; unmuted brings it back.

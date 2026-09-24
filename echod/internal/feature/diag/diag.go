@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	esphome "github.com/ygelfand/go-esphome-device"
@@ -24,9 +25,14 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/hardware/speaker"
 	"github.com/HuskerMinion/techo5/echod/internal/layout"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/wake"
+	"github.com/HuskerMinion/techo5/echod/internal/update"
 )
 
 func init() {
+	// Before anything is built, so that no request has yet gone out over the transport being
+	// replaced and nothing is reading the variable as it is written.
+	http.DefaultTransport = transport
+
 	component.Register(component.Network, Get(), component.Order(90))
 }
 
@@ -47,6 +53,10 @@ type Diag struct {
 	free   *esphome.Sensor
 	purge  *esphome.Button
 
+	// restart is the daemon restarting on request: the way out of a state nothing else clears, without
+	// pulling the plug.
+	restart *esphome.Button
+
 	temperature *esphome.Sensor
 	radioTemp   *esphome.Sensor
 	cores       *esphome.Sensor
@@ -54,6 +64,7 @@ type Diag struct {
 	load        *esphome.Sensor
 	memory      *esphome.Sensor
 	lux         *esphome.Sensor
+	lensCover   *esphome.BinarySensor
 	roomLevel   *esphome.Sensor
 	roomFloor   *esphome.Sensor
 
@@ -110,7 +121,7 @@ func (d *Diag) Name() string { return "diagnostics" }
 
 func (d *Diag) Entities() []esphome.Entity {
 	out := []esphome.Entity{
-		d.cached, d.free, d.purge,
+		d.cached, d.free, d.purge, d.restart,
 		d.temperature, d.radioTemp, d.cores, d.coresOnline, d.load, d.memory, d.lux,
 		d.roomLevel, d.roomFloor,
 		d.tls, d.ip, d.color, d.signal, d.rxRate, d.txRate, d.ads,
@@ -120,6 +131,9 @@ func (d *Diag) Entities() []esphome.Entity {
 	// the Android daemon the unit falls back to, where it would open root adb to the network.
 	if layout.OnAndroid() {
 		out = append(out, d.adb)
+	}
+	if d.lensCover != nil {
+		out = append(out, d.lensCover)
 	}
 	return out
 }
@@ -271,13 +285,57 @@ func (d *Diag) remote() {
 	d.address()
 }
 
-// insecureTLS applies to everything the device downloads: models, firmware and the audio Home
-// Assistant serves all go through the default transport.
+// Everything the device downloads goes through the default transport: wake word models, the audio
+// Home Assistant serves, the pictures a slideshow shows. So the switch that stops certificates being
+// checked has to reach all of it, and it used to by writing a new TLS configuration into the shared
+// transport — a field several goroutines were reading as they made requests, written with no lock,
+// and leaving the connections opened under the old setting in the pool for the next request to pick
+// up.
+//
+// What is installed instead is two transports of our own, one that checks certificates and one that
+// does not, and a flag saying which a request goes to. The flag is read once per request, neither
+// transport is ever written to after it is built, and turning the switch back off closes the
+// connections that were made while it was on, so nothing carries on over one of them.
+//
+// The updater is not part of this either way: it keeps its own client, because an update installs as
+// root and must be believed only when the release key signed it (update/trust.go).
+type tlsSwitch struct {
+	checking *http.Transport
+	skipping *http.Transport
+	skip     atomic.Bool
+}
+
+// transport is the default transport from here on. Nothing may assert http.DefaultTransport to
+// *http.Transport any more; it is this.
+var transport = newTLSSwitch()
+
+func newTLSSwitch() *tlsSwitch {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		// Nothing has replaced it in any build of this daemon; a transport of our own rather than a
+		// panic if something ever does.
+		base = &http.Transport{Proxy: http.ProxyFromEnvironment}
+	}
+	skipping := base.Clone()
+	skipping.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	return &tlsSwitch{checking: base, skipping: skipping}
+}
+
+func (t *tlsSwitch) RoundTrip(r *http.Request) (*http.Response, error) {
+	if t.skip.Load() {
+		return t.skipping.RoundTrip(r)
+	}
+	return t.checking.RoundTrip(r)
+}
+
+// insecureTLS moves the switch. Called from the entity's command and from Restore.
 func insecureTLS(on bool) {
-	http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: on}
+	transport.skip.Store(on)
 	if on {
 		slog.Warn("certificates are not being checked")
+		return
 	}
+	transport.skipping.CloseIdleConnections()
 }
 
 // reachable opens or closes the adb port and moves the switch to match what the chain now says.
@@ -305,7 +363,7 @@ func (d *Diag) address() {
 	d.ip.Set(strings.Join(ips, ", "))
 }
 
-// identity is what the device is rather than what it is doing. The shell colour comes off the factory
+// identity is what the device is rather than what it is doing. The shell color comes off the factory
 // idme partition, which never changes, so it is read once here rather than sampled.
 func (d *Diag) identity() {
 	d.color = &esphome.TextSensor{
@@ -361,6 +419,21 @@ func (d *Diag) storage() {
 			gone, freed := wake.Lib().Purge(inUse())
 			slog.Info("cache purged", "models", gone, "bytes", freed)
 			d.Measure()
+		},
+	}
+
+	// A restart through the supervisor, the way an update's restart goes: the ring and the speaker are
+	// put down properly, and an update still on trial is not rolled back as a reboot would.
+	d.restart = &esphome.Button{
+		Base: esphome.Base{
+			ObjectID: "restart",
+			Name:     "Restart",
+			Category: esphome.CategoryConfig,
+		},
+		DeviceClass: "restart",
+		OnPress: func() {
+			slog.Warn("restarting: asked to from Home Assistant")
+			update.Restart("restart button")
 		},
 	}
 }
@@ -470,11 +543,16 @@ func (d *Diag) hardware() {
 		StateClass:  esphome.StateClassMeasurement,
 	}
 
+	// Where the room's brightness is read from. A file under iio or an als_lux is preferred when the
+	// board has one; the Shows and the Spot do not, and report through the input device the screen's
+	// auto-brightness already reads, which roomLux takes instead. So an empty path here is the normal
+	// case on most of these devices and says nothing about whether there is a sensor — it used to be
+	// logged as "no light sensor found", which was alarming and wrong on every board that has one.
 	d.luxPath = metrics.Reader{}.LuxPath()
 	if d.luxPath == "" {
-		slog.Warn("no light sensor found")
+		slog.Info("room brightness comes from the light sensor service; no lux file on this board")
 	} else {
-		slog.Info("light sensor", "at", d.luxPath)
+		slog.Info("room brightness", "at", d.luxPath)
 	}
 	d.lux = &esphome.Sensor{
 		Base: esphome.Base{
@@ -485,6 +563,43 @@ func (d *Diag) hardware() {
 		DeviceClass: "illuminance",
 		StateClass:  esphome.StateClassMeasurement,
 	}
+
+}
+
+// Start builds the one entity that cannot be built with the others.
+//
+// Everything above is made in Get, which init calls, so it is all in place before anything starts.
+// The lens cover cannot be: its package does not know whether there is a shutter until it has opened
+// the input device, and that happens in the hardware phase, long after this package's init has run.
+// Asking at init got false on every device including the Show 8, so the sensor was never published
+// anywhere — the camera still refused a closed shutter, because that is read when the camera opens,
+// but Home Assistant was never told the cover existed.
+//
+// This runs in the network phase at order 90, after the hardware phase and before the api service at
+// order 99 collects the entity list.
+func (d *Diag) Start(context.Context) error {
+	// Start runs again on every restart; the entity is made once, because the list has been handed
+	// out by then and a fresh one would not be in it.
+	if d.lensCover != nil {
+		return nil
+	}
+	// The camera's physical shutter, on the one device that has one. A cover that cannot be seen is
+	// not reported at all: an entity that always says "open" would look like an assurance and be none.
+	present, covered := lensCover()
+	if !present {
+		return nil
+	}
+	d.lensCover = &esphome.BinarySensor{
+		Base: esphome.Base{
+			ObjectID: "lens_cover", Name: "Lens cover", Icon: "mdi:camera-off",
+			Category: esphome.CategoryDiagnostic,
+		},
+		DeviceClass: "opening",
+	}
+	// Closed is the safe state, so the sensor reads the way a door does: open means uncovered.
+	d.lensCover.Set(!covered)
+	watchLensCover(func(covered bool) { d.lensCover.Set(!covered) })
+	return nil
 }
 
 // Measure republishes what the disk holds. Called at start-up and after anything that adds to the cache

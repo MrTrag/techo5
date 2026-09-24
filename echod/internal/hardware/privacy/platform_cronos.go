@@ -8,6 +8,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/HuskerMinion/techo5/echod/internal/layout"
 )
 
 // The Echo Show 5 exposes its mute through the gpio-privacy platform driver rather than a bare
@@ -19,11 +21,35 @@ import (
 // a second "1", or a "0", leaves them cut, and only the physical button releases them. That is
 // the privacy design of the hardware rather than a gap in the driver, so Set(false) reports it
 // instead of pretending.
-const (
-	dir    = "/sys/devices/platform/gpio-privacy"
+//
+// The 1st gen (checkers) has the same latch behind Amazon's amazon-gating driver, with the same
+// state and enable files and the red light following the latch, but its button does not set the
+// latch: it only sends the key, and releases a latch that is set. Measured on a unit 2026-09-19
+// (techo5-checkers docs/hardware.md). So there a press with the microphones live is the
+// daemon's to act on, and a press while muted is only news.
+//
+// The Show 8 (crown) carries the same amazon-gating driver, with the same state and enable files
+// and no gpio-privacy at all; read off a unit 2026-09-22, where the latch sat at 0 and enable was
+// write-only, as on checkers. Whether its button also only releases has not been measured — that
+// needs a finger on the unit while a capture is open — so it is assumed to match the driver it
+// shares. If it turns out to set the latch itself, gating() is the one place to correct.
+var (
+	dir    = latchDir()
 	state  = dir + "/state"
 	enable = dir + "/enable"
+)
 
+// gating is whether the mute is Amazon's amazon-gating driver rather than gpio-privacy.
+func gating() bool { return layout.Checkers() || layout.Crown() }
+
+func latchDir() string {
+	if gating() {
+		return "/sys/devices/platform/amazon-gating"
+	}
+	return "/sys/devices/platform/gpio-privacy"
+}
+
+const (
 	// toggleLag is how long the latch takes to report the flip once enable has been pulsed,
 	// with margin over the 1000 ms pulse.
 	toggleLag = 1400 * time.Millisecond
@@ -34,9 +60,10 @@ type platform struct{}
 
 func (platform) Get() (bool, error) { return reads(state, "1") }
 
-// The button feeds the same latch, so by the time the key event arrives the state has already
-// changed. Acting on the press would toggle it straight back.
-func (platform) HardwareToggles() bool { return true }
+// On the 2nd gen the button feeds the same latch, so by the time the key event arrives the state has
+// already changed, and acting on the press would toggle it straight back. An amazon-gating button
+// only releases: it has acted when the microphones were cut, and not when they were live.
+func (platform) HardwareActs(wasMuted bool) bool { return !gating() || wasMuted }
 
 func (platform) Lag() time.Duration { return toggleLag }
 
@@ -81,7 +108,7 @@ func (p platform) Toggle() (bool, error) {
 // itself and has no brightness control, so it always reads bright while muted.
 type noLED struct{}
 
-func (noLED) SetBright(bool) error { return nil }
+func (noLED) SetBright(bool) error  { return nil }
 func (noLED) Bright() (bool, error) { return true, nil }
 
 func platformMute() (Mute, error) {
@@ -102,3 +129,7 @@ func reads(path, value string) (bool, error) {
 	}
 	return strings.TrimSpace(string(b)) == value, nil
 }
+
+// Nothing to seed: the hardware holds the microphones, and the saved state reaches the latch through
+// the mute feature. See privacy.Seed.
+func seedSoftwareCut(bool) {}

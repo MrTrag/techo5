@@ -40,7 +40,7 @@ const refHold = Rate
 // The path it reads cannot move: the filter learns one path from the speaker, and the beamformer steers
 // at the loudest sound, which during playback is our own speaker. Steering into the echo is the opposite
 // of useful when the echo is what is being removed. A fixed combination of microphones is as fixed as one
-// microphone, though, because the microphones do not move: on the Dot, the average of seven cancelled
+// microphone, though, because the microphones do not move: on the Dot, the average of seven canceled
 // once measured exactly as well as seven cancellers averaged, and 5 dB better than the center microphone
 // alone. Which path it reads is cancelInput's choice.
 type canceller struct {
@@ -164,7 +164,10 @@ func (c *canceller) apply(raw []byte, mic []int16) []int16 {
 		c.best.Store(erle)
 	}
 
-	// Process reuses its buffer and listeners keep what they are handed, so this is copied out.
+	// The engines hand back a buffer of their own that the next block overwrites, and the caller runs
+	// the denoiser and the leveler over what this returns, so the block is moved somewhere they may
+	// write on. This buffer is reused as well: what apply returns is only good until the next call,
+	// and broadcast copies it before any listener keeps it.
 	if cap(c.mono) < len(out) {
 		c.mono = make([]int16, len(out))
 	}
@@ -202,7 +205,7 @@ func playing(ref []int16) bool {
 // music the two measure within 12-17 dB of each other, which caps cancellation far above anything the
 // filter reaches, so a stereo reference would buy nothing.
 func referenceInto(raw []byte, dst []int16) {
-	const frameBytes = Channels * Bits / 8
+	frameBytes := Channels * Bits / 8
 
 	frames := min(len(raw)/frameBytes, len(dst))
 	for f := range frames {
@@ -237,7 +240,7 @@ func (s *Source) SetCancelling(on bool) {
 }
 
 // SetCancelEngine chooses which canceller runs — "builtin" or "webrtc" — and reports what it
-// settled on. Serialised with the capture loop, since the engine is used from there.
+// settled on. Serialized with the capture loop, since the engine is used from there.
 func (s *Source) SetCancelEngine(name string) string {
 	if s.cancel == nil {
 		return "builtin"

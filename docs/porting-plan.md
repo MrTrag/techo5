@@ -13,7 +13,7 @@ red indicator from userspace, and the matching GPL kernel source drop.
 Step 1 — done: `cmd/audioprobe` (pure Go, `internal/alsa` from EchoLocal)
 captures and plays through the raw devices with no vendor HAL involvement.
 Channel map established: mic, mic copy, loopback L, loopback R. Build with
-`GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build ./cmd/audioprobe`.
+`GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build ./cmd/audioprobe` (from `echod/`, where it now lives).
 
 Step 2 — **working end to end** (2026-09-14). The daemon is vendored under `echod/` and builds
 for cronos (default) and the Dot (`-tags dot`). On the Show it captures, plays, detects the wake
@@ -54,7 +54,7 @@ Still to do for M1:
   is a SIGKILL and looks like a crash — during a trial, stop the daemon with `kill -TERM` (the
   bench scripts and the installer do), or simply leave it for five minutes.
 - Loudness: the amplifier's safe mode was the cap (see hardware.md); the daemon clears it,
-  speech is normalised to −14 dBFS RMS, and the volume curve sits 6 dB under the Dot's.
+  speech is normalized to −14 dBFS RMS, and the volume curve sits 6 dB under the Dot's.
 
 The port covers:
 
@@ -379,7 +379,7 @@ session.
    the extended filter is the double-talk balance that keeps the wake word
    working; analog mic gain must stay modest (our MICPGA 40) with the boost
    applied digitally after cancellation, because a clipped echo cannot be
-   cancelled; averaging or beamforming mics this close buys nothing, so one
+   canceled; averaging or beamforming mics this close buys nothing, so one
    mic + AEC + NS is the end state — which retires the two-mic canceller idea.
    DONE the same night as a helper process: `tools/aec/techo5-aec.cpp`
    (WebRTC AudioProcessing from Alpine's `webrtc-audio-processing-1`, full
@@ -434,7 +434,7 @@ session.
    DMA are programmed through the ISP driver's register mmap from the genuine
    MT8163 libcamdrv sources (saved outside the repo, see camera-research.md).
    IN THE DAEMON 2026-09-16: `hardware/camera` streams on demand (TG frame
-   counter for sync, three DMA slots, 800x600 RGBA with grey-world white
+   counter for sync, three DMA slots, 800x600 RGBA with gray-world white
    balance, sensor stops 5 s after the last user, refused while muted);
    `feature/camera` serves http://<device>:8181/camera.jpg and /camera.mjpeg
    for Home Assistant's Generic Camera / MJPEG IP Camera integrations; the
@@ -520,12 +520,12 @@ session.
    rows are 52 px with 40 px buttons (were 36/28, under 5 mm on this panel).
    Verified on the bench: alarm set from Home Assistant rang on the minute,
    stopped from the screen; snoozed from Home Assistant, shown as snoozed,
-   cancelled with Stop.
+   canceled with Stop.
    EXPOSURE 2026-09-16: the loop metered the plain mean of the frame, so a
    window or ceiling lamp set the exposure and a face went dark; the tone put
    the top percentile at white with nothing at black (darkest pixel 44/255,
    milky). Now `meter` averages an 8x6 zone grid of green samples weighted to
-   the centre (x4) with zones over 870/1023 at 0.15; `convert` takes the
+   the center (x4) with zones over 870/1023 at 0.15; `convert` takes the
    darkest 0.1% as black (capped at 64 on the summed-green scale; a room's
    floor measured 43) and steepens gamma from 1/1.8 up to 1/2.7 when the top
    percentile is over 3x the central median. Synthetic backlit frame: metered

@@ -24,6 +24,7 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/feature/mute"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/security"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/sendspin"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/timer"
 	"github.com/HuskerMinion/techo5/echod/internal/hardware/touch"
 	"github.com/HuskerMinion/techo5/echod/internal/layout"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/wake"
@@ -36,7 +37,7 @@ import (
 // deviceModel is what the About row calls this device.
 const deviceModel = "Echo Spot"
 
-// themeRows are none: the Spot has its own colours and no themes.
+// themeRows are none: the Spot has its own colors and no themes.
 func themeRows() []settingRow { return nil }
 
 // deviceCard, devicePicker, deviceChoose and deviceRowTap are the Show's own cards, lists and rows;
@@ -63,7 +64,7 @@ func (d *Display) deviceRowTap(id string, _ part, _ int) bool {
 	return true
 }
 
-// swatchStrip is the custom colours row, which the Spot has no use for.
+// swatchStrip is the custom colors row, which the Spot has no use for.
 func (r *paint) swatchStrip(settingRow, int, int, int) {}
 
 // openSettings puts the settings screen up on its six categories. Called with d.mu held.
@@ -119,6 +120,9 @@ func restartNow() { restartDevice() }
 // than going dark.
 const nightRowLabel = "Dim at night"
 
+// hasNightLight is the Show's choice of a night light or a dark screen; the Spot's night only dims.
+const hasNightLight = false
+
 // adaptRows fits the shared rows to the round card, which is narrower than the Show's: shorter
 // labels, a status under a row's name rather than beside its button, no second button beside a
 // choice (Weather's Show: the forecast is on the dial), and Updates as two rows, its channel and
@@ -131,6 +135,12 @@ func adaptRows(rows []settingRow, sv sheetView) []settingRow {
 			row.value = ""
 		case row.id == "slideshow":
 			row.sub = "" // its choice needs the room
+		case row.id == "ringvol" && row.value == "Silent":
+			row.sub = "No sound at all"
+		case row.id == "ringvol":
+			row.sub = "Not the music's"
+		case row.id == "musicstrip":
+			continue // the strip is the Show's; the round face has no clock page under it to share
 		case row.id == "wakesens":
 			row.label = "Sensitivity"
 		case row.id == "sendspin":
@@ -165,7 +175,7 @@ func adaptRows(rows []settingRow, sv sheetView) []settingRow {
 }
 
 func init() {
-	// The Spot's own colours, with its listening blue as the accent.
+	// The Spot's own colors, with its listening blue as the accent.
 	walnut, amber, cream, dim, ember = colBackground, colListening, colText, colDim, colTrack
 	// Empty is the default night here (defaultNight), so Never needs a value of its own, which
 	// inNight reads as no night; the default is offered as a choice of its own.
@@ -190,7 +200,7 @@ var spotFaces = sync.OnceValue(func() *sheetFaces {
 
 // The round card's frame: rows between spotListTop and spotListBottom, their labels and controls
 // between spotCardLeft and spotCardRight (where the circle is wide enough for both), and its
-// buttons centred on spotButtonsY.
+// buttons centered on spotButtonsY.
 const (
 	spotListTop    = 106
 	spotListBottom = 404
@@ -223,18 +233,18 @@ func (r *roundRenderer) sheetFace(s roundScene) {
 	r.zmu.Unlock()
 }
 
-// centredText writes s centred across the panel.
-func (r *roundRenderer) centredText(face font.Face, s string, baseline int, c color.RGBA) {
-	r.paint.text(face, s, centre-r.paint.width(face, s)/2, baseline, c)
+// centeredText writes s centered across the panel.
+func (r *roundRenderer) centeredText(face font.Face, s string, baseline int, c color.RGBA) {
+	r.paint.text(face, s, center-r.paint.width(face, s)/2, baseline, c)
 }
 
 // categoryTiles is the settings screen's first page: a tile for each category, the last one opened
 // raised in the accent, and Done.
 func (r *roundRenderer) categoryTiles(sel category) {
 	fc := r.faces()
-	r.centredText(fc.header, "Settings", 70, cream)
+	r.centeredText(fc.header, "Settings", 70, cream)
 	const tw, th, gap = 142, 96, 12
-	x0, y0 := centre-tw-gap/2, 96
+	x0, y0 := center-tw-gap/2, 96
 	for c := category(0); c < categories; c++ {
 		col, row := int(c)%2, int(c)/2
 		b := image.Rect(x0+col*(tw+gap), y0+row*(th+gap), x0+col*(tw+gap)+tw, y0+row*(th+gap)+th)
@@ -254,10 +264,10 @@ func (r *roundRenderer) categoryTiles(sel category) {
 		r.paint.text(fc.navBold, name, b.Min.X+(tw-r.paint.width(fc.navBold, name))/2, b.Min.Y+78, fg)
 		r.addZone(zone{r: b.Inset(-gap / 2), kind: zoneCat, cat: c})
 	}
-	done := image.Rect(centre-62, 424, centre+62, 460)
+	done := image.Rect(center-62, 424, center+62, 460)
 	r.roundFill(done, 18, surface(4), surface(3))
 	r.roundStroke(done, 18, 1, ember)
-	r.centredText(fc.button, "Done", 449, cream)
+	r.centeredText(fc.button, "Done", 449, cream)
 	r.addZone(zone{r: done.Inset(-8), kind: zoneDone})
 }
 
@@ -265,8 +275,8 @@ func (r *roundRenderer) categoryTiles(sel category) {
 // and its buttons at the foot. It returns how far the rows can scroll.
 func (r *roundRenderer) roundCard(v cardView) int {
 	fc := r.faces()
-	r.centredText(fc.header, r.fit(fc.header, v.title, 340), 66, cream)
-	r.centredText(fc.sub, r.fit(fc.sub, v.blurb, 330), 90, dim)
+	r.centeredText(fc.header, r.fit(fc.header, v.title, 340), 66, cream)
+	r.centeredText(fc.sub, r.fit(fc.sub, v.blurb, 330), 90, dim)
 	r.rule(90, 390, 104, 0.8)
 	r.cardButtons(v.actions)
 	under := slices.Clone(r.dst.Pix)
@@ -276,7 +286,7 @@ func (r *roundRenderer) roundCard(v cardView) int {
 	if len(v.rows) == 0 && v.note != "" {
 		y := list.Min.Y + 40
 		for _, line := range r.wrap(fc.value, v.note, 330) {
-			r.centredText(fc.value, line, y, dim)
+			r.centeredText(fc.value, line, y, dim)
 			y += 30
 		}
 	}
@@ -306,7 +316,7 @@ func (r *roundRenderer) cardButtons(actions []headerAction) {
 	for _, b := range buttons {
 		total += r.paint.width(fc.button, b.label) + 44 + gap
 	}
-	right := centre + total/2
+	right := center + total/2
 	for i := len(buttons) - 1; i >= 0; i-- {
 		b := buttons[i]
 		left := r.pillButton(right, spotButtonsY, b.label, b.style)
@@ -319,11 +329,11 @@ func (r *roundRenderer) cardButtons(actions []headerAction) {
 // scrolling under a dragged finger, with Back at the foot. It returns how far it can scroll.
 func (r *roundRenderer) roundList(p pickerView, scroll int) int {
 	fc := r.faces()
-	r.centredText(fc.header, r.fit(fc.header, p.title, 340), 66, cream)
+	r.centeredText(fc.header, r.fit(fc.header, p.title, 340), 66, cream)
 	r.cardButtons(nil)
 	under := slices.Clone(r.dst.Pix)
 
-	const optH, left, right = 54, centre - 160, centre + 160
+	const optH, left, right = 54, center - 160, center + 160
 	list := image.Rect(left-20, 90, right+20, spotListBottom)
 	maxScroll := max(len(p.opts)*optH-list.Dy(), 0)
 	scroll = min(max(scroll, 0), maxScroll)
@@ -457,7 +467,8 @@ func (d *Display) sheetView(now time.Time) sheetView {
 	if st.demo {
 		st.name, st.address, st.weather = "Kitchen", "192.168.1.50", "Home"
 	}
-	sv := sheetView{st: st, bt: btaudio.Get().State(), draft: draft, snooze: c.Alarms.Snooze(), now: now}
+	sv := sheetView{st: st, bt: btaudio.Get().State(), draft: draft, snooze: c.Alarms.Snooze(), now: now,
+		timers: timer.Get().List(now)}
 	switch st.cat {
 	case catAlarms:
 		sv.alarms = alarm.Get().View(now)

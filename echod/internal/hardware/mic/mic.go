@@ -58,6 +58,10 @@ type Source struct {
 	// wake model is streaming, so a missing frame corrupts its state rather than just losing audio.
 	dropped atomic.Uint64
 
+	// rewiring says the next read failure is the handover in Rewire rather than a fault, so Run can
+	// ask for a restart instead of reporting a crash. See the comment on service.ErrRestart.
+	rewiring atomic.Bool
+
 	history history
 
 	// mixer is read by the reader and replaced from Home Assistant, both under mu.
@@ -149,6 +153,11 @@ func (s *Source) Name() string { return "capture" }
 
 // Start takes the capture device, off Android if it got there first, the same way the speaker does.
 func (s *Source) Start(context.Context) error {
+	// Before the device is opened, so that a unit whose mute is the daemon's own is already cutting
+	// when the first frame arrives. The mute feature restores the same value later in the Device
+	// phase; this is only about the frames captured before it gets there. See privacy.Seed.
+	privacy.Seed(config.Get().Microphone.Muted)
+
 	err := s.open()
 	if err == nil || !errors.Is(err, alsa.ErrBusy) {
 		return err
@@ -279,7 +288,7 @@ func Decode(raw []byte) [][]int16 { return decode(raw, 0, Mics) }
 func Reference(raw []byte) [][]int16 { return decode(raw, RefFirst, Refs) }
 
 func decode(raw []byte, first, n int) [][]int16 {
-	const frameBytes = Channels * Bits / 8
+	frameBytes := Channels * Bits / 8
 
 	frames := len(raw) / frameBytes
 	out := make([][]int16, n)
@@ -296,7 +305,7 @@ func decode(raw []byte, first, n int) [][]int16 {
 	return out
 }
 
-// Run reads until ctx is cancelled. It reads whether or not anyone is listening, because a stream
+// Run reads until ctx is canceled. It reads whether or not anyone is listening, because a stream
 // left unread overruns and the hardware ring is only 160 ms deep.
 func (s *Source) Run(ctx context.Context) error {
 	pcm := s.device()
@@ -327,6 +336,11 @@ func (s *Source) Run(ctx context.Context) error {
 					slog.Warn("capture overrun", "times", overruns)
 				}
 				continue
+			}
+			// The device was handed back on purpose and this read died with it, so ask to be
+			// started again rather than reporting the handover as a failure.
+			if s.rewiring.Swap(false) {
+				return fmt.Errorf("%w: the capture device was handed back after the mute came off", service.ErrRestart)
 			}
 			return err
 		}
@@ -368,19 +382,32 @@ func (s *Source) broadcast(raw []byte) {
 	// Everything downstream reads the same single channel, whichever way it was made: wake detection
 	// and what Home Assistant transcribes should never disagree about what was heard.
 	//
-	// The recent history is kept whether or not anyone is listening: a wake word is only recognised
+	// The recent history is kept whether or not anyone is listening: a wake word is only recognized
 	// once it has been said, so by the time a turn starts, the words after it are already past.
 	mics := Decode(raw)
 	frame := s.mixer.Mix(mics)
 
-	// While something is playing, an echo cancelled fixed path replaces the mix (cancelInput): the filter
+	// While something is playing, an echo canceled fixed path replaces the mix (cancelInput): the filter
 	// learns a single acoustic path, and the beamformer would steer at the loudest thing in the room,
-	// which during playback is the speaker being cancelled.
+	// which during playback is the speaker being canceled.
 	if s.cancelling && s.cancel != nil {
-		if cancelled := s.cancel.apply(raw, cancelInput(s.mixer, mics, frame)); cancelled != nil {
-			frame = cancelled
+		if canceled := s.cancel.apply(raw, cancelInput(s.mixer, mics, frame)); canceled != nil {
+			frame = canceled
 		}
 	}
+
+	// From here the frame belongs to whoever is handed it, so it is copied out of whatever produced
+	// it. Both the canceller and the vendor beamformer return a buffer they overwrite on the next
+	// frame, and the denoiser and the leveler below work in place, so without this a listener holding
+	// a frame would find it turn into a later one: its channel is eight deep, and a wake engine a
+	// frame or two behind would score the newest frame twice over and never see what it missed. That
+	// is the wake word going unheard while music is playing, since cancelling is on by default.
+	//
+	// One buffer a frame, shared by every listener, because listeners only read what they are given.
+	// It is 640 bytes every 20 ms, next to the one Decode already allocates per microphone, so
+	// a pool or a ring would save nothing worth measuring — and a ring would have to be sized against
+	// how far behind a listener may fall, which is the thing this is fixing.
+	frame = append([]int16(nil), frame...)
 
 	s.findFacing(mics)
 
@@ -458,7 +485,7 @@ func (s *Source) Close() error {
 // Mono takes the center microphone alone, narrowed from 24 bits to 16. The beamformed mix is what
 // listeners get; this is for tools that need one microphone as it comes off the hardware.
 func Mono(raw []byte) []int16 {
-	const frameBytes = Channels * Bits / 8
+	frameBytes := Channels * Bits / 8
 
 	out := make([]int16, len(raw)/frameBytes)
 	for i := range out {

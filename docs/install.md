@@ -11,11 +11,24 @@ firmware): releases don't carry it, so it is copied into the store before the pa
 `userdata` is kept (TECHO5 reads the Wi-Fi network Android saved from it), and TWRP stays in
 `recovery`, so LineageOS can be put back with TWRP and its zip.
 
+## Unlock the bootloader first
+
+**The bootloader has to be unlocked before any of this works.** Running LineageOS does not mean it
+is: the unlock is a separate exploit, with a shorting trick to get the device into BROM mode, not a
+`fastboot flashing unlock`. Without it the installer stops at the first write with
+
+```
+FAILED (remote: 'the command you input is restricted on locked hw')
+```
+
+- Show 5 **2nd gen** (cronos):
+  [amonet-cronos](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-show-5-2nd-gen-2021-cronos.4772596/)
+- Show 5 **1st gen** (checkers):
+  [amonet-checkers](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-show-5-1st-gen-2019-checkers.4762900/)
+
 ## What you need
 
-- An Echo Show 5 2nd gen already unlocked with
-  [amonet-cronos](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-show-5-2nd-gen-2021-cronos.4772596/)
-  and running
+- An Echo Show 5 2nd gen, **unlocked as above**, running
   [LineageOS 18.1](https://xdaforums.com/t/rom-unofficial-11-cronos-lineageos-18-1-for-the-amazon-echo-show-5-2021.4772598/),
   connected to your Wi-Fi in Android, with USB debugging on.
 - Its power adapter and a USB **data** cable to the PC. Keep it on mains power while flashing.
@@ -30,22 +43,34 @@ With Python 3, `adb`, `fastboot` and `git` (setup for each system:
 ```
 git clone https://github.com/HuskerMinion/techo5
 cd techo5
-python3 tools/install-show.py --serial <serial> --name "Kitchen" --dry-run   # download and check the release only
-python3 tools/install-show.py --serial <serial> --name "Kitchen"
+python3 tools/install-show.py --dry-run   # download and check the release only
+python3 tools/install-show.py
 ```
 
 On Windows, type `python` instead of `python3`.
 
+Run like that, it finds the Show (asking which, if several are plugged in), asks what to call it in
+Home Assistant, and shows a summary and asks once before the first step that can't be undone. From a
+script, give everything as switches instead: `--serial <serial> --name "Kitchen" --force`, and it asks
+nothing (it also asks nothing, and stops rather than guess, when its input or output isn't a terminal).
+
 It does steps 1 to 6 below: downloads the latest release and checks the boot image and root filesystem
 against their checksums, keeps LineageOS's boot image in `backups/<serial>/` when adb is root, flashes,
-creates the slot store over the USB serial console (it asks before erasing), provisions the name and
+creates the slot store over the USB serial console, provisions the name and
 the Home Assistant key (kept in `backups/<serial>/home-assistant.key`), and waits for the first boot.
 `--ssh-key ~/.ssh/id_ed25519.pub` also turns SSH on with your key. Then go to
 [step 7](#7-add-it-to-home-assistant).
 
 On Linux you may need to be in the `dialout` group for the serial console
 (`sudo usermod -aG dialout $USER`, then log in again), and ModemManager, if installed, should be
-stopped while installing (`sudo systemctl stop ModemManager`).
+stopped while installing (`sudo systemctl stop ModemManager`). The installer checks both before it
+changes anything and says so; if the console still can't be opened later, it says that too while it
+waits, and it can be fixed in another terminal without stopping the install.
+
+If an install stops partway, after the boot image was flashed, the unit is left in the rescue
+environment (its screen says RESCUE) and a re-run can't see it over adb; the installer says so. The
+unit isn't lost: the steps from [step 4](#4-create-the-slot-store-and-install) on can be done by hand
+on its USB serial console, and `STORE=/store slotctl status` there says how far it got.
 
 ## By hand
 
@@ -60,11 +85,14 @@ If more than one Android or fastboot device is plugged in, pass `-s <serial>` to
 
 The boot image is the kernel plus the small rescue environment that sets a unit up. Two ways:
 
-- **From a release (simplest).** Download `techo5-boot-<version>.img` from the same
-  [release](https://github.com/HuskerMinion/techo5/releases) as the root filesystem, or, as it
-  changes rarely and most releases don't carry one, from the newest earlier release that does
-  (v0.4.2 for every release since, so far). It carries no
-  SSH key, so steps 4 and 5 are typed into the unit's **USB serial console**.
+- **From a release (simplest).** Download `techo5-boot-<version>.img` — on an Echo Show 5 1st gen
+  (checkers), `techo5-boot-checkers-<version>.img`, and on an Echo Show 8 (crown),
+  `techo5-boot-crown-<version>.img`, each built against that board's own
+  kernel and device tree — from the same
+  [release](https://github.com/HuskerMinion/techo5/releases) as the root filesystem. The boot image
+  changes rarely, so most releases don't carry one; when yours doesn't, take it from the newest
+  earlier release that does. It carries no SSH key, so steps 4 and 5 are typed into the unit's
+  **USB serial console**.
 - **Built yourself with your own SSH key**, to SSH into the rescue environment instead:
 
   ```
@@ -101,8 +129,9 @@ fastboot -s <serial> continue
 ```
 
 The unit boots the TECHO5 initramfs. With LineageOS still on `system` there is no slot store, so it
-stays in the **rescue environment**: it joins the Wi-Fi network Android saved and shows a test
-screen. Open a root shell on it:
+stays in the **rescue environment**: it joins the Wi-Fi network Android saved and puts **RESCUE** on
+the screen, with a ticking clock and a line saying why — at this point, "No slot store yet - normal
+at install", which is exactly where you should be. Open a root shell on it:
 
 - **USB serial console** (any boot image), at 115200 baud; press Enter for a `#` prompt:
   - Windows: a new "USB Serial Device (COMn)" in Device Manager; open it in PuTTY (connection type
@@ -114,6 +143,14 @@ screen. Open a root shell on it:
   ```
   ssh -i techo5_ed25519 root@<address>
   ```
+
+> **The released boot image carries no key, and rescue will not invent one.** It reads
+> `/data/misc/techo5/ssh/authorized_keys` off the unit's own storage and starts SSH only if that file
+> has something in it. On a unit that has never had a key put there — which is every unit being
+> installed for the first time — rescue has **no** network way in, and the USB serial console above is
+> the only way to reach it. That is deliberate: a published image with a key inside would be a key
+> everybody has. It does mean the serial cable is not a fallback, it is the route, so have one that
+> carries data before you flash.
 
 ## 4. Create the slot store and install
 
@@ -192,21 +229,80 @@ Then:
   connects, and keeps it from then on.
 - **Wake word**: the default is "Alexa". Change it on the device (swipe down from the top, Sound,
   Wake word) or in Home Assistant; the other follows.
-- **Home Assistant token** (optional, for the forecast page, local radio stations and the list of
-  weather sources): create a long-lived access token on your Home Assistant profile page, then run
+- **Home Assistant token** (optional, for the forecast page, local radio stations, the list of
+  weather sources, and cameras): create a long-lived access token on your Home Assistant profile page, then run
   the `esphome.<device>_home_assistant` action with `url` (like `http://192.168.1.20:8123`) and
   `token`.
 - **Weather**: Home Assistant's own forecast by default. To show another weather entity, use the
   settings screen (General, Weather), the "Weather source" select, or `esphome.<device>_home_weather`.
-- **Radio**: with the token, the drawer (swipe in from the right edge of the clock, Radio) lists
-  stations near home and popular ones, from the Radio
-  Browser integration Home Assistant sets up on its own (add it under Devices & services if it is
-  missing). Your own favorites can be wired with `esphome.<device>_home_radio`.
+- **Radio**: three ways to get stations onto the device, none of which needs the others. See
+  [Radio](#radio) below.
 - **Security**: SSH, and the camera and screen pages on port 8181, have switches on the settings
   screen (Privacy) and in Home Assistant. SSH keys only come from Home Assistant (`esphome.<device>_ssh_keys`).
 - **Updates**: the firmware update entity installs new releases into the other slot, reboots, and
   falls back if the new slot does not settle.
 - The old Android integrations for the unit (ShowAssist, the View Assist companion) can be deleted.
+
+## Radio
+
+There are three places a station can come from. Any of them works on its own.
+
+**1. Radio Browser (needs the Home Assistant token).** On a Show, swipe in from the right edge of
+the clock and choose Radio; on a Spot, turn the dial to Radio. The device lists stations near home
+and popular ones, from the Radio Browser integration Home Assistant sets up by itself. If it is
+missing, add it under Devices & services. "Near home" is worked out from the location set in Home
+Assistant, so set that if the list looks like somebody else's country.
+
+**2. Stations kept on the device (needs nothing at all).** Open the setup page (Settings, Privacy,
+Setup page) and add a station as a name and the address of its stream. The device plays these
+itself, so they work with Home Assistant switched off, which is the point of them. Only an `http` or
+`https` address is kept. They appear under Radio as "On this device", beside the lists that need
+Home Assistant.
+
+  On a Dot these can be typed on the setup page but not yet started: the radio page belongs to the
+  screen, and a Dot has none. Ask it for music through Home Assistant until that is fixed.
+
+**3. Your own favorites in Home Assistant.** If you already have an input_select of stations and a
+script that plays one, wire them up with the `esphome.<device>_home_radio` action:
+
+| Argument | What it is |
+|---|---|
+| `stations` | `input_select` entities whose options are station names, comma separated, listed in that order |
+| `now` | an entity whose state names the station playing, shown on the screen while it plays |
+| `service` | the script that plays a station, e.g. `script.radio_play_on_speaker` |
+| `field` | the script's station argument (default `station`) |
+| `speaker_field` | the script's argument for which speaker to play on |
+| `speaker` | this device's media player entity, if the device should not work it out itself |
+
+The device calls that script with the station name and its own media player entity, and the script
+decides what to play. A script of two lines is enough:
+
+```yaml
+radio_play_on_speaker:
+  fields:
+    station: {}
+    speaker: {}
+  variables:
+    urls:
+      "KXYZ 101.1": "https://stream.example.org/kxyz"
+      "The Mountain": "https://stream.example.org/mountain"
+  sequence:
+    - action: media_player.play_media
+      target: { entity_id: "{{ speaker }}" }
+      data:
+        media_content_type: music
+        media_content_id: "{{ urls[station] }}"
+```
+
+**Nothing to set up for the audio itself.** Home Assistant transcodes a stream for the device
+through its own ESPHome proxy, which is part of that integration: the URLs in the log with
+`/api/esphome/ffmpeg_proxy/` in them are its doing, and there is nothing to install or configure.
+
+**If the stream is dropped.** Those proxy streams end by themselves sometimes: after five minutes,
+or thirteen, with no pattern. The device notices and asks for the station again three seconds later.
+It will do that three times in ten minutes and then leave it off, since a station that will not stay
+up is not going to. The log says `the stream ended by itself, putting it back on`. Music starting
+again on its own is this, not a fault.
 
 ## Troubleshooting
 
@@ -216,7 +312,7 @@ Then:
 | An update from Home Assistant fails with `context deadline exceeded` | The download was too slow, usually on 2.4 GHz next to the unit's own Bluetooth. Press Install again; from v0.2.5 the unit moves itself to the network's 5 GHz radio when one is in range. |
 | The screen shows "hacked fastboot" | A leftover `reboot bootloader` request: `fastboot -s <serial> continue`. |
 | No SSH after the switch to the slot | SSH is off unless step 5 was done: turn on the SSH switch in Home Assistant and send a key with the `ssh_keys` action, or use the USB serial console. |
-| The unit sits in rescue | No bootable slot. `slotctl status` shows why; the daemon still runs from a slot in rescue, so Home Assistant keeps working while you look. |
+| The unit sits in rescue | The screen says so: **RESCUE**, with the reason on the last line. No bootable slot. `slotctl status` shows why; the daemon still runs from a slot in rescue, so Home Assistant keeps working while you look. |
 
 To go back to LineageOS: boot TWRP from `recovery`, flash the LineageOS zip (which rewrites `system`)
 and the LineageOS boot image.

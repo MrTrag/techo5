@@ -49,8 +49,11 @@ const frame = speaker.Channels * 2
 // It is the speaker driver's background: a reply or an announcement takes the speaker and this
 // yields, carrying on from where it was rather than starting again.
 type Stream struct {
-	out     *speaker.Player
+	out     *speaker.Bed // the track's own queue, so a reply can sound over it
 	changed func()
+
+	// ended says a track stopped of its own accord, for whoever put it on to decide what that means.
+	ended func(item string)
 
 	// bg is the queue of things that play for minutes. A track joins it while it has something to
 	// play and leaves when it stops, so whatever it interrupted carries on afterwards.
@@ -101,8 +104,8 @@ type track struct {
 //
 // It joins rather than registers: a track is one of several things that play for minutes, and it only
 // takes the speaker while it has something to play.
-func NewStream(sound *speaker.Driver, out *speaker.Player, changed func()) *Stream {
-	return &Stream{out: out, changed: changed, gain: 1, target: 1, bg: sound.Backgrounds()}
+func NewStream(sound *speaker.Driver, out *speaker.Player, changed func(), ended func(string)) *Stream {
+	return &Stream{out: out.Bed(), changed: changed, ended: ended, gain: 1, target: 1, bg: sound.Backgrounds()}
 }
 
 // rampSamples is how many interleaved samples a full move between silence and full level takes, so
@@ -177,7 +180,8 @@ func (m *Stream) Play(url string) {
 		if err != nil && ctx.Err() == nil {
 			slog.Error("playing media failed", "err", err)
 		}
-		m.finished(t)
+		// Canceled means stopped or replaced, which is somebody's doing and nobody's to undo.
+		m.finished(t, ctx.Err() == nil)
 	})
 }
 
@@ -200,11 +204,12 @@ func (m *Stream) PlayNoise(sounds ...string) {
 	slog.Info("playing noise", "sounds", sounds)
 
 	safe.Go("noise", func() {
+		// generate runs until something stops it; an error that is not the stop is a failure.
 		err := m.generate(ctx, t, fill)
-		if err != nil && ctx.Err() == nil {
+		if ctx.Err() == nil {
 			slog.Error("playing noise failed", "err", err)
 		}
-		m.finished(t)
+		m.finished(t, false)
 	})
 }
 
@@ -301,6 +306,7 @@ func (m *Stream) Stop() {
 	m.mu.Lock()
 	t := m.track
 	m.track, m.paused, m.rewind = nil, false, nil
+	m.forget()
 	m.unblock()
 	m.mu.Unlock()
 
@@ -360,6 +366,16 @@ func (m *Stream) Playing() (playing, paused bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.track != nil && !m.paused, m.track != nil && m.paused
+}
+
+// forget drops the holds on a player that is leaving the speaker's backgrounds. Nothing will release
+// them once it has gone: a turn's end and a reply's end are passed to the backgrounds there are, and
+// a stopped player is not one. Kept, they held every station started afterwards, silent while Home
+// Assistant was told it was playing. What still holds the speaker when it starts again stands it down
+// afresh as it rejoins. Wants mu.
+func (m *Stream) forget() {
+	m.holds = 0
+	m.duckHeld = false
 }
 
 // block and unblock hold and release the stream. Both want mu.
@@ -426,19 +442,23 @@ func (m *Stream) replay() {
 }
 
 // finished clears the track once it has played out, unless it has already been replaced.
-func (m *Stream) finished(t *track) {
+func (m *Stream) finished(t *track, itself bool) {
 	m.mu.Lock()
 	if m.track != t {
 		m.mu.Unlock()
 		return
 	}
 	m.track, m.paused, m.rewind = nil, false, nil
+	m.forget()
 	m.unblock()
 	m.mu.Unlock()
 
 	m.bg.Gave(m)
 
-	slog.Info("media finished", "item", t.item)
+	slog.Info("media finished", "item", t.item, "by itself", itself)
+	if itself && t.item != "" && len(t.sounds) == 0 && m.ended != nil {
+		m.ended(t.item)
+	}
 	m.changed()
 }
 

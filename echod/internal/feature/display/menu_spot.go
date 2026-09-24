@@ -4,16 +4,18 @@ package display
 
 import (
 	"fmt"
+	"image"
 	"image/color"
 	"math"
 	"strings"
 
 	"github.com/HuskerMinion/techo5/echod/internal/config"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/dashboard"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/home"
 )
 
 // The ring menu is a dial: the items sit on a circle, the one at the top is chosen, drawn larger in
-// its own colour, and named in the middle. While it is open a finger dragged round the ring turns it;
+// its own color, and named in the middle. While it is open a finger dragged round the ring turns it;
 // letting go snaps it to the nearest item; a tap on an item does it, and a tap in the middle does the
 // one at the top.
 //
@@ -57,13 +59,16 @@ const (
 	itemWeather  itemID = "weather"
 	itemCamera   itemID = "camera"
 	itemTimers   itemID = "timers"
+	itemAnnounce itemID = "announce"
 	itemSettings itemID = "settings"
 	itemSleep    itemID = "sleep"
+
+	itemDashboard itemID = "dashboard"
 )
 
 type menuItem struct {
-	id     itemID
-	colour color.RGBA
+	id    itemID
+	color color.RGBA
 }
 
 // mainItems go clockwise from the top.
@@ -75,7 +80,9 @@ var mainItems = []menuItem{
 	{itemVolume, color.RGBA{58, 160, 255, 255}},
 	{itemWeather, color.RGBA{255, 196, 64, 255}},
 	{itemCamera, color.RGBA{60, 203, 127, 255}},
+	{itemDashboard, color.RGBA{64, 214, 230, 255}},
 	{itemTimers, color.RGBA{255, 176, 32, 255}},
+	{itemAnnounce, color.RGBA{255, 122, 89, 255}},
 	{itemSettings, color.RGBA{176, 150, 255, 255}},
 	{itemSleep, color.RGBA{120, 140, 255, 255}},
 }
@@ -158,7 +165,7 @@ func restFor(i, n int) float64 { return -itemAngle(i, n) }
 // itemPos is where item i of n is on the screen with the dial turned by rot.
 func itemPos(i, n int, rot float64) (x, y float64) {
 	a := itemAngle(i, n) + rot
-	return centre + dialR*math.Sin(a), centre - dialR*math.Cos(a)
+	return center + dialR*math.Sin(a), center - dialR*math.Cos(a)
 }
 
 // topItem is the item of n nearest the top with the dial turned by rot.
@@ -173,7 +180,7 @@ func topItem(rot float64, n int) int {
 
 // dialHitAt says what a tap at x, y is on: the middle, an item of n (its index), or neither.
 func dialHitAt(x, y int, rot float64, n int) (item int, middle bool) {
-	if math.Hypot(float64(x-centre), float64(y-centre)) < dialHub {
+	if math.Hypot(float64(x-center), float64(y-center)) < dialHub {
 		return -1, true
 	}
 	best, bestD := -1, math.MaxFloat64
@@ -186,8 +193,8 @@ func dialHitAt(x, y int, rot float64, n int) (item int, middle bool) {
 	return best, false
 }
 
-// fingerAngle is the direction of x, y from the centre, clockwise from up.
-func fingerAngle(x, y int) float64 { return math.Atan2(float64(x-centre), -float64(y-centre)) }
+// fingerAngle is the direction of x, y from the center, clockwise from up.
+func fingerAngle(x, y int) float64 { return math.Atan2(float64(x-center), -float64(y-center)) }
 
 // wrapAngle brings a in (-π, π].
 func wrapAngle(a float64) float64 {
@@ -229,8 +236,15 @@ func itemName(s roundScene, id itemID) string {
 		return "Weather"
 	case itemCamera:
 		return "Camera"
+	case itemDashboard:
+		if s.showDash {
+			return "Clock"
+		}
+		return "Dashboard"
 	case itemTimers:
 		return "Timers"
+	case itemAnnounce:
+		return "Announce"
 	case itemSettings:
 		return "Settings"
 	case itemSleep:
@@ -249,6 +263,16 @@ func itemHint(s roundScene, id itemID) string {
 	switch id {
 	case itemTalk:
 		return "tap to ask"
+	case itemAnnounce:
+		switch {
+		case s.announceRecording:
+			return "speak now"
+		case !s.announceReady:
+			return "needs a house word"
+		case s.announcePeers > 0:
+			return "heard on " + devicesText(s.announcePeers)
+		}
+		return "no other devices found"
 	case itemCall:
 		switch {
 		case !s.phoneReady:
@@ -294,6 +318,14 @@ func itemHint(s roundScene, id itemID) string {
 		return "none running · ask to set one"
 	case itemSettings:
 		return "display, sound, alarms…"
+	case itemDashboard:
+		switch {
+		case s.showDash:
+			return "back to the clock"
+		case dashboard.Get().Mode() == config.DashboardOff:
+			return "turn it on in Home Assistant"
+		}
+		return "Home Assistant's"
 	case itemSleep:
 		return "tap the screen to wake"
 	}
@@ -323,7 +355,7 @@ func (r *roundRenderer) dial(s roundScene) {
 	items := dialItems(s)
 	n := len(items)
 	r.dim(244)
-	r.ringAt(centre, centre, dialR-1, dialR+1, 0, 2*math.Pi, color.RGBA{62, 68, 78, 255})
+	r.ringAt(center, center, dialR-1, dialR+1, 0, 2*math.Pi, color.RGBA{62, 68, 78, 255})
 
 	for i, it := range items {
 		if i == s.menuSel {
@@ -336,20 +368,20 @@ func (r *roundRenderer) dial(s roundScene) {
 		it := items[s.menuSel]
 		x, y := itemPos(s.menuSel, n, s.menuRot)
 		r.discAt(x, y, chosenRing, colIconGround)
-		r.ringAt(x, y, chosenRing-3.5, chosenRing, 0, 2*math.Pi, it.colour)
-		accent := it.colour
+		r.ringAt(x, y, chosenRing-3.5, chosenRing, 0, 2*math.Pi, it.color)
+		accent := it.color
 		accent.A = 150
 		r.ringAt(x, y, chosenRing+6, chosenRing+9, -0.3*math.Pi, 0.55*math.Pi, accent)
-		r.icon(it.id, s, x, y, 22, 3.2, it.colour)
+		r.icon(it.id, s, x, y, 22, 3.2, it.color)
 
 		header := clockHM(s.now)
 		switch s.menuMode {
 		case modeCameras:
 			header = "CAMERAS"
 		}
-		r.centred(r.label, header, 206, colDim)
-		r.centred(r.title, itemName(s, it.id), 252, colText)
-		r.centred(r.small, itemHint(s, it.id), 286, colDim)
+		r.centered(r.label, header, 206, colDim)
+		r.centered(r.title, itemName(s, it.id), 252, colText)
+		r.centered(r.small, itemHint(s, it.id), 286, colDim)
 	}
 }
 
@@ -369,18 +401,18 @@ func (r *roundRenderer) jog(s roundScene) {
 	frac = math.Min(math.Max(frac, 0), 1)
 	// The value round the ring, from the bottom-left to the bottom-right, with a knob at its end.
 	const from, span = 1.25 * math.Pi, 1.5 * math.Pi
-	r.ringAt(centre, centre, 186, 200, from, from+span, color.RGBA{44, 50, 60, 255})
-	r.ringAt(centre, centre, 186, 200, from, from+span*frac, col)
-	kx, ky := centre+193*math.Sin(from+span*frac), centre-193*math.Cos(from+span*frac)
+	r.ringAt(center, center, 186, 200, from, from+span, color.RGBA{44, 50, 60, 255})
+	r.ringAt(center, center, 186, 200, from, from+span*frac, col)
+	kx, ky := center+193*math.Sin(from+span*frac), center-193*math.Cos(from+span*frac)
 	r.discAt(kx, ky, 13, col)
 	r.discAt(kx, ky, 6, colBackground)
 
-	r.centred(r.label, title, 190, colDim)
-	r.centred(r.clock, value, 282, colText)
-	r.centred(r.small, hint, 330, colDim)
+	r.centered(r.label, title, 190, colDim)
+	r.centered(r.clock, value, 282, colText)
+	r.centered(r.small, hint, 330, colDim)
 }
 
-// icon draws one item's line icon, centred at x, y, u half its size, w the stroke width.
+// icon draws one item's line icon, centered at x, y, u half its size, w the stroke width.
 func (r *roundRenderer) icon(id itemID, s roundScene, x, y, u, w float64, c color.RGBA) {
 	if i := cameraOf(id); i >= 0 {
 		// A camera is its initials, so the ring says which is where before one is chosen.
@@ -427,6 +459,13 @@ func (r *roundRenderer) icon(id itemID, s roundScene, x, y, u, w float64, c colo
 		r.line(x-0.2*u, y-0.72*u, x+0.2*u, y-0.72*u, w, c)
 		r.line(x+0.2*u, y-0.72*u, x+0.35*u, y-0.45*u, w, c)
 		r.ringAt(x, y+0.1*u, 0.36*u-w/2, 0.36*u+w/2, 0, 2*math.Pi, c)
+	case itemDashboard:
+		// Four tiles, as a dashboard is.
+		for _, o := range [][2]float64{{-1, -1}, {1, -1}, {-1, 1}, {1, 1}} {
+			cx, cy := x+o[0]*0.45*u, y+o[1]*0.45*u
+			b := image.Rect(int(cx-0.33*u), int(cy-0.33*u), int(cx+0.33*u), int(cy+0.33*u))
+			r.roundFill(b, 0.12*u, c, c)
+		}
 	case itemWeather:
 		r.sunIcon(x+0.38*u, y-0.32*u, 0.62*u, w*0.8, c)
 		r.cloud(x-0.12*u, y+0.22*u, 1.02*u, colIconGround)
@@ -444,6 +483,16 @@ func (r *roundRenderer) icon(id itemID, s roundScene, x, y, u, w float64, c colo
 			r.line(x+0.62*u*math.Sin(a), y-0.62*u*math.Cos(a), x+0.95*u*math.Sin(a), y-0.95*u*math.Cos(a), w*1.6, c)
 		}
 		r.ringAt(x, y, 0.62*u-w/2, 0.62*u+w/2, 0, 2*math.Pi, c)
+	case itemAnnounce:
+		// A mast putting something out. The mic belongs to Talk and Mute and the speaker to Volume,
+		// so this is neither: announcing is the one thing here that leaves the device.
+		r.line(x, y-0.46*u, x-0.42*u, y+0.92*u, w, c)
+		r.line(x, y-0.46*u, x+0.42*u, y+0.92*u, w, c)
+		r.line(x-0.26*u, y+0.38*u, x+0.26*u, y+0.38*u, w, c)
+		r.ringAt(x, y-0.46*u, 0, 0.13*u, 0, 2*math.Pi, c)
+		for _, rad := range []float64{0.5, 0.8} {
+			r.ringAt(x, y-0.46*u, rad*u-w/2, rad*u+w/2, 1.68*math.Pi, 2.32*math.Pi, c)
+		}
 	case itemSleep:
 		r.moonIcon(x, y, u, w, c)
 	}
@@ -479,7 +528,7 @@ func (r *roundRenderer) sunIcon(x, y, u, w float64, c color.RGBA) {
 	}
 }
 
-// moonIcon is a filled crescent: a disc with the background's colour taken out of it up and to the
+// moonIcon is a filled crescent: a disc with the background's color taken out of it up and to the
 // right. Icons sit on a near-black ground, which is what bite is.
 func (r *roundRenderer) moonIcon(x, y, u, w float64, c color.RGBA) {
 	r.discAt(x, y, 0.8*u, c)

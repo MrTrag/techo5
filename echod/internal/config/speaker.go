@@ -7,11 +7,26 @@ type Speaker struct {
 	Resampling Resampling `json:"resampling"`
 	ASP        bool       `json:"asp"`
 
+	// QuietHours is when the device makes no sound of its own, as "22-7", empty for never. See
+	// quiet.go for what that does and does not cover.
+	QuietHours string `json:"quiet_hours,omitempty"`
+
+	// Bass and Treble are the listener's own shelves in dB, zero for the tuning as the vendor left
+	// it. They apply only while the tuning is on, since they are a stage of it (lib/asp/tone.go).
+	Bass   float64 `json:"bass,omitempty"`
+	Treble float64 `json:"treble,omitempty"`
+
+	// ASPChosen is whether anybody ever set ASP themselves. Without it a saved false cannot be told
+	// from a device that was never able to tune: every unit that ran a build whose tuning would not
+	// load had false written back to it by the settling below, and would stay untuned for ever after
+	// the tuning started working. Unset means the default applies.
+	ASPChosen bool `json:"asp_chosen,omitempty"`
+
 	// AmpStandby rests the speaker amplifier a few seconds after the last sound, as Android's audio
 	// HAL does, and wakes it just before the next: see hardware/speaker. Off by default: it silences
 	// the LED ring's bleed into the amplifier while the device thinks, but the amplifier coming off
 	// is an audible pop, and Steve chose no ring during a turn over the pop (24 Sep 2026).
-	AmpStandby bool `json:"amp_standby"`
+	AmpStandby bool `json:"amp_standby,omitempty"`
 }
 
 const (
@@ -42,8 +57,32 @@ func (w SpeakerWriter) Resampling(v Resampling) error {
 	return w.st.Update(func(c *Config) { c.Speaker.Resampling = v })
 }
 
+func (w SpeakerWriter) QuietHours(v string) error {
+	return w.st.Update(func(c *Config) { c.Speaker.QuietHours = v })
+}
+
+func (w SpeakerWriter) Bass(v float64) error {
+	return w.st.Update(func(c *Config) { c.Speaker.Bass = v })
+}
+
+func (w SpeakerWriter) Treble(v float64) error {
+	return w.st.Update(func(c *Config) { c.Speaker.Treble = v })
+}
+
+// ASPWanted is what the tuning should be set to: what somebody chose, or the default until somebody
+// does. It is what they asked for, never what the device managed, so a device that could not tune
+// yesterday tunes today without anybody touching it.
+func (s Speaker) ASPWanted() bool {
+	if !s.ASPChosen {
+		return DefaultASP
+	}
+	return s.ASP
+}
+
+// ASP records what somebody asked for, and that they asked. What the device managed is not saved:
+// see ASPWanted.
 func (w SpeakerWriter) ASP(v bool) error {
-	return w.st.Update(func(c *Config) { c.Speaker.ASP = v })
+	return w.st.Update(func(c *Config) { c.Speaker.ASP, c.Speaker.ASPChosen = v, true })
 }
 
 // Standby records whether the amplifier rests between sounds.

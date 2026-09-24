@@ -1,9 +1,8 @@
 package home
 
 import (
-	"bytes"
 	"image"
-	"image/jpeg"
+	_ "image/jpeg" // Home Assistant serves camera snapshots as JPEG
 	"log/slog"
 	"strings"
 	"time"
@@ -14,6 +13,7 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/config"
 	"github.com/HuskerMinion/techo5/echod/internal/hardware/camera"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/hass"
+	"github.com/HuskerMinion/techo5/echod/internal/lib/triggers"
 )
 
 // The cameras page: "show the front door" puts a camera's live view up for a while, a tap takes it
@@ -201,7 +201,8 @@ func (f *Feature) localFrames() {
 		}
 		select {
 		case fr := <-frames:
-			xdraw.ApproxBiLinear.Scale(dst, dst.Bounds(), fr.RGBA, fr.RGBA.Bounds(), xdraw.Src, nil)
+			src := fr.Image()
+			xdraw.ApproxBiLinear.Scale(dst, dst.Bounds(), src, src.Bounds(), xdraw.Src, nil)
 			shown := image.NewRGBA(dst.Bounds())
 			copy(shown.Pix, dst.Pix)
 			f.mu.Lock()
@@ -241,7 +242,7 @@ func (f *Feature) snapshot(entity string) (*image.RGBA, error) {
 	if err != nil {
 		return nil, err
 	}
-	src, err := jpeg.Decode(bytes.NewReader(b))
+	src, err := decodeWithin(b, maxFramePixels, "camera "+entity)
 	if err != nil {
 		return nil, err
 	}
@@ -256,12 +257,14 @@ func (f *Feature) snapshot(entity string) (*image.RGBA, error) {
 }
 
 // MatchCamera finds a camera named in what was heard: "show the front door", "show me the deck
-// camera". Empty when nothing matches.
+// camera", the German "zeig die Haustür". The sentence has to ask for a camera at all (lib/triggers,
+// in the screen's language) and then name one; the names are the owner's own, in whatever language
+// they wrote them in Home Assistant. Empty when nothing matches.
 func (f *Feature) MatchCamera(heard string) string {
-	h := strings.ToLower(heard)
-	if !strings.Contains(h, "show") && !strings.Contains(h, "camera") {
+	if !triggers.AboutCamera(heard, config.Get().Screen.Language) {
 		return ""
 	}
+	h := strings.ToLower(heard)
 	best, bestLen := "", 0
 	for _, c := range f.Cameras() {
 		n := strings.ToLower(c.Name)

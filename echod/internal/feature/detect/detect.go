@@ -11,7 +11,9 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/component"
 	"github.com/HuskerMinion/techo5/echod/internal/config"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/diag"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/mute"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/phone"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/ring"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/voice"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/wakeword"
 	"github.com/HuskerMinion/techo5/echod/internal/hardware/led"
@@ -51,30 +53,57 @@ func Get() *Detect {
 // playingSlack is how much lower the wake threshold sits while the echo canceller is running.
 const playingSlack = 0.10
 
+// slackFloor is as low as the slack is allowed to drag a threshold, whatever it started at.
+const slackFloor = 0.5
+
+// thresholdFor is the cutoff a slot's score is judged against. base supplies the per-slot wake word
+// threshold; stop is the stop word's own, which is configured separately.
+//
+// While the speaker plays and the canceller runs, what reaches the detector is the residual of the
+// music plus the voice, and the word scores lower than it does in a quiet room. A little slack here
+// is worth more than the false wakes it risks: the music is the reference the canceller has, so it
+// is the one sound least able to fake the word.
+//
+// The stop word takes the same slack as every other slot. It needs it more than they do, not less:
+// it is the one word said while the speaker is certainly playing, because playing is what it is
+// asked to stop. Exempting it made the one word whose job is to interrupt a sound the only word
+// judged with no allowance for the sound.
+func thresholdFor(slot int, base func(int) float64, stop float64, cancelling bool) float64 {
+	t := stop
+	if slot != StopSlot {
+		t = base(slot)
+	}
+	if cancelling {
+		t = max(t-playingSlack, slackFloor)
+	}
+	return t
+}
+
 func newDetect() *Detect {
 	// Sized to reach the stop word's reserved index. The slots between it and Home Assistant's are never
 	// loaded, and an unloaded slot is one comparison a frame.
 	e := New(StopSlot+1, mic.Get())
 
 	e.Threshold = func(slot int) float64 {
-		if slot == StopSlot {
-			return config.Get().Wake.Stop.Threshold
-		}
-		t := wakeword.Threshold(slot)
-		// While the speaker plays and the canceller runs, what reaches the detector is the residual
-		// of the music plus the voice, and the word scores lower than it does in a quiet room. A
-		// little slack here is worth more than the false wakes it risks: the music is the
-		// reference the canceller has, so it is the one sound least able to fake the word.
-		if mic.Get().Cancelling() {
-			t = max(t-playingSlack, 0.5)
-		}
-		return t
+		return thresholdFor(slot, wakeword.Threshold, config.Get().Wake.Stop.Threshold, mic.Get().Cancelling())
 	}
 
 	e.OnDetect = func(slot int) {
 		// A call has the microphones and the speaker. The far end talking through the speaker is not
 		// someone in the room, and a turn would take the call's audio away mid-sentence.
 		if phone.Get().Busy() {
+			// A ring during a call is the one thing that still has to hear "stop". The call page
+			// takes every tap and Home Assistant cannot stop a timer, so without this a timer that
+			// finishes mid-call sounds for its full fifteen minutes with no way out at all.
+			//
+			// It ends the ring and nothing else: the call is not interrupted, and the word is not
+			// passed to the turn, because the far end talking through the speaker is not somebody in
+			// the room.
+			if slot == StopSlot && ring.IsSounding() {
+				slog.Info("stop word during a call, ending the ring")
+				ring.End()
+				return
+			}
 			slog.Debug("wake word ignored during a call", "slot", slot+1)
 			return
 		}
@@ -89,6 +118,10 @@ func newDetect() *Detect {
 	d.ducker = newDucker()
 	d.ducker.watch(e)
 	d.stop = newStopEntity(d)
+
+	// A cut microphone hands on silence, and running the models over it is work that cannot find
+	// anything. The engines go down with the microphones and come back with them.
+	mute.Get().Changed.Listen(e.Quiet)
 	e.OnReady = d.busy.scored
 
 	// The engine loads on every start, including a restart. Home Assistant only pushes a selection when
@@ -98,6 +131,11 @@ func newDetect() *Detect {
 		turn := voice.Get()
 		turn.SetActiveWakeWords(d.load(turn.ActiveWakeWords()))
 		d.loadStop()
+		// A device that was muted when it was switched off comes back muted, and the hook below only
+		// fires on a change, so the state has to be read once here as well.
+		if muted, err := mute.Get().Muted(); err == nil {
+			e.Quiet(muted)
+		}
 		return nil
 	}
 

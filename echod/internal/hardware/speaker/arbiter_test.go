@@ -33,6 +33,13 @@ func (p *producer) Duck(on bool) {
 	p.ducked = on
 }
 
+// forget is what a real producer does when it gives the speaker back: its holds go with it.
+func (p *producer) forget() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.resumes = p.suspends
+}
+
 func (p *producer) Requeue() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -142,12 +149,12 @@ func TestDuckingReachesTheOnesWaiting(t *testing.T) {
 	a.Took(group)
 	a.Took(track)
 
-	a.Duck(true)
+	a.Duck("turn", true)
 	if !group.quiet() || !track.quiet() {
 		t.Error("ducking a turn missed a producer")
 	}
 
-	a.Duck(false)
+	a.Duck("turn", false)
 	if group.quiet() || track.quiet() {
 		t.Error("the turn ended and something stayed quiet")
 	}
@@ -163,7 +170,7 @@ func TestOnlyTheProducerBeingHeardRescalesWhatIsQueued(t *testing.T) {
 	a.Took(group)
 	a.Took(track)
 
-	a.Duck(true)
+	a.Duck("turn", true)
 
 	if got := track.requeued(); got != 1 {
 		t.Errorf("the audible producer requeued %d times, want 1", got)
@@ -180,9 +187,9 @@ func TestNothingIsRescaledWhenTheTurnEnds(t *testing.T) {
 	track := &producer{}
 	a.Took(track)
 
-	a.Duck(true)
+	a.Duck("turn", true)
 	before := track.requeued()
-	a.Duck(false)
+	a.Duck("turn", false)
 
 	if got := track.requeued(); got != before {
 		t.Errorf("unducking requeued: %d then %d", before, got)
@@ -192,7 +199,7 @@ func TestNothingIsRescaledWhenTheTurnEnds(t *testing.T) {
 // A producer starting during a turn has to arrive already quiet, or it blares over the reply.
 func TestAProducerStartingMidTurnArrivesQuiet(t *testing.T) {
 	a := &Arbiter{}
-	a.Duck(true)
+	a.Duck("turn", true)
 
 	track := &producer{}
 	a.Took(track)
@@ -243,10 +250,11 @@ func TestAResumingTrackRetakingTheSpeakerIsNotHeldTwice(t *testing.T) {
 	}
 }
 
-// A sound that ends during the hold and starts again before it is over is still the producer the
-// hold stood down: stopping the noise to start another one under a claim must not leave it waiting
-// on a second suspend that one resume cannot answer.
-func TestARetakeAfterGivingBackDuringAHoldIsNotHeldTwice(t *testing.T) {
+// A sound that ends during the hold and starts again before it is over is a new start. A producer
+// forgets its holds when it gives the speaker back - nothing would ever release them, since a hold's end
+// goes to the producers there are - so it has to be stood down again as it rejoins, and come back once
+// when the hold ends.
+func TestARetakeAfterGivingBackDuringAHoldIsStoodDownAgain(t *testing.T) {
 	a := &Arbiter{}
 	track := &producer{}
 	a.Took(track)
@@ -256,8 +264,9 @@ func TestARetakeAfterGivingBackDuringAHoldIsNotHeldTwice(t *testing.T) {
 		t.Fatal("the track ignored the driver taking the speaker")
 	}
 
-	// A stop mid-claim, then a new sound before the claim ends.
+	// A stop mid-claim, which is where the track forgets the hold, then a new sound before it ends.
 	a.Gave(track)
+	track.forget()
 	a.Took(track)
 	if !track.held() {
 		t.Error("a track must stay stood down while the speaker is held")
@@ -266,5 +275,55 @@ func TestARetakeAfterGivingBackDuringAHoldIsNotHeldTwice(t *testing.T) {
 	a.Resume()
 	if track.held() {
 		t.Errorf("the track never came back: %d suspends, %d resumes", track.suspends, track.resumes)
+	}
+}
+
+// Ducking is held while anyone asks for it: a ring ending in the middle of an answer leaves the music
+// down under the answer, and it comes back only when the last asker lets go.
+func TestDuckingLastsUntilTheLastAskerLetsGo(t *testing.T) {
+	a := &Arbiter{}
+	p := &producer{}
+	a.Took(p)
+	a.Duck("turn", true)
+	a.Duck("ring", true)
+	a.Duck("ring", false)
+	if !a.duck {
+		t.Fatal("one asker letting go brought the music up under the other")
+	}
+	a.Duck("turn", false)
+	if a.duck {
+		t.Error("the music stayed down after everyone let go")
+	}
+}
+
+// A producer stood down by another and then taking the speaker back is let go of the stand-down: it
+// was suspended once when the other took over, and taking over again is where that ends.
+func TestTakingTheSpeakerBackUndoesBeingStoodDown(t *testing.T) {
+	a := &Arbiter{}
+	station, song := &producer{}, &producer{}
+	a.Took(station)
+	a.Took(song) // the song stands the station down
+	if !station.held() {
+		t.Fatal("the station was not stood down by the song")
+	}
+	a.Took(station) // the station is started again
+	if station.held() {
+		t.Errorf("the station took the speaker back and stayed held: %d suspends, %d resumes",
+			station.suspends, station.resumes)
+	}
+	if !song.held() {
+		t.Error("the song kept playing under the station")
+	}
+
+	// And under a hold: taking the speaker back mid-hold stays down until the hold ends, then plays.
+	a.Took(song)
+	a.Suspend()
+	a.Took(station)
+	if !station.held() {
+		t.Fatal("the station played over the hold")
+	}
+	a.Resume()
+	if station.held() {
+		t.Errorf("the hold ended and the station stayed held: %d suspends, %d resumes", station.suspends, station.resumes)
 	}
 }

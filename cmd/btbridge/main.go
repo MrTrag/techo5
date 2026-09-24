@@ -11,8 +11,9 @@
 // Each read on either side returns one whole H4 packet (type byte first);
 // each write must be one whole packet. The vendor driver's read returns 0
 // bytes when its queue is empty instead of blocking, so that side is polled
-// with select(2) and a short timeout. On any error the bridge exits after a
-// pause so init's respawn does not spin.
+// with select(2) and a short timeout, and it is never asked for more than it
+// will give (read.go). A read that fails waits before the next one; anything
+// else ends the bridge after a pause, so init's respawn does not spin.
 package main
 
 import (
@@ -22,6 +23,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const vendorPkt = 0xff // HCI_VENDOR_PKT: vhci control packets, never forwarded
@@ -104,16 +107,35 @@ func vhciToStp(vhci *os.File, stp int) error {
 // driver has nothing queued. What a read returns is framed into whole packets
 // first (h4.go): the Echo Dot's driver does not keep packet boundaries.
 func stpToVhci(stp int, vhci *os.File, maxPage int) error {
-	buf := make([]byte, 65536)
+	buf := make([]byte, readSize)
 	var framer h4Framer
+	var runs backoff
 	dropped := 0
 	for {
 		n, err := syscall.Read(stp, buf)
-		if err == syscall.EINTR || err == syscall.EAGAIN {
+		if err == syscall.EINTR {
+			continue
+		}
+		if err == syscall.EAGAIN {
+			// Nothing queued, said the other way round: the same as a read of no bytes.
+			wait(stp)
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("stp: read: %w", err)
+			// Not fatal on its own — a driver refusing this read may take the next — but asking again
+			// at once is what filled a Dot's kernel log and kept its cores awake, so this waits.
+			pause, report, giveUp := runs.fail(err)
+			if giveUp {
+				return fmt.Errorf("stp: read: %w (%d times in a row)", err, giveUpAfter)
+			}
+			if report {
+				fmt.Fprintf(os.Stderr, "btbridge: stp: read: %v (waiting; said once for the run)\n", err)
+			}
+			time.Sleep(pause)
+			continue
+		}
+		if refused := runs.ok(); refused > 0 {
+			fmt.Fprintf(os.Stderr, "btbridge: stp: reading again after %d refused\n", refused)
 		}
 		if n == 0 {
 			wait(stp)
@@ -138,10 +160,18 @@ func stpToVhci(stp int, vhci *os.File, maxPage int) error {
 // wait blocks until the fd is readable or 50 ms pass, whichever comes first,
 // so a driver without a working poll still gets serviced promptly.
 func wait(fd int) {
-	var set syscall.FdSet
-	set.Bits[fd/32] |= 1 << (uint(fd) % 32)
-	tv := syscall.Timeval{Usec: 50000}
-	_, _ = syscall.Select(fd+1, &set, nil, nil, &tv)
+	_ = selectRead(fd, 50*time.Millisecond)
+}
+
+// selectRead is select(2) on one descriptor for reading. FdSet.Set picks the word by the platform's
+// own width (32-bit words on arm, 64-bit on arm64 and amd64), where indexing Bits by fd/32 was
+// right only on 32-bit builds.
+func selectRead(fd int, d time.Duration) bool {
+	var set unix.FdSet
+	set.Set(fd)
+	tv := unix.NsecToTimeval(d.Nanoseconds())
+	n, err := unix.Select(fd+1, &set, nil, nil, &tv)
+	return err == nil && n > 0
 }
 
 // fixSupportedCommands fills in the LE part of the controller's Read Local
@@ -183,7 +213,7 @@ func setBdaddr(stp int, hexaddr string) error {
 	if err := writeAll(stp, cmd); err != nil {
 		return err
 	}
-	buf := make([]byte, 512)
+	buf := make([]byte, readSize)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		n, err := syscall.Read(stp, buf)

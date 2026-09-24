@@ -7,7 +7,7 @@
 //
 //   - the a priori SNR is a decision-directed estimate, blending the last frame's clean estimate with
 //     this frame's measurement, so the gain does not swing frame to frame;
-//   - the gain itself minimises error in the log spectrum rather than the spectrum, which is closer to
+//   - the gain itself minimizes error in the log spectrum rather than the spectrum, which is closer to
 //     how loudness is heard;
 //   - a band the estimator thinks holds no speech falls to a floor rather than to zero, because a band
 //     switching between silence and sound is what musical noise is.
@@ -54,7 +54,7 @@ type Filter struct {
 	hop   int
 
 	window []float64
-	gain   float64 // overlap-add normalisation for this window
+	gain   float64 // overlap-add normalization for this window
 
 	// noise is the held noise power per bin, and clean the previous frame's estimate, which the
 	// decision-directed rule needs.

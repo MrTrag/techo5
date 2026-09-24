@@ -1,0 +1,346 @@
+# Standing on its own: a plan
+
+A TECHO5 device today is a Home Assistant satellite. Turn Home Assistant off and most of it stops:
+the clock keeps time and alarms still ring, and that is the lot. This is a plan for the parts that
+could work without Home Assistant at all — a clock radio with timers and alarms — so that a used Echo
+Show is worth reflashing to someone who does not run Home Assistant, and so that an outage leaves a
+useful device rather than a clock.
+
+It was written to be argued with, and it was. What follows is the plan as it stands after that
+argument and after most of it shipped; **Where this stands** says which parts are done, which are
+half-done, and which were dropped on purpose.
+
+## Where this stands
+
+Checked in the code, 2026-09-21, against releases v0.7.11 / v0.4.8 / v0.5.8.
+
+**Done and released.** M1 timers, M2 radio without Home Assistant (stations kept on the device), M3
+the setup page, M4 the time zone. With them: multi-network Wi-Fi, renaming, the diagnostics bundle,
+the sleep timer, and the sunrise alarm on all three devices. A Dot can also start and stop the radio
+kept on it with two taps of the action button, and any device can play a station from the setup page
+before it is saved.
+
+**Half-done, and the worst state to leave anything in.** `feature/announce` is written — the
+endpoint, the house word, mDNS discovery, the chime, the quiet-hours check — and **nothing imports
+it**, so its registration never runs and none of it is reachable. It has no way in either: nothing
+sends an announcement, nothing shows one arriving, and the house word cannot be set. **Quiet hours**
+are in the same state by dependency: `config.Quiet()` exists and announce is its only reader, so
+today they are two functions nobody calls. Finishing announce is what makes both real, and it is
+first in the order below.
+
+**Also unfinished:** the setup page still says the phone account belongs on it and it is not there,
+which is where a SIP password should be typed rather than on a five-inch screen. The first-run card
+exists but only dismisses itself; it does not yet offer *set this up on its own*.
+
+**Dropped on purpose, so nobody starts them again without asking.**
+
+- *The time or the weather on a button press.* The screen already says both, and the narrow case it
+  was for — a dead pipeline, or somebody who cannot read the screen — did not carry it.
+- *Presence published to Home Assistant.* The sensing underneath is still wanted for the screen
+  waking as somebody approaches; what was dropped is the occupancy entity.
+- *The vendor beamformer on a Show or a Spot.* Not an unfinished port: the Show's two microphones sit
+  too close together for beamforming to buy anything (porting-plan.md, "averaging or beamforming mics
+  this close buys nothing"), so one mic with AEC and NS is the end state there. The vendor's
+  beamformer is the Dot's array, and the Dot uses it.
+
+**The order agreed for what is left:** announce, then the intercom (which reuses announce's peers and
+trust), the red clock at night, rollback from the screen, Bluetooth audio as a sink, the screen
+waking as somebody approaches, a BLE button as local control, Bluetooth provisioning for the Dot,
+M5, then "Help" as a wake word, and the smoke alarm last as research rather than a feature.
+
+## What already stands alone
+
+Checked in the code, not remembered:
+
+- **The clock.** `ntpd` against `pool.ntp.org` sets the time at boot (`boot.sh`, with `NTP_SERVER`
+  overriding the pool), and it free-runs from there. Needs the internet, not Home Assistant. What is
+  missing is not the time but the **zone**, below; and a network that blocks outbound 123 or runs its
+  own server has nowhere to say so, so the NTP server wants to be a setting alongside the zone.
+- **Alarms.** Set on the screen, kept in the device's own config, and rung from the device's own
+  clock — `feature/alarm` says so in as many words, and it was built that way on purpose.
+- **Updates.** `update.Fetch` reads the release from GitHub directly. The update entity is a Home
+  Assistant convenience; the General card's *Check now* is not.
+- **Wi-Fi.** Joined from the screen, no Home Assistant involved — on a Show or a Spot. A Dot has no
+  screen, so its network can only be set over USB at install time (`install-dot.py`).
+- **Voice**, if the pipeline is local — but that is a Home Assistant pipeline, so it is not standalone.
+
+## What does not, and why
+
+- **Timers.** `feature/timer`'s first line: *Home Assistant keeps the timers, the device counts them
+  down.* The counting and the ringing are already local; only the list is not. Nothing on the device
+  creates a timer.
+- **Radio.** The device streams the audio itself, but the station list comes over Home Assistant's
+  websocket (`feature/home/local.go`, Radio Browser through Home Assistant) and playing one is
+  `hass.PlayMedia` against this device's player. No Home Assistant, no radio.
+- **The time zone.** `feature/timezone` takes the zone from Home Assistant and from nowhere else. A
+  device that has never met a Home Assistant is on UTC, and there is no way to change that from the
+  screen. This is a gap in its own right, and the first thing a standalone device would show wrong.
+- Weather, cameras, the slideshow, voice: all of them are Home Assistant's, by design. Out of scope.
+
+## M1 — Timers on the device
+
+The easiest, and the one that makes the least noise. The ringing, the countdown ring, the stop word
+and the stop button all exist; what is missing is a list of the device's own timers and a way to
+start one.
+
+- A local timer in the config beside the alarms: label, length, when it was started.
+- A screen to set one — the alarm editor's shape, minus the days of the week.
+- `feature/timer` merges the device's own with Home Assistant's, so a house with both sees one list
+  in the order they finish.
+- "Set a timer for ten minutes" by voice still goes to Home Assistant, because the sentence does.
+  Nothing about voice changes.
+
+Open: whether a device timer should appear in Home Assistant as a countdown entity (nice, more
+surface) or stay invisible to it (simpler, and honest — it is the device's).
+
+## M2 — Radio without Home Assistant
+
+The device already opens the stream, so this is about knowing what to open.
+
+- **Favorites kept locally**: name, stream URL, optional logo. The Favorites list plays them directly
+  rather than calling a Home Assistant script.
+- **Home Assistant still wins where it is present.** A device with Home Assistant keeps today's lists
+  and its Radio Browser stations; the local list is what a device falls back to, and what a
+  standalone device has.
+- **Finding stations without Home Assistant.** Radio Browser has a public API
+  (`all.api.radio-browser.info`, mirrors found over DNS SRV) that Home Assistant's integration is
+  itself a client of. The device can search it directly: by name, by country and state, by tag.
+  - *Location.* Today's "stations near home" uses Home Assistant's own coordinates. Standalone, the
+    device does not know where it is. Options, least creepy first: the owner picks country and state
+    (or types a city or postal code) in setup; or the device asks an IP geolocation service, which
+    means telling a third party its address — **opt-in at most, never the default**, and it says so
+    on the screen.
+  - *Caveat to check before promising it:* Radio Browser supports a geographic search, but a station
+    only turns up in it if whoever added it filled in coordinates, and many have not. Country and
+    state may well beat distance in practice. Worth measuring against a few real places before the
+    UI implies distance is meaningful.
+  - Ask for `hidebroken=true`, keep the list to a sane size, cache it, and send the User-Agent
+    Radio Browser asks clients to send.
+
+Open: whether to lean on Radio Browser at all when standalone, or to treat a hand-entered list as the
+only local source and leave discovery to Home Assistant. Discovery is what makes it pleasant; a
+dependency on one volunteer-run service is what makes it fragile.
+
+## M3 — A setup page on the device
+
+Typing a stream URL on a five-inch screen is miserable, so: a small web server on the device, on the
+port that already serves the camera and the screenshot (8181).
+
+The shape:
+
+- **Off by default**, like the camera and screen pages. A switch on the device — Settings → Privacy —
+  and in Home Assistant where there is one.
+- **It turns itself off again.** A setup page that is on for fifteen minutes after you ask for it is
+  a different risk from one that is on for a year.
+- **A press on the device to get in.** The page says *press the button on your device*, and the
+  press authorizes that browser for the session. Physical presence proven, nothing to read, type or
+  remember — and unlike a code shown on the panel it works on a Dot, which has no panel. (A code on
+  the screen can stay as a second way in on a device that has one.) One press, one session, and it
+  expires with the page.
+- **Plain HTTP on the LAN.** No certificate that would be worth the trouble on a device with no name.
+  Say so plainly in the docs rather than implying it is private.
+- **It writes only what it says it writes**: radio favorites, the time zone, the name, maybe the
+  Wi-Fi. Never SSH keys, never the Home Assistant key.
+- Small enough to serve from the binary: one page, no framework, no fonts to fetch.
+
+This is the piece with real security surface, so it is the one to design slowly and to write down
+before writing code.
+
+## M4 — The time zone on the device
+
+A standalone device has to be told where it is, once. Either a picker on the screen (long list,
+awkward, but no server needed) or a field on the setup page, with Home Assistant still overriding it
+when a Home Assistant is present. Small, and it blocks M1 and M2 being any use in practice — a clock
+radio on UTC is a broken clock radio.
+
+## Wi-Fi for a device you are handing to someone else
+
+The case: a device set up here, wiped of its network, and given away. A Show or Spot can join a new
+network from its own screen, so this is a convenience there and a genuine hole on a Dot.
+
+What the image already carries: `wpa_supplicant`, `wpa_cli`, `wpa_passphrase` and the whole `iw` and
+`iwlist` set. **No `hostapd`, no `dnsmasq`** — a hotspot is not a configuration change, it is new
+software in the image, and it only works at all if the vendor driver does AP mode. That driver is
+Amazon's `mt76x8_wlan.ko` and an Echo Show never offered tethering, so it may simply not be built in.
+Run on a Show, 2026-09-20, the driver says:
+
+    Supported interface modes: managed, AP, P2P-client, P2P-GO
+    valid interface combinations: #{ managed, AP, P2P-client, P2P-GO } <= 2, total <= 2, #channels <= 2
+
+It registers three phys, and an **`ap0` interface already exists in AP mode** beside `wlan0`. Two
+interfaces on two channels are allowed at once, so a hotspot could run *while* the device stays on
+the house network rather than instead of it — which makes a "join my hotspot to move me to your
+Wi-Fi" flow possible without dropping off the network first. Still to check on a **Dot**, which is
+the device that actually needs this and may not carry the same module.
+
+Three answers to the same problem, cheapest first:
+
+1. **More than one saved network.** `wpa_supplicant` takes several network blocks; the screen only
+   ever writes one. Adding a second — their network, before the device leaves the house — solves the
+   handing-over case with no new software and no hotspot at all.
+2. **Bluetooth provisioning (the Improv standard).** A phone or a Chrome tab hands the credentials
+   over BLE; the device already runs BlueZ and its own scanner. This is the only one of the three
+   that helps a **Dot**, which is where the hole actually is.
+3. **A hotspot to join, with a page to fill in** — conditional on the `iw list` answer above, and the
+   most moving parts by far: hostapd, a DHCP server, a captive page, and a rule for when to stop
+   being an access point and try the real network again. It pairs with the setup page in M3, since
+   both want the same small web server.
+
+## Talking to the other devices in the house
+
+Two features, one shape apart.
+
+**Announce to all** is one-way and short: a message plays in every room. Live audio to six devices at
+once is a lot of streams for something nobody talks back to, so record the clip on the device that is
+speaking, push it to each of the others, and let them play it behind a chime. A moment's delay before
+it starts and nothing to go wrong after; a device that is asleep, busy or on a call takes it when it
+can, or refuses and says so.
+
+**Intercom** is two-way and one-to-one, and most of it already exists. The phone feature runs a full
+SIP stack with SRTP, and SIP needs no provider: one device can invite another by address with no
+registrar in the middle. Today's "calls between your own devices" go out to the provider and back,
+which is the wrong shape for two devices ten feet apart — the same stack pointed at the LAN is a
+house intercom that works with the internet down.
+
+**Both want the devices to know each other.** They already advertise themselves over mDNS for Home
+Assistant and for multi-room audio; a third record, or a flag on an existing one, is enough to build
+the list without Home Assistant being asked.
+
+**The part to get right is trust.** A device that plays audio it was sent is a device anything on the
+network can make talk. A secret shared by the house, written at install and again from the setup
+page, held by every device and required on both ends. Nothing plays from a peer that cannot show it.
+Beyond that: a name for each device that the announcement says it came from, a way to refuse
+(Do Not Disturb), and a limit on how often a peer may interrupt.
+
+**What this does not need:** Home Assistant, the internet, or an account. That is the point of it.
+
+## The phone, once Home Assistant is gone
+
+Worth writing down, because it is better than expected. The SIP account is the daemon's own — it is
+kept in its own file and registers with the provider directly, with no Home Assistant in the path —
+and contacts are a file on the device, so an unpaired device **still rings for incoming calls and can
+still call the names it already has** from the screen.
+
+What it cannot do alone is provisioning: the account (`phone_account`) and the contact list
+(`phone_contacts`) are both set by Home Assistant actions, and dialing by voice needs a pipeline.
+Signing in and editing contacts therefore belong on the setup page — a SIP password is the worst
+thing anyone will ever type on a five-inch screen.
+
+## The Dot, which has no screen
+
+Every part of this is hardest on a Dot: no screen, no touch, four buttons and a light ring. It is
+also the device most worth solving, being cheap enough to put one in every room.
+
+- **Getting on the network.** The only route is Bluetooth provisioning. A Show or a Spot joins a
+  network from its own screen; a Dot can only be told over USB at install. This is the whole argument
+  for Improv over a hotspot.
+- **The setup page is not a convenience here, it is the only interface.** Alarms, the time zone,
+  radio favorites, the SIP account: on a Dot there is nowhere else to set any of them. That argues
+  for building the page earlier than its place in the order below.
+- **Four buttons and a ring.** Action is the one free input: a long press to talk to a default peer,
+  or to start and stop the first radio favorite, with the ring showing which. Modest, but it covers
+  the two things anyone does daily without an app.
+- **Announcing and the intercom suit it best of all.** Speaker, microphones, one per room, and
+  nothing anybody needs to look at. A Dot by a bed is the most natural thing in this whole plan.
+- **What it will not do standalone** is take a spoken command, because that is a Home Assistant
+  pipeline. A Dot with no Home Assistant is an intercom endpoint, an alarm clock and a radio — not a
+  voice assistant.
+
+## M5 — What it then says on the tin
+
+If M1 to M4 land, the pitch changes: *a local clock radio with alarms and timers, which becomes a
+Home Assistant voice satellite if you run Home Assistant*. That is a much easier first step than
+"set up a voice pipeline", and it is true of a device that has never seen Home Assistant.
+
+The README, the getting started guide and the installer all assume Home Assistant today, down to the
+installer printing an encryption key and waiting to be paired. A standalone path means an install
+that skips the key, and a first-run screen that offers *set this up on its own* beside *connect it to
+Home Assistant*.
+
+## Worth doing, in no particular milestone
+
+Each of these stands on its own and none of them blocks anything else.
+
+- **Sunrise alarm.** The screen has brightness control and the alarm already rings from the device's
+  own clock; fading the panel up over the quarter hour before it is a small change and the best
+  reason yet to put one of these by a bed. Nothing about it needs Home Assistant or the internet.
+- **Do Not Disturb hours.** Alarms ring, nothing else makes a sound. It is also what an announcement
+  from another device has to respect, so the two are worth designing together.
+- **A first-run screen.** Today a device comes up expecting Home Assistant. If any of this lands,
+  first boot should offer *set this up on its own* beside *connect it to Home Assistant*, and the
+  installer should be able to skip printing a key nobody is going to paste anywhere.
+- ~~**The time, or the weather, on a button press.**~~ **Dropped.** The screen says both already.
+  No pipeline, no wake word, no cloud: press the
+  action button and hear it. The device has no speech of its own — the alarm sounds are synthesized
+  notes, not recordings — so this means either a handful of clips built into the image or a small
+  local voice. Useful to anyone who cannot read the screen, and it works during an outage.
+- **A Bluetooth button as local control.** The BLE radio is already scanning for Home Assistant's
+  proxy, so acting on a particular button locally is nearly free: stop the alarm, make an
+  announcement, start the radio. A physical button by a bed beats talking to a screen, and it is the
+  cheapest accessibility win in this document.
+- **Audio from a phone, into the device.** Today the device is a Bluetooth *source* — it plays to
+  earbuds. As a *sink*, a phone plays through it, which is what anyone who owned an Echo expects. It
+  is a well-trodden path with bluez-alsa, but the daemon owns the speaker, so it means ducking around
+  alarms, announcements and voice.
+- **A Dot-only build, if memory ever gets tight.** One binary serves all three devices, so a Dot
+  carries the screen, camera and slideshow code and never runs a line of it. 512 MB of RAM is half
+  the Show's, and the intercom is the first feature to add a continuous audio path on top of
+  everything else. Measure before assuming; the lever exists if it is needed.
+- **How to build and test a change, written down for someone else.** Two contributors arrived in two
+  days and one of them found a bug nobody here could have. The single biggest risk to this project is
+  that one person can cut a release; the cheapest thing that helps is a path from "I changed a file"
+  to "I tested it on my own unit" that does not depend on asking.
+
+## Useful beyond standing alone
+
+Ideas that are not about Home Assistant being absent, but are worth the room here rather than being
+lost in a conversation.
+
+- **A diagnostics bundle, redacted as it is made.** One press collects the log, the state and the
+  hardware readings into a file with addresses, SSIDs, serials and keys already replaced by
+  placeholders. Twice in two days a stranger has been asked to paste a log with their serial removed,
+  which puts the work and the risk on them. This is what makes helping someone cheap, and it keeps
+  the no-personal-data rule by construction rather than by remembering.
+- **A sleep timer for the radio.** Off in thirty minutes. Every clock radio since 1975 has one and it
+  is an afternoon's work.
+- **A red clock at night.** Below some brightness the clock turns deep red instead of dim white:
+  readable at three in the morning without ruining night vision.
+- **Hearing the smoke alarm.** The microphones are already listening with echo cancellation and a
+  wake-word engine is already running; the T3 pattern is distinctive. A device that tells a phone the
+  alarm is sounding while nobody is home is the best reason yet to put one in a relative's house.
+  **It must never be described as a safety device**, and a model that does not cry wolf is real work,
+  not a weekend.
+- **"Help" as a wake word of its own.** The help call already alerts phones and dials people in turn,
+  but it takes a pipeline to start. A local model means it works with the internet down and Home
+  Assistant off — the same audience as the alarm above, and far easier to build.
+- **Copying a device's settings onto another.** Themes, alarms, cameras, radio favorites, wake word,
+  night hours: export from one, restore onto a replacement. Every reinstall pays for it, and so does
+  anyone whose unit dies.
+- **Going back to the previous version from the screen.** The A/B slots already hold the last good
+  root filesystem and `slotctl` can switch them. A button for it means a bad update does not need a
+  serial console and a PC.
+- ~~**Presence from hardware that is already running.**~~ **Dropped as an entity.** The BLE proxy
+  sees phones, the camera sees motion, the microphones hear a room; what was not wanted is an
+  occupancy sensor published to Home Assistant. The sensing itself is still needed, for:
+- **The screen waking as someone approaches**, off that same signal. No utility at all; people love
+  it. **In.** A Show or a Spot only — a Dot has no screen to wake.
+
+## Non-goals
+
+- Reimplementing Home Assistant on the device. Weather, cameras, media libraries and voice stay
+  Home Assistant's.
+- A general web UI. The setup page configures the few things that cannot be typed on a five-inch
+  screen; it is not a second front end for the device.
+- Cloud anything. No account, no telemetry, and no phoning an IP geolocation service unless the owner
+  asked for it.
+- **A music player**: local files, playlists, libraries, a streaming service. It sounds obvious and
+  it is a swamp — codecs, artwork, licensing, a library nobody wants to manage on a five-inch screen.
+  Radio gives most of what people actually want for a fraction of it, and Music Assistant already
+  does the rest through Home Assistant.
+
+## Order, and why
+
+M1 first because it is small, wanted by people who already run Home Assistant, and touches nothing
+risky. M4 next because everything else is wrong without it. Then M2, which is the feature people
+would actually notice, with M3 as its awkward prerequisite. M5 is documentation and a conversation
+about what this project claims to be.

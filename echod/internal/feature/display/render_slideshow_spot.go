@@ -10,9 +10,9 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/config"
 )
 
-// slideshowWash is the theme's ground colour, translucent, over a photo — the same technique
-// render_slideshow.go's Show version uses, just this theme's colour (colBackground) instead of
-// walnut: the photo stays recognisable, and the clock drawn over it stays legible.
+// slideshowWash is the theme's ground color, translucent, over a photo — the same technique
+// render_slideshow.go's Show version uses, just this theme's color (colBackground) instead of
+// walnut: the photo stays recognizable, and the clock drawn over it stays legible.
 const slideshowWash = 130
 
 // slideshowBackground draws a Background-mode photo full-bleed, then the wash over it.
@@ -39,10 +39,10 @@ func (r *roundRenderer) slideshowScreensaverFace(s roundScene) {
 // label. big is the normal size (clockFace's own layout); otherwise a small one near the top.
 func (r *roundRenderer) screensaverClock(s roundScene, big bool) {
 	if !big {
-		r.centred(r.small, clockText(s.now), 60, colText)
+		r.centered(r.small, clockText(s.now), 60, colText)
 		return
 	}
 	now := s.now
 	r.timeLine(now, 240)
-	r.centred(r.small, now.Format("Monday, January 2"), 290, colDim)
+	r.centered(r.small, now.Format("Monday, January 2"), 290, colDim)
 }

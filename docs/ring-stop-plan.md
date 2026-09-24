@@ -1,0 +1,328 @@
+# Stopping a ring: a plan
+
+What happens when an alarm or a timer goes off, and why people say it is hard to stop.
+
+Written 2026-09-22 from a read-only survey of the code. Every claim below carries a file reference;
+where something is inferred rather than read, it says so. Nothing here has been built yet.
+
+## The complaint
+
+Setting alarms and timers is fine. **Stopping one while it is ringing is not.** The report from
+users is that saying "stop" works sometimes and not others, and that the touch target is awkward.
+Voice is the interface these devices are meant to have, so a stop word that works most of the time
+is the same as a stop word that cannot be trusted.
+
+This is not a perception problem. Each half of it is a specific defect.
+
+## What is true today
+
+### The ring itself
+
+Two near-duplicate engines, `feature/alarm/alarm.go:307-336` and `feature/timer/timer.go:393-422`,
+each with its own goroutine and cancel. Every stop path has to call both. That is how Home Assistant
+ended up able to stop an alarm but not a timer.
+
+A ring chimes for 2 s every 2 s (`ringEvery`), at a synthesis level of 0.6, for at most 15 minutes
+(`ringFor`), then gives up. It plays through `Interject`
+(`hardware/speaker/driver.go:133`), which mixes into the player queue **without taking a claim**.
+That is deliberate - a ring can never wedge the speaker - and it is also why nothing can turn it
+down.
+
+Loudness is the ALSA mixer step, so **volume 0 or a muted media player makes a ring completely
+silent** while the screen and the LED carry on (`feature/media/player.go:555-579`). There is no
+floor.
+
+### Why "stop" is unreliable
+
+`feature/detect/detect.go:60-73` lowers the wake threshold by `playingSlack` (0.10) while the echo
+canceller is running, with a comment explaining exactly why:
+
+> While the speaker plays and the canceller runs, what reaches the detector is the residual of the
+> music plus the voice, and the word scores lower than it does in a quiet room.
+
+**The stop word never gets that slack.** `if slot == StopSlot { return config.Get().Wake.Stop.Threshold }`
+returns before the adjustment. So the one word whose whole job is to interrupt a sound is the only
+word judged with no allowance for the sound. Default stop threshold is 0.7
+(`config/wake.go:25`).
+
+### Why ducking does not save it
+
+`feature/detect/nearmiss.go` already solves this problem for music, and the reasoning is measured
+rather than guessed (from a Dot, `techo5-dot docs/microphones.md`):
+
+> over playback the wake word stops firing once the echo at the microphones passes about -60 dBFS,
+> and no filter recovers it - what the canceller leaves behind is the speaker's own distortion,
+> which the reference it subtracts cannot contain. Ducking as the score rises was the obvious answer
+> and does not work: the score passes NearMiss only 120-140 ms before it would fire, by which time
+> the word is over.
+
+So the trigger is the **near miss**: somebody said it, the device almost heard it, they are about to
+say it again, and the music drops for 4 s (`nearMissDuck`), with a 6 s cool-off.
+
+It does nothing during a ring, for two structural reasons:
+
+1. It ducks `Backgrounds()` only (`nearmiss.go:66`). The chime is not a background producer.
+2. Its `playing()` test is `Backgrounds().Playing() != nil` (`nearmiss.go:64`), so with a ring and no
+   music it **declines to duck at all**.
+
+The first two lines of the ring loop are `sound.Backgrounds().Duck(true)` - the alarm ducks the radio
+so it can be heard. Nothing ever ducks the alarm.
+
+### The other stop paths, for completeness
+
+- **Touch, Show**: live region is `y >= 310` only; the top 65% of the screen, including the clock and
+  the label, is dead (`feature/display/render.go:167-195`, `feature/display/alarms.go:51-57`). A
+  press held longer than `tapHold` (500 ms) emits **no gesture at all**
+  (`hardware/touch/touch.go:350-378`), so a deliberate half-asleep press does nothing.
+
+  Three things checked since, that make this worse than the paragraph above says. `310` is the Show
+  5's number, not a constant: the sizes scale, so on a Show 8 the live test is `y >= 573` and **72%**
+  of the panel is dead. The band has no upper bound and **no x bound**, so a tap in the side margins
+  decides as much as one on a button. And while a ring sounds the page returns for *every* gesture
+  kind (`feature/display/display.go:425-432`), so the volume swipe and the drawer are swallowed too.
+- **Touch, Spot**: the whole face is Stop, which is the right design - but a 450 ms press emits
+  `Hold`, which `ringGesture` refuses, and control falls through to opening the ring menu underneath
+  the ring face (`feature/display/display_spot.go:519-532`). If the panel goes dark after the ring
+  starts, the first tap is spent lighting it.
+
+  Also checked: a swipe up or down while ringing falls past `ringGesture` to `media.Adjust(±1)`, so
+  it **changes the volume** on a face that says "Tap to stop". The menu reached by the `Hold` bug can
+  stop a ringing *timer* (`itemTimers`) but not an alarm. The dark-panel case is narrower than it
+  looks - `ringLights` relights on the ring's own `Changed` event - but it is edge-triggered, where
+  the Show relights defensively every frame, so a panel put to sleep after the ring began stays dark.
+- **Buttons**: **no button stops a ring on a Show or a Spot.** The Dot's action button is the only
+  physical stop on any device, and it is swallowed while the setup page holds the press
+  (`feature/voice/voice.go:76-81`) or during a call (`feature/phone/phone.go:158-168`).
+- **Home Assistant**: `button.alarm_stop` and `button.alarm_snooze`. **There is no way to stop a
+  timer from Home Assistant** - `feature/timer/timer.go:164` exposes one text sensor and no actions.
+- **Muting the microphone** tears down every wake-word backend including the stop model
+  (`feature/detect/engine.go:463-478`), so a muted device cannot be stopped by voice at all.
+
+### States with no way out
+
+1. **Ringing timer during a phone call, any device.** The call page takes every tap, the stop word is
+   suppressed for the whole call (`feature/detect/detect.go:77-80`), and Home Assistant has no timer
+   stop. Fifteen minutes, guaranteed.
+2. **Show with Home Assistant never connected.** `feature/display/display.go:1056` gates leaving the
+   splash on HA's voice pipeline subscribing, with no timeout, so the ringing page is never drawn.
+   The tap band still works, but nothing on screen says where.
+3. **Show whose framebuffer failed to open.** `d.r == nil` makes the tap bail, and a Show has no
+   button.
+4. **Dot with the microphone muted and the setup page holding the press.**
+
+## Principles
+
+1. **Silence is the urgent act; the decision can wait.** What somebody wants at 6am is quiet, not a
+   choice between Stop and Snooze. Stop the noise on the first input, then offer the choice.
+2. **A stop path may not depend on anything that can be down.** No network, no Home Assistant, no
+   voice pipeline. Anything that needs those is a convenience, not a stop path.
+3. **An alarm may not fail silently.** Every other failure is recoverable; this one is the whole
+   purpose of the feature.
+4. **Persist the moment, not the countdown.** An absolute finish time survives a restart and a power
+   cut; "27 minutes left" does not.
+5. **A dropped ring must leave a trace.** Better to say "your timer finished at 14:03" than to
+   vanish.
+
+## The work, in order
+
+All built except R3, which was dropped. Each section says what was built and what it turned up.
+
+### R1 - Make the stop word as easy to hear as every other word - BUILT
+
+One line: let `StopSlot` take `playingSlack` the way the other slots do, while the canceller runs.
+Nothing else in this plan is as cheap or as likely to matter.
+
+Test: a unit test on `Threshold(StopSlot)` with the canceller on and off.
+
+Built as `thresholdFor` in `feature/detect/detect.go`, pulled out of the closure so it is testable
+without the singletons the closure reaches for. `threshold_test.go` pins the stop word taking the
+same drop as slot 0, the floor, and the other slots keeping their own thresholds.
+
+### R2 - Duck the ring for the stop word - BUILT
+
+Give the ring loop a duck state it reads each time round, and drop or skip the chime for ~3 s when
+it is set. Trigger it from a near miss **on the stop slot** - the engine already reports near misses
+per slot (`feature/detect/engine.go:70-73`), and today that signal is thrown away.
+
+Also make the ducker willing to act during a ring: its `playing()` test has to count a ring as
+something worth ducking, or it declines before it starts.
+
+The screen and the LED carry on through the quiet window, so the alarm stays obviously alive.
+
+Test: the ducker is deliberately built with the speaker and the clock injectable
+(`feature/detect/nearmiss.go:49-56`) precisely so this is testable with no hardware. Follow that.
+
+Built as a package, `feature/ring`, rather than a flag copied into both engines - R7 blames that
+duplication for the Home Assistant gap, so this is a first piece of the unification rather than a
+third copy. It holds two things:
+
+- `Sounding` / `IsSounding`, a **count** and not a flag, so an alarm and a timer going off together
+  do not have the first to finish report silence.
+- `Hush` / `Hushed`, a **deadline** and not an on/off. A hush nobody lifts expires by itself, so no
+  bug can leave an alarm permanently silent - which for this feature is the failure that matters.
+
+The ducker hushes on a near miss on the stop slot only, and **not** gated on `Media.DuckOnNearMiss`:
+that setting is about music getting out of the way, where this is about an alarm being stoppable at
+all. Rate limited to once per `3 x ring.HushFor`, so a room that keeps nearly saying it can quiet at
+most a third of a ringing alarm.
+
+### R3a - The header, from decision 3 - BUILT
+
+`header` in `feature/display/render.go`, deferred from the first line of `draw` so it runs last and
+lands on every page, including the ones that return early - the ringing page, the call page, pairing,
+wifi, setup, the camera and the radar, none of which the footer ever reached.
+
+Two things the pixels said that reading the code did not:
+
+- The claim that no page draws above the margin is **false**. The weather page's art and the settings
+  sheet's card both reach the top edge, so a band across the panel cuts a slot through them. It is a
+  pill behind the words instead, which takes only the space the words need and is the background
+  color on a plain page.
+- The settings sheet is skipped on purpose. It already has a Microphone row reading "Muted" or
+  "Listening" with the switch beside it, which says it better than a line would, and a pill there
+  would cut the top off its card.
+
+Test: `header_test.go` compares the top strip muted against unmuted on every page - it must differ on
+all of them, and must **not** differ on the settings sheet. `SHOW_PREVIEW=<dir> go test -run
+TestShowScenesDraw` writes the pages as PNGs; the muted scenes were added to that set, and looking at
+them is what caught both points above.
+
+### R3 - A second word: snooze - NOT DOING
+
+The stop word is a single always-loaded model, not language. "Snooze" could be another one, on the
+same mechanism, with no network and no Home Assistant.
+
+Dropped 2026-09-23. What it costs is the reason. Each microWakeWord model is a self-contained
+streaming model with its own feature front end, and **every one sees every frame**
+(`feature/detect/backends.go:47-79`) - which is exactly why "off" means unloaded rather than ignored
+(`feature/detect/stop.go:42-47`). A second always-loaded word is a permanent share of the frame
+budget on a Dot, spent on a short word that would be said over a ring, which is the condition the
+detector is worst at. R4 buys the same outcome for no per-frame cost.
+
+The single reserved slot is also assumed in six places, for whoever revisits this: the engine is
+sized `New(StopSlot+1, ...)` so a slot 101 fails the bounds check in `Use`/`Clear` and is **silently
+refused**; `thresholdFor` sends anything that is not `StopSlot` to Home Assistant's per-assistant
+threshold; `OnDetect` would **start a conversation turn** on an unrecognised reserved slot;
+`nearmiss.go`'s ring hush is keyed to the one index; and the config holds a single `Stop` struct with
+a single sensitivity entity. None of that is hard, but none of it is free either.
+
+### R4 - Any button stops a ring - BUILT
+
+First press of volume-up, volume-down or mute silences a ring; it does not change the volume or the
+microphone that time. Every device family has all three buttons, so this is the only local stop that
+works with no screen and no microphone.
+
+Built as decided (decision 2): the first press of any of them silences without ending the ring and
+offers the snooze for 8 s ("press again to snooze N min" on the screen); a second press takes it, and
+no answer stops the ring.
+
+### R5 - The touch targets - BUILT
+
+- Show: make the whole screen a stop target the way the Spot's already is, and accept `Hold` and
+  `Release` as stops on both. Today a long press on a Show emits nothing at all.
+- Spot: take `Hold` in `ringGesture` rather than letting it fall through to the menu, and relight the
+  panel for a ring rather than spending the first tap on it.
+
+Built as four changes, and the Show's long press turned out to be the general bug the ringing page
+only showed most clearly:
+
+- The long press is fixed in `hardware/touch`, not on the ringing page. `tapHold` disqualified a tap
+  only because a hold might mean something else - and on the Show nothing is reported for a hold, so
+  a still finger held past half a second emitted **nothing at all, anywhere on the device**. It is a
+  tap now wherever holds are not reported, which is a compile-time constant per board.
+- The Show's ringing page decides everywhere. Snooze stays exactly where the Snooze button is drawn;
+  Stop is the answer on the rest of the panel, because it is the one that cannot be got wrong - an
+  alarm stopped by mistake is over and the person is awake to notice, where one snoozed by mistake is
+  silent and comes back later, which reads as the device having ignored somebody.
+- The Spot takes `Hold` and `Release` as a slow tap. Both used to return "not mine" and fall to the
+  tail of the gesture chain, where `Hold` opens the ring menu **over** the ringing face.
+- A dark Spot with something ringing acts on the press as well as lighting the panel. A ring lights
+  the panel itself when it starts, so this is only reachable when the panel was put to sleep after
+  that - but that path exists, and it is reached through the `Hold` bug above.
+
+Both faces now say when a ring has been silenced and is waiting on an answer.
+
+### R6 - Survive a disruption - BUILT
+
+- Persist timers and snoozes as absolute finish times. Alarms already persist; timers and snoozes are
+  memory-only and a restart loses both.
+- **Do not auto-resume a ring on start-up.** A crash loop would become a device that screams every
+  time it boots. Resume the alarm, not the ring: if the finish time is more than a minute or two
+  past, show what was missed instead of ringing.
+- Fix the snooze that a forward clock jump drops silently (`feature/alarm/schedule.go:43-53`, the
+  `stale` window) - it should leave a trace, not vanish.
+
+Snoozes and the device's own timers persist as absolute times. **A missed ring leaves a trace**
+(principle 5): `ring.Missed` writes it down, the clock page says it for 12 hours ("Missed: timer
+"Pasta" at 2:03 PM yesterday" in the Show's footer, a shorter line under the Spot's clock) and the
+`missed_ring` sensor carries the latest to Home Assistant, which on a Dot is the only trace there is.
+What it catches: a snooze or timer that came due while the device was off, a snooze or alarm a clock
+jump carried past, and - new - **an alarm that came due while the device was off**, which used to
+leave nothing at all, since the scheduler starts from now. That needs to know when the device
+stopped, so it writes down that it is running (`config.KeepAlive`, a small file beside the state)
+every 10 minutes and whenever something rings. Anything due in the last 2 minutes before it came back
+still rings, so a restart for an update at 6:29 does not lose a 6:30 alarm; older than that is
+missed, never rung, and a missed one-off alarm is turned off as ringing it would have.
+
+### R7 - The remaining holes - BUILT
+
+- A timer stop for Home Assistant, or fold timers into `alarm_stop`. Consider unifying the two ring
+  engines; the duplication is what let this gap exist.
+- Let a ring be stopped from the call page, and stop suppressing the stop word for a ringing timer
+  during a call.
+- Do not let the boot splash gate the ringing page.
+
+**The engines are one bell now.** `feature/ring/bell.go` is the only thing on the device that rings:
+alarms and timers decide when and what for, and call `ring.Start`. One goroutine, one light, one
+duck, taken when the first ring starts and given back when the last one ends. The duck was a live
+fault, not tidiness: ducking is a switch rather than a count, so with an alarm and a timer ringing
+together the first to stop brought the music back up under the other. `Start` also counts as
+sounding before it returns, where the old loops only did once their goroutine got going. Callers
+that asked both engines separately - the stop word, the action button, Snooze on both screens - ask
+`ring` instead. The ring's own level (decision 1) is set here too.
+
+## Decisions
+
+Settled 2026-09-23, except the fourth.
+
+1. **A ring has its own level, not the media volume.** A ring no longer inherits the media volume, so
+   leaving music muted can never make an alarm silent, and there is a separate explicit and visible
+   ring mute for somebody who really wants one. Not a floor on the media volume: a floor overrides a
+   deliberate mute, where an own level means the deliberate mute was never the alarm's to begin with.
+   Applies to alarms and timers both - a timer nobody can hear is the same failure.
+
+   **Built.** `config.Alarms.RingVolume`, 0-30 in the media volume's steps, set by "Ring volume" in
+   Alarms & Timers on the Show and the Spot and by the `ring_volume` number in Home Assistant (the
+   only way on a Dot). The separate ring mute became the bottom of the same range: at zero the row
+   reads "Silent" and says alarms and timers will make no sound. The first start writes down the
+   media volume it started from, or 15 if that was zero, so nobody's alarm changes by itself and no
+   device starts silent. Every sound goes through one gain after the speaker tuning, so the chime has
+   a queue of its own (`speaker.Player.Bell`): the output runs at the louder of the two levels and
+   the quieter lane is scaled down before the mix, which keeps the music at its own volume and a
+   muted one muted. On a Show the tuning's compressor works on the sum, so the music's share under a
+   ring is close rather than exact.
+2. **A button press silences, then offers a snooze.** Per principle 1: the first press stops the
+   noise and offers "Snooze N min?" for a few seconds; ignoring the offer leaves it stopped, because
+   a snooze nobody confirmed is the surprising outcome. **N is configurable** - in settings and on
+   the offer itself - rather than fixed at 9: five minutes and fifteen are both wanted.
+3. **Muting the microphone keeps cutting the microphone, and the screen says so.** The mute is a
+   promise and stays whole; what is missing is that nothing tells anybody. On a Show the
+   `microphone off` line **moves from the footer to a header**, so it is drawn on every page rather
+   than only the two the footer reaches — the ringing page among them, which said nothing at all
+   about mute. The Dot is left as it is: the mute button's own LED lights from the mute line itself,
+   which is the right signal and is not echod's to change.
+
+   Not quiet hours, which already exist (`config/quiet.go`) and already exempt a ring on purpose:
+   the setting says so to the user in as many words, "Alarms and timers always sound". Worth knowing
+   while reading this plan: **"quiet" means four unrelated things in this tree** - quiet hours, the
+   microphone cut, the media volume at zero, and `Engine.Quiet` tearing the wake backends down
+   because the microphone was cut.
+4. **Are "reminders" wanted as a concept?** Still open, and being looked at elsewhere. There is none
+   in the code today. An alarm with a label already is one, and a third ring engine would be a third
+   thing to stop - so if they are wanted they should land on one unified engine (R7), not beside two.
+
+## What this plan is not
+
+Not a change to how alarms and timers are set - that part works. Not richer voice phrasing ("snooze
+the alarm for ten minutes"): that needs the wake word, the network, Home Assistant and an intent, so
+it can never be more reliable than the pipeline. It is worth having, on top of R1-R4, never instead.

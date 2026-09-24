@@ -9,6 +9,7 @@ package firmware
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 
@@ -69,6 +70,15 @@ func build() *Firmware {
 		},
 		DeviceClass: "firmware",
 		OnCommand:   u.command,
+	}
+
+	// A stamp Home Assistant cannot rank is the one failure this entity cannot report: the card comes
+	// on, and nothing installed here ever clears it, because Home Assistant only asks whether the two
+	// strings differ. Nothing can be done about it from the device - the version was decided by
+	// whatever built this binary - so say so once, where the next person to wonder will look.
+	if err := update.ValidVersion(layout.Version); err != nil {
+		slog.Error("this build's version is not one Home Assistant can rank, so it will offer an update that never settles",
+			"running", layout.Version, "err", err)
 	}
 
 	// Up to date until a check says otherwise, rather than an entity with no versions in it.
@@ -248,6 +258,12 @@ func (u *Firmware) Install(ctx context.Context) {
 	// The ring says it is working for the whole of it, which then hands over to the still frame the
 	// restart leaves behind — so the device is never silently busy from the moment somebody presses
 	// install to the moment the new binary is up.
+	// A second press is turned away before it says anything: setting the progress back to nothing here
+	// would put Home Assistant's bar back to empty halfway through the download already running.
+	if update.Installing() {
+		slog.Info("install already running; the second request was ignored", "version", found.Version)
+		return
+	}
 	working := led.Get().Busy().Start(led.WorkUpdate)
 	defer working.Done()
 
@@ -257,6 +273,15 @@ func (u *Firmware) Install(ctx context.Context) {
 	// Home Assistant learns nothing from the command it sent — the update entity has no way to say an
 	// install failed, and the card just goes back to offering it. So the failure has to arrive as state,
 	// and on the ring for somebody standing in front of the device.
+	// A second press while the first install is still downloading is not a failure and must not be
+	// reported as one. The update card gives no sign that anything is happening on a slow link, so
+	// pressing it again is the natural thing to do - and the device answered by flashing the failure
+	// pattern on the ring and telling Home Assistant the update had failed, while it was in fact
+	// downloading perfectly well.
+	if errors.Is(err, update.ErrInstalling) {
+		slog.Info("install already running; the second request was ignored", "version", found.Version)
+		return
+	}
 	if err != nil {
 		slog.Error("installing an update failed", "version", found.Version, "err", err)
 		u.publish(found)
@@ -291,7 +316,7 @@ func (u *Firmware) state(found update.Manifest) esphome.UpdateState {
 	return esphome.UpdateState{
 		CurrentVersion: layout.Version,
 		LatestVersion:  latest,
-		Title:          "EchoLocal (" + u.Channel().Label() + " channel)",
+		Title:          "TECHO5 (" + u.Channel().Label() + " channel)",
 		ReleaseSummary: found.Notes,
 		ReleaseURL:     found.ReleaseURL,
 	}

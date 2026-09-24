@@ -18,7 +18,7 @@ import (
 
 // maxLag is how far apart the reference and a microphone may be, in samples at the capture rate.
 // The loopback is sample-aligned with the microphones by construction, so the only delay is the
-// acoustic path — a metre is 47 samples at 16 kHz, and the enclosure is far smaller than that. The
+// acoustic path — a meter is 47 samples at 16 kHz, and the enclosure is far smaller than that. The
 // window is wide because being wrong about this is the thing the measurement is meant to catch.
 const maxLag = 800
 
@@ -145,7 +145,7 @@ func report(w io.Writer, frames []byte) {
 	}
 
 	// One reference to correlate against: the speaker is mono into a single driver, so left and
-	// right carry the same programme and either would do. Their sum is what reached it.
+	// right carry the same program and either would do. Their sum is what reached it.
 	ref := make([]float64, len(refs[0]))
 	for i := range ref {
 		for c := range refs {

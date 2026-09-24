@@ -2,6 +2,7 @@ package wake
 
 import (
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/zserge/microwakeword"
 
 	"github.com/HuskerMinion/techo5/echod/internal/lib/oww"
+	"github.com/HuskerMinion/techo5/echod/internal/lib/safename"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/tflite"
 )
 
@@ -107,8 +109,15 @@ func kindOf(path string) Kind {
 		return KindMicroWakeWord
 	}
 
+	// Parse proves the file can be read, not that it says anything sensible: a model with no subgraph,
+	// or one whose input names a tensor that is not in its table, reads cleanly and then indexes out of
+	// range here. A file that cannot answer the question is the same as one that answers "not
+	// openWakeWord" — the engine that loads it reports the failure properly a moment later.
+	if len(m.Subgraphs) == 0 {
+		return KindMicroWakeWord
+	}
 	g := m.Subgraphs[0]
-	if len(g.Inputs) == 0 {
+	if len(g.Inputs) == 0 || g.Inputs[0] < 0 || g.Inputs[0] >= len(g.Tensors) {
 		return KindMicroWakeWord
 	}
 	shape := g.Tensors[g.Inputs[0]].Shape
@@ -149,9 +158,19 @@ func load(dir, id string) Model {
 	if len(man.TrainedLanguages) > 0 {
 		m.Languages = man.TrainedLanguages
 	}
+	// The name in the manifest is the one part of it that becomes a path. A manifest is JSON fetched
+	// from Home Assistant, or dropped in the directory by hand, and this path is what Purge deletes
+	// and what the engine loads — so a manifest that names something outside the model directory is
+	// ignored and the model keeps the file named after its id, which is the file that is there.
 	if man.Model != "" {
-		m.Path = filepath.Join(dir, man.Model)
-		m.Config.ModelPath = m.Path
+		named, err := safename.Join(dir, man.Model)
+		if err != nil {
+			slog.Error("a wake word's manifest names a file outside the model directory; ignoring it",
+				"id", id, "model", man.Model)
+		} else {
+			m.Path = named
+			m.Config.ModelPath = m.Path
+		}
 	}
 
 	// Window and step describe the model. probability_cutoff is deliberately ignored: the

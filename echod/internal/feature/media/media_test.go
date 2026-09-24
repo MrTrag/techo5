@@ -3,9 +3,13 @@ package media
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/binary"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/HuskerMinion/techo5/echod/internal/hardware/speaker"
@@ -113,5 +117,39 @@ func TestHeaderRefusesAnOversizedChunk(t *testing.T) {
 	err := header(bufio.NewReader(bytes.NewReader(b.Bytes())))
 	if err == nil {
 		t.Fatal("accepted a chunk of a gigabyte")
+	}
+}
+
+// An announcement is a chime or a sentence. The url behind one is whatever Home Assistant handed
+// over — for an external media source, a host nobody here controls — and the body is held whole in
+// memory, so a stream that never ends has to be cut off rather than read.
+func TestFetchRefusesABodyLargerThanAnAnnouncement(t *testing.T) {
+	// Counted atomically: the handler runs on the server's own goroutine and the assertions below
+	// run on the test's, and the read happens while the handler may still be writing - Fetch returns
+	// as soon as it has read enough to refuse, which is the point of the test, so the handler is
+	// still going round its loop. A plain int64 here is a real data race and the detector says so.
+	var served atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "audio/mpeg")
+		chunk := make([]byte, 1<<20)
+		for served.Load() < 4*mostAudio {
+			n, err := w.Write(chunk)
+			served.Add(int64(n))
+			if err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	_, err := Fetch(context.Background(), srv.URL+"/endless")
+	if err == nil {
+		t.Fatal("a body with no end to it was read and decoded")
+	}
+	if !strings.Contains(err.Error(), "more than") {
+		t.Errorf("%v, want something about the body being too large", err)
+	}
+	if n := served.Load(); n > 2*mostAudio {
+		t.Errorf("read %d bytes for a bound of %d", n, mostAudio)
 	}
 }

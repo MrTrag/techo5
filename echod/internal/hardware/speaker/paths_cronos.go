@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/HuskerMinion/techo5/echod/internal/config"
+	"github.com/HuskerMinion/techo5/echod/internal/layout"
 )
 
 // Output is one of the device's audio outputs. The Echo Show 5 has a speaker and no jack, so
@@ -52,8 +53,50 @@ type kctl struct {
 // 2026-09-15: a 0.3 FS tone at the mic went from -47 to -15 dBFS when it was cleared). Amazon's
 // HAL cleared it at boot; with Android on the null HAL nobody does, so the daemon does. Codec
 // writes are cached until the stream powers up, which is why this goes before the first write.
-var initSequence = []kctl{
-	{name: "Speaker Safe Mode A", level: 0},
+//
+// The 1st gen (checkers) has neither chip: a Realtek RT5616 codec and an amplifier on a GPIO, and
+// the kernel leaves the codec connected to nothing, which Amazon's audio layer wired once at boot.
+// Three things make it play, found on a unit by Empty2k12 (techo5-checkers docs/hardware.md), and
+// missing any one is silence:
+//   - Ext_Speaker_Amp_Switch is active low here: LineageOS plays with it Off. It is set Off once
+//     and left, so AmpSwitch, which switches it On to play, stays empty on both generations.
+//   - The DAC reaches the speaker through OUT MIX, OUTVOL and the line-out (not the headphone
+//     pins), each step a switch to turn on.
+//   - Two mutes share LOUT_CTRL1 (reg 03), OUT Playback Switch and OUT Channel Switch, both set
+//     out of reset; with only the first cleared everything looks routed and nothing plays. A
+//     switch at 1 is unmuted.
+//
+// The Show 8 (crown) has the same RT5616 on the same playback device, and the same sequence is
+// what it wants: checked a write at a time on a unit 2026-09-22, where LineageOS had left the
+// routing wired but OUT Playback Switch off and the amplifier switch On. Clearing the mute alone
+// was not enough; setting Ext_Speaker_Amp_Switch Off is what reached the room, so crown's amplifier
+// switch is active low as well and its separate amp_gpio is not the gate. A 1 kHz tone at 0.3 FS
+// then read -4 dBFS at the microphones, up from -53. See TECHO5-CROWN crown-port-notes.md.
+var initSequence = showInit(rt5616())
+
+// rt5616 is whether the speaker is the Realtek codec and its GPIO amplifier rather than the
+// MAX98396: true on the 1st gen Show 5 and on the Show 8, false on the 2nd gen Show 5.
+func rt5616() bool { return layout.Checkers() || layout.Crown() }
+
+func showInit(rt5616 bool) []kctl {
+	if !rt5616 {
+		return []kctl{{name: "Speaker Safe Mode A", level: 0}}
+	}
+	return []kctl{
+		{name: "Ext_Speaker_Amp_Switch", value: "Off"},
+		{name: "DAC MIXL INF1 Switch", level: 1},
+		{name: "DAC MIXR INF1 Switch", level: 1},
+		{name: "Stereo DAC MIXL DAC L1 Switch", level: 1},
+		{name: "Stereo DAC MIXL DAC R1 Switch", level: 1},
+		{name: "Stereo DAC MIXR DAC R1 Switch", level: 1},
+		{name: "Stereo DAC MIXR DAC L1 Switch", level: 1},
+		{name: "OUT MIXL DAC L1 Switch", level: 1},
+		{name: "OUT MIXR DAC R1 Switch", level: 1},
+		{name: "LOUT MIX OUTVOL L Switch", level: 1},
+		{name: "LOUT MIX OUTVOL R Switch", level: 1},
+		{name: "OUT Playback Switch", level: 1},
+		{name: "OUT Channel Switch", level: 1},
+	}
 }
 
 var pathSequence = map[Output][]kctl{
@@ -123,7 +166,8 @@ func gainForStep(out Output, step int) float32 {
 // MediaService is the init service that owns Android's audio HAL on LineageOS.
 const MediaService = "vendor.audio-hal"
 
-// AmpSwitch is empty: on cronos Ext_Speaker_Amp_Switch drives the GPIO wired to the MAX98396's
+// AmpSwitch is empty on both generations (for the 1st gen, see initSequence): on cronos
+// Ext_Speaker_Amp_Switch drives the GPIO wired to the MAX98396's
 // reset, so switching it off and on resets the amplifier and wipes the register setup the codec
 // driver did at probe — which it never repeats, leaving the speaker silent until a reboot
 // (found 2026-09-14). The amplifier is left as the kernel brought it up.
@@ -131,9 +175,11 @@ const AmpSwitch = ""
 
 // OutputBoost is make-up gain on everything the speaker plays, before the volume curve and the
 // limiter. Unity: the quiet output that once seemed to need it was the amplifier's safe mode
-// (see initSequence), and speech has its own normaliser.
+// (see initSequence), and speech has its own normalizer.
 const OutputBoost = 1.0
 
-// DriverTuning is off: lib/asp reads the Dot's tuning files. The Echo Show 5's vendor partition holds a
-// different set, so it plays as it always has, without that stage.
-const DriverTuning = false
+// DriverTuning applies the vendor driver's volume-dependent EQ and limiter (lib/asp), read from the
+// unit's own vendor partition. Both generations of Show 5 declare the same four filters and the same
+// compressor in their AFE.cfg ("Cronos" and "Checkers"), which lib/asp knows as asp.Show; a unit
+// whose files are missing or are a set we do not know says so and plays untuned.
+const DriverTuning = true

@@ -32,7 +32,7 @@ import (
 
 func main() {
 	info := flag.Bool("info", false, "print display information and exit")
-	fill := flag.String("fill", "", "fill with this rrggbb colour only")
+	fill := flag.String("fill", "", "fill with this rrggbb color only")
 	hold := flag.Duration("hold", 0, "keep repainting (with a clock) for this long; 0 paints once and exits")
 	interval := flag.Duration("interval", time.Second, "repaint interval while holding")
 	layer := flag.Int("layer", 0, "overlay layer to use")
@@ -216,7 +216,7 @@ func main() {
 			}
 			post()
 		}
-		fmt.Printf("posted %d frames, %d release fences never signalled\n", frameN, fenceTimeouts)
+		fmt.Printf("posted %d frames, %d release fences never signaled\n", frameN, fenceTimeouts)
 	}
 }
 

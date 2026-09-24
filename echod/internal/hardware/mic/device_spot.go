@@ -14,6 +14,10 @@ const (
 	// Mics is how many channels are microphones.
 	Mics = 4
 
+	// maxMics is the largest Mics this build has to hold, so the beamformer can size its
+	// arrays at compile time. One device per build here, so it is Mics itself.
+	maxMics = 4
+
 	// RefFirst is the first loopback channel and Refs how many follow it, left then right.
 	RefFirst = 4
 	Refs     = 2
@@ -37,3 +41,6 @@ const MediaService = "vendor.audio-hal"
 // VendorBeamformer is off: the coefficient sets the daemon reads (lib/subband) are the Dot's, and
 // the Echo Spot's vendor partition holds a different one.
 const VendorBeamformer = false
+
+// resetsOnMute is false: the mute here leaves the converter alone.
+func resetsOnMute() bool { return false }

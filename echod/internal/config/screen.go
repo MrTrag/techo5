@@ -11,6 +11,13 @@ type Screen struct {
 	// never. A tap wakes it for a while.
 	Night string `json:"night,omitempty"`
 
+	// NightLight keeps a Show's screen on at a faint glow through the night instead of putting it out;
+	// a touch brings it up to its brightness for a while.
+	NightLight bool `json:"night_light,omitempty"`
+
+	// NightLightLevel is how bright the night light is, 1 to 10; none is the panel's own default.
+	NightLightLevel int `json:"night_light_level,omitempty"`
+
 	// Theme names the screen's palette; empty is the first one, "Custom" is Palette.
 	Theme   string  `json:"theme,omitempty"`
 	Palette Palette `json:"palette,omitempty"`
@@ -20,12 +27,21 @@ type Screen struct {
 
 	// Clock24 shows times on the screen as 15:04 instead of 3:04 PM.
 	Clock24 bool `json:"clock_24,omitempty"`
+
+	// MusicStrip is how many seconds music plays on the full now-playing page before the Show goes
+	// back to its clock with the music in a strip at the foot; none keeps the full page.
+	MusicStrip int `json:"music_strip,omitempty"`
+
+	// Language is which words the screen listens for in a turn — "en", "de", "es", "fr", "it",
+	// "nl" — empty for all of them. It has nothing to do with what the assistant understands or
+	// says, which is Home Assistant's pipeline; it decides only which pages a sentence brings up.
+	Language string `json:"language,omitempty"`
 }
 
 // DefaultTheme is the palette a new device comes up in.
 const DefaultTheme = "Ember"
 
-// Palette is a custom theme's five colours, as #rrggbb.
+// Palette is a custom theme's five colors, as #rrggbb.
 type Palette struct {
 	Ground string `json:"ground,omitempty"`
 	Accent string `json:"accent,omitempty"`
@@ -59,6 +75,14 @@ func (w ScreenWriter) Theme(v string) error {
 	return w.st.Update(func(c *Config) { c.Screen.Theme = v })
 }
 
+func (w ScreenWriter) NightLightLevel(v int) error {
+	return w.st.Update(func(c *Config) { c.Screen.NightLightLevel = min(max(v, 0), 10) })
+}
+
+func (w ScreenWriter) NightLight(v bool) error {
+	return w.st.Update(func(c *Config) { c.Screen.NightLight = v })
+}
+
 func (w ScreenWriter) Night(v string) error {
 	return w.st.Update(func(c *Config) { c.Screen.Night = v })
 }
@@ -69,6 +93,14 @@ func (w ScreenWriter) Welcomed(v bool) error {
 
 func (w ScreenWriter) Clock24(v bool) error {
 	return w.st.Update(func(c *Config) { c.Screen.Clock24 = v })
+}
+
+func (w ScreenWriter) MusicStrip(seconds int) error {
+	return w.st.Update(func(c *Config) { c.Screen.MusicStrip = max(seconds, 0) })
+}
+
+func (w ScreenWriter) Language(v string) error {
+	return w.st.Update(func(c *Config) { c.Screen.Language = v })
 }
 
 // Custom saves a palette and makes it the theme.

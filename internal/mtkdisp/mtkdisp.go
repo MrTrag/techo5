@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"syscall"
 	"time"
 	"unsafe"
@@ -242,6 +243,17 @@ func checkLayouts() error {
 	return nil
 }
 
+// heapNew returns a new T that is certain to live on the heap, where it does not move. Converting
+// a pointer to uintptr does not make its object escape, so it is forced here: escape analysis
+// cannot see through the call to a function variable.
+func heapNew[T any]() *T {
+	p := new(T)
+	escape(unsafe.Pointer(p))
+	return p
+}
+
+var escape = func(unsafe.Pointer) {}
+
 func ioctl(f *os.File, req uintptr, arg unsafe.Pointer) error {
 	if _, _, e := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), req, uintptr(arg)); e != 0 {
 		return e
@@ -396,16 +408,24 @@ func (d *Display) NewBuffer(width, height int) (*Buffer, error) {
 // mapping, which is exactly what makes a posted layer stay dark: the driver's own import does the
 // same two steps and disables the layer when this comes back zero.
 func (b *Buffer) MVA() (uint32, error) {
-	cfg := ionMMData{MMCmd: ionMMConfigBuffer}
+	// The ion argument points at cfg and phys through a uint32 field, which the stack copier
+	// cannot update, so both are heap objects (heapNew) kept alive across their ioctl.
+	cfg := heapNew[ionMMData]()
+	cfg.MMCmd = ionMMConfigBuffer
 	cfg.Config = ionMMConfig{Handle: b.handle, ModuleID: moduleDispOvl0}
-	c := ionCustom{Cmd: ionCmdMultimedia, Arg: uint32(uintptr(unsafe.Pointer(&cfg)))}
-	if err := ioctl(b.d.ion, ionIOCCustom, unsafe.Pointer(&c)); err != nil {
+	c := ionCustom{Cmd: ionCmdMultimedia, Arg: uint32(uintptr(unsafe.Pointer(cfg)))}
+	err := ioctl(b.d.ion, ionIOCCustom, unsafe.Pointer(&c))
+	runtime.KeepAlive(cfg)
+	if err != nil {
 		return 0, fmt.Errorf("config buffer: %w", err)
 	}
-	phys := ionSysData{SysCmd: ionSysCmdGetPhys}
+	phys := heapNew[ionSysData]()
+	phys.SysCmd = ionSysCmdGetPhys
 	phys.Phys = ionSysGetPhys{Handle: b.handle}
-	c = ionCustom{Cmd: ionCmdSystem, Arg: uint32(uintptr(unsafe.Pointer(&phys)))}
-	if err := ioctl(b.d.ion, ionIOCCustom, unsafe.Pointer(&c)); err != nil {
+	c = ionCustom{Cmd: ionCmdSystem, Arg: uint32(uintptr(unsafe.Pointer(phys)))}
+	err = ioctl(b.d.ion, ionIOCCustom, unsafe.Pointer(&c))
+	runtime.KeepAlive(phys)
+	if err != nil {
 		return 0, fmt.Errorf("get phys: %w", err)
 	}
 	return phys.Phys.PhyAddr, nil
@@ -458,9 +478,10 @@ func (b *Buffer) Free() error {
 }
 
 // Post shows the buffer on the given overlay layer and switches every other layer off. The
-// buffer's device address is handed to the overlay directly (DISP_BUFFER_MVA), so there is no
-// ion-fd import and no release fence: the CPU and the controller share the buffer, and the caller
-// paces itself with the vsync clock rather than a per-frame fence.
+// buffer's device address is handed to the overlay directly (DISP_BUFFER_MVA), so the driver never
+// imports the ion fd for the layer. Prepare still hands back a release fence, which is kept on the
+// buffer and closed on the next post; Buffer.Wait is what blocks on it, and a caller that paces
+// itself with the vsync clock instead can leave it alone.
 func (d *Display) Post(layer int, b *Buffer, format uint32) error {
 	if layer < 0 || layer >= Layers {
 		return fmt.Errorf("layer %d out of range", layer)
@@ -573,7 +594,7 @@ func Capture(width, height int) ([]byte, error) {
 }
 
 // Register peeking. The display manager lets a process map the display-subsystem register
-// window (physical 0x14007000-0x14018000 on MT8163: OVL0, OVL1, RDMA0, RDMA1, WDMA0, colour
+// window (physical 0x14007000-0x14018000 on MT8163: OVL0, OVL1, RDMA0, RDMA1, WDMA0, color
 // pipeline, DSI). Reading it shows what the hardware is actually scanning out, whatever the
 // driver's logs say — and the driver's logs are compiled out on this kernel.
 const (

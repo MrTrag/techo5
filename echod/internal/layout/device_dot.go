@@ -2,7 +2,7 @@
 
 package layout
 
-// The Echo Dot 2 on Fire OS: echod lives under /system/app because that tree is labelled
+// The Echo Dot 2 on Fire OS: echod lives under /system/app because that tree is labeled
 // system_file, which keeps an init-started service in init's own domain, and it runs as Amazon's
 // ledcontroller service, which removes the only other writer of the LED ring and gets init's
 // supervision. /system is read-only once installed, so anything written after install goes on /data.
@@ -31,12 +31,18 @@ const (
 	// LogTag is echod's logcat tag: `adb logcat -s echolocal`.
 	LogTag = "echolocal"
 
-	Manufacturer = "EchoLocal"
+	Manufacturer = "TECHO5"
 	Model        = "Echo Dot 2 (biscuit)"
 	Board        = "biscuit"
 
 	// DefaultName is the fallback display name when a device has none recorded.
 	DefaultName = "Echo Dot"
+
+	// LogPath is where techo5-run sends the daemon's output. The Dot's boot script logs to the
+	// kernel ring rather than a file of its own, so BootLog is empty and a bundle reads dmesg for it.
+	LogPath = "/data/techo5-linux/echod.log"
+	BootLog = ""
+
 )
 
 var AnimationScripts = []string{StartAnimation, StopAnimation}

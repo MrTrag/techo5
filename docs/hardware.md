@@ -17,7 +17,7 @@ Items marked *unverified* have not been confirmed on a unit by this project.
 | Audio in | 4-mic array into a TI **TLV320AIC3101** ADC (I²C 0-0x18) |
 | Audio out | one speaker on a Maxim **MAX98396** class-D amp (I²C 2-0x3d, reset on `gpio-392`) |
 | Wi-Fi / BT | MediaTek **MT7668** SDIO combo (`mt76x8_wlan.ko`, `mt76x8_bt.ko`, firmware in `/vendor/firmware`) |
-| Sensors | ambient light + proximity (`alsps`, I²C 0-0x44), exposed as input `m_alsps_input` and Android "Light Sensor" |
+| Sensors | ambient light only: a Solteam **JSA1214** (`alsps`, I²C 0-0x44, kernel `CONFIG_MTK_JSA1214`), exposed as input `m_alsps_input` and Android "Light Sensor". The driver is Amazon's copy of Sensortek's stk3x1x and keeps its proximity attributes, but the chip has no proximity half: nothing ever reports one |
 | Camera | main + sub camera on I²C 0, mechanical lens cover on `gpio-499` (`SW_CAMERA_LENS_COVER`) |
 | Buttons | volume up (`gpio-393`), volume down (`gpio-394`), mic-mute (`gpio-404`) |
 | Bootloader | Amazon LK; stock build `77c8c2e-20211019_182552`, amonet replaces it with `44072a3-20240709_162755`; preloader `29ba1b5-20210311_160043` |
@@ -145,7 +145,7 @@ This is the same shape EchoLocal drives on the Dot (S24_3LE capture, 48 kHz
 S16_LE stereo playback), so its raw-ioctl ALSA code should carry over with
 the device numbers and channel count changed.
 
-### Verified with `cmd/audioprobe` (raw ioctls, vendor HAL idle, satellite app stopped)
+### Verified with `echod/cmd/audioprobe` (raw ioctls, vendor HAL idle, satellite app stopped)
 
 - Capture opens at 320-frame periods × 8 and reads 3 s with no overruns.
   Playback opens at 768 × 4 and plays with no underruns. Both devices are
@@ -227,7 +227,7 @@ The DRAM path plays cleanly.
 
 **Workaround, required:** hold any other AFE PCM node open, unconfigured, before opening
 `pcmC0D23p` and for as long as it is open. `/dev/snd/pcmC0D1c` (MultiMedia1_Capture, unused
-on this device) works. `cmd/audioprobe -hold` and the daemon's speaker do this; the daemon's
+on this device) works. `echod/cmd/audioprobe -hold` and the daemon's speaker do this; the daemon's
 `tools play --hold` defaults to it. The driver source that explains the two paths is
 `sound/soc/mediatek/mt8163/mt_soc_pcm_dl1_i2s0Dl1.c` in any public MT8163 kernel tree.
 
@@ -248,7 +248,7 @@ powers up again, so a control changed under a running daemon shows only after th
 closed and reopened. `Speaker Volume A` is not a usable gain: 5 and 8 sound identical and 14
 mutes the output.
 
-Speech from Home Assistant is normalised to −18 dBFS RMS before the volume curve
+Speech from Home Assistant is normalized to −18 dBFS RMS before the volume curve
 (`media.Normalize`/`SpeechGain`). The cronos volume curve is linear in dB: −45 dB at step 1,
 −24 dB at half the dial, −6 dB at the top (`paths_cronos.go`). Tuned by ear in a small room
 on 2026-09-15 across v0.1.1–v0.1.4; half the dial was judged "perfect" for conversation.
@@ -318,7 +318,7 @@ silent until reboot. `dumpsys audio` is safe.
 | `mtk-kpd` | event2 | none |
 | `goodix-ts` | event3 | multitouch |
 | `hwmdata` | event4 | REL_Y/REL_Z (sensor hub) |
-| `m_alsps_input` | event5 | ABS_X = lux, ABS_WHEEL = proximity |
+| `m_alsps_input` | event5 | ABS_X = lux (ABS_WHEEL is proximity in the framework, never sent: the chip has none) |
 | `gpio-keys` | event6 | `KEY_VOLUMEUP`, `KEY_VOLUMEDOWN`, `SW_CAMERA_LENS_COVER` |
 
 - Android's generic layout maps code 116 to POWER, so the mute button sleeps
@@ -419,7 +419,7 @@ paints is compiled into LK itself. `lk-amonet-cronos.img` (MTK header, `LK`,
 single-image zlib bundles — `u32 count=1, u32 total, u32 offset=12, zlib(raw
 32-bit BGRA)` — and a data table of pointers to them (load address =
 `0x4BD00000` + file offset − 512): the "amazon" wordmark (315×170, drawn
-centred on black, file offset 335736, pointer at 383384), "Booting…" (315×170),
+centered on black, file offset 335736, pointer at 383384), "Booting…" (315×170),
 two battery pictures (408×216) and the full-screen over-temperature
 thermometer (960×480, landscape as stored; LK applies the panel rotation).
 LK knows each image's size from code, so a replacement must decompress to the
@@ -440,7 +440,7 @@ go into the kaeru copy in `expdb` (same LK layout, wordmark at the same
 offset), which kaeru's fastboot (reached via `rebootto bootloader`) can
 flash — and only *in place*: kaeru's stage-2 code sits right after the LK
 payload, so the header size must stay and the new bundle must fit the old
-6105-byte slot (`--in-place --colors 16`: 16 flat colours compress the full
+6105-byte slot (`--in-place --colors 16`: 16 flat colors compress the full
 315×170 mark to 5.5 KB). Done 2026-09-15; `fastboot flash expdb` accepted it. `swdl` (p11) holds an Android boot image (Amazon's recovery/download
 image).
 
@@ -468,7 +468,7 @@ and `productid2` read `0` on the unit seen.
   kernel output at all; the watchdog resets the unit (`bootreason
   wdt_by_pass_pwk`) and LK boots `boot` instead. Verified with a command-line
   marker. 64-bit images go in `boot`.
-- `reboot recovery` is signalled through the RTC spare register
+- `reboot recovery` is signaled through the RTC spare register
   (`rtc_mark_recovery` in the kernel log), not the MISC bootloader message;
   MISC stays zero. LK keeps a boot counter in idme (`/proc/idme/bootcount`) and
   after enough boots that never complete Android it parks in "hacked fastboot
@@ -493,7 +493,7 @@ and `productid2` read `0` on the unit seen.
   and cameraserver, Widevine and ClearKey DRM, CAS, `amazonthermal`,
   `vendor.power-amazon`, `securetime`, `kisd`, media codec services.
 
-## Network behaviour seen in the field
+## Network behavior seen in the field
 
 - The satellite app listens on TCP 10800 (VACA / ShowAssist) and advertises
   over mDNS. mDNS across subnets needs a reflector rule for `_esphomelib._tcp`

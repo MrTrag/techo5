@@ -9,9 +9,12 @@ import (
 	"context"
 	"image"
 	"log/slog"
+	neturl "net/url"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	esphome "github.com/ygelfand/go-esphome-device"
 
@@ -21,6 +24,7 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/feature/media"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/hass"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/hook"
+	"github.com/HuskerMinion/techo5/echod/internal/lib/safe"
 )
 
 func init() {
@@ -81,12 +85,22 @@ type Feature struct {
 	lists radioLists
 
 	// radar is the rain map; see radar.go.
-	radar    radarState
-	url      string // the stream playing, from the media player
-	urlName  string // its station name once found
-	forecast []hass.Day
-	fetched  time.Time
-	poke     chan struct{}
+	radar   radarState
+	url     string // the stream playing, from the media player
+	urlName string // its station name once found
+
+	// asked is the last station this device asked to play and askedAt when, which is what a dropped
+	// stream is put back on with.
+	asked   string
+	askedAt time.Time
+
+	// resumed counts how many times a dropped stream has been put back on lately, and resumedAt when
+	// the last of those was, so a station that will not stay up is eventually left off (resume.go).
+	resumed   int
+	resumedAt time.Time
+	forecast  []hass.Day
+	fetched   time.Time
+	poke      chan struct{}
 
 	// meta is what the playing station is playing, for the now-playing screen; metaPoke asks for
 	// a refresh when the station changes.
@@ -101,6 +115,11 @@ type Feature struct {
 	slideshowSel        *esphome.Select
 	slideshowOverlaySel *esphome.Select
 	slideshowIdleNum    *esphome.Number
+
+	// slideshowEveryNum is how long one photo stays up; slideshowFolderTxt names the folder the
+	// photos come from, which is picked on the screen or with the home_slideshow action.
+	slideshowEveryNum  *esphome.Number
+	slideshowFolderTxt *esphome.TextSensor
 
 	// slideshowShuffleSw and slideshowSubfoldersSw are how the photos are picked from the source.
 	slideshowShuffleSw    *esphome.Switch
@@ -164,6 +183,8 @@ func Get() *Feature {
 		shared.buildSlideshowSelect()
 		hastate.Get().Changed.Listen(func(hastate.Update) { shared.Changed.Emit(struct{}{}) })
 		media.Get().OnPlay.Listen(shared.played)
+		media.Get().OnEnd.Listen(shared.ended)
+		media.Get().OnResumeRemote.Listen(func(struct{}) { safe.Go("resume music assistant", resumeMusicAssistant) })
 	})
 	return shared
 }
@@ -214,6 +235,12 @@ func (f *Feature) nameStream(url string) {
 			}
 		}
 	}
+	// A file of Home Assistant's own - rain to sleep to - is not a station, and without a name of
+	// its own the page would fall back to the house's "last station" text: the rain named after
+	// whatever some other speaker last played.
+	if name == "" {
+		name = fileName(url)
+	}
 	// No host fallback: Home Assistant proxies streams through itself, so the host would be its
 	// own address, which is not a station. Unknown stays unknown and the page falls back to the
 	// "last station" text or what was tapped.
@@ -223,6 +250,35 @@ func (f *Feature) nameStream(url string) {
 	}
 	f.mu.Unlock()
 	f.Changed.Emit(struct{}{})
+}
+
+// fileName is a name for a sound file Home Assistant serves from its own folders ("/local/sleep/
+// rain_deep.mp3" is "Rain deep"), or "" for anything else. Only those folders: a station's stream can
+// end in ".mp3" too, and its file name ("live", "stream") would be a worse name than the station's.
+func fileName(url string) string {
+	path, _, _ := strings.Cut(url, "?")
+	if p, err := neturl.PathUnescape(path); err == nil {
+		path = p
+	}
+	if !strings.Contains(path, "/local/") && !strings.Contains(path, "/media/local/") {
+		return ""
+	}
+	base := path[strings.LastIndex(path, "/")+1:]
+	dot := strings.LastIndex(base, ".")
+	if dot <= 0 {
+		return ""
+	}
+	switch strings.ToLower(base[dot+1:]) {
+	case "mp3", "ogg", "oga", "opus", "flac", "wav", "m4a", "aac":
+	default:
+		return ""
+	}
+	name := strings.TrimSpace(strings.NewReplacer("_", " ", "-", " ").Replace(base[:dot]))
+	if name == "" {
+		return ""
+	}
+	first, size := utf8.DecodeRuneInString(name)
+	return string(unicode.ToUpper(first)) + name[size:]
 }
 
 func (f *Feature) wake() {
@@ -246,6 +302,8 @@ func (f *Feature) Restore(c config.Config) {
 			idle = int(slideshowIdleDefault / time.Minute)
 		}
 		f.slideshowIdleNum.Set(float32(idle))
+		f.slideshowEveryNum.Set(float32(slideshowInterval(c.Home.Slideshow) / time.Second))
+		f.slideshowFolderTxt.Set(slideshowFolderName(c.Home.Slideshow.Source))
 		f.slideshowShuffleSw.Set(!c.Home.Slideshow.InOrder)
 		f.slideshowSubfoldersSw.Set(!c.Home.Slideshow.TopOnly)
 	}
@@ -385,7 +443,9 @@ func (f *Feature) Radio() Radio {
 	sources := RadioSources()
 	r := Radio{Configured: len(sources) > 0, Source: radioSource(), Sources: len(sources)}
 	if !r.Configured {
-		return r
+		// No list to show, but the page is shown for a carried stream all the same, and it has to name
+		// what is playing: the same last word the configured path ends with.
+		return carried(r)
 	}
 	t := hastate.Get()
 	if r.Source == config.RadioFavorites {
@@ -396,7 +456,12 @@ func (f *Feature) Radio() Radio {
 	if r.Source == config.RadioFavorites && len(r.Stations) == 0 && r.Sources > 1 {
 		r.Source = config.RadioLocal
 	}
-	if r.Source != config.RadioFavorites {
+	if r.Source == config.RadioOwn {
+		for _, st := range OwnStations() {
+			r.Stations = append(r.Stations, st.Name)
+		}
+	}
+	if r.Source != config.RadioFavorites && r.Source != config.RadioOwn {
 		f.fetchList(r.Source)
 		f.mu.Lock()
 		l := f.list(r.Source)
@@ -420,6 +485,38 @@ func (f *Feature) Radio() Radio {
 			r.Now = ""
 		}
 	}
+
+	return carried(r)
+}
+
+// carried puts what a remote is playing on the page, over whatever this device chose. It is the last
+// word wherever the page is built: everything before it says what this device picked, and that is what
+// the room is playing only when nothing else is.
+//
+// Receiving() is not the name of it. That names a phone over Bluetooth, which is a stream of this
+// player's own rather than a remote's; the only thing that takes the speaker this way is Sendspin, and
+// what runs the server it talks to here is Music Assistant, so that is what the page calls it.
+func carried(r Radio) Radio {
+	if !media.Get().Carried() {
+		// A remote's track paused from here is still the page's, with play on it, after the remote
+		// has let it go.
+		if title, artist, album, ok := media.Get().Held(); ok {
+			r.Playing, r.Now = false, "Music Assistant"
+			r.Title, r.Artist, r.Album = title, artist, album
+			r.Art, r.Thumb = remoteArt()
+			r.Logo = false
+			r.Music = true
+		}
+		return r
+	}
+	trackTitle, trackArtist, trackAlbum := media.Get().Track()
+	r.Playing, r.Now = true, "Music Assistant"
+	r.Title, r.Artist, r.Album = trackTitle, trackArtist, trackAlbum
+	// Music Assistant's own picture for the track when it sent one. Without one the page draws a
+	// stand-in of its own, so the last station's cover and logo must not be left behind somebody else's.
+	r.Art, r.Thumb = remoteArt()
+	r.Logo = false
+	r.Music = true
 	return r
 }
 
@@ -448,10 +545,23 @@ func favoriteNames(h config.Radio) []string {
 // Play plays a station of the list shown on this device: a favorite through Home Assistant's
 // script, a Radio Browser station through the device's own player entity.
 func (f *Feature) Play(station string) {
+	// What was asked for, in the words the lists use, so a stream that drops can be asked for again:
+	// the name worked out from a URL afterwards is often the stream's host, which no list has.
+	f.mu.Lock()
+	f.asked, f.askedAt = station, time.Now()
+	f.mu.Unlock()
+
 	source := radioSource()
 	// Favorites with nothing in them show the stations near home instead (Radio).
 	if source == config.RadioFavorites && len(favoriteNames(config.Get().Home.Radio)) == 0 {
 		source = config.RadioLocal
+	}
+	if source == config.RadioOwn {
+		if f.playOwn(station) {
+			f.Changed.Emit(struct{}{})
+			f.pokeMeta()
+		}
+		return
 	}
 	if source != config.RadioFavorites {
 		if f.playListed(source, station) {
@@ -484,9 +594,19 @@ func askFor(label string) string {
 	return l
 }
 
-// Stop ends whatever the player is doing.
+// Stop ends whatever the player is doing, whoever is playing it.
+//
+// Every caller is a person asking - the Stop row on either panel, the action button, "go home" by voice -
+// so a stream this device did not start is asked to stop. The rule is who is asking, not what the stream
+// is: without this the row reaches a player that has nothing to pause, and the music plays on. Home
+// Assistant's own stop is a different path and stays a pause (see media's command), because that arrives
+// from an automation with nobody necessarily in the room.
 func (f *Feature) Stop() {
-	media.Get().Pause()
+	if media.Get().Carried() {
+		media.Get().Transport(media.TransportStop)
+	} else {
+		media.Get().Pause()
+	}
 	f.mu.Lock()
 	f.chosen = ""
 	f.mu.Unlock()

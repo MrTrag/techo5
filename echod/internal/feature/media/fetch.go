@@ -36,6 +36,14 @@ const Tail = 250
 
 const fetchTimeout = 30 * time.Second
 
+// mostAudio is how much of a body will be read. An announcement is a doorbell chime or a sentence of
+// speech, and the widest thing Home Assistant converts to is 16-bit stereo at the card's 48 kHz, so
+// this is a couple of minutes of the largest form anything here arrives in. What it guards against is
+// the other end never stopping: the url is whatever Home Assistant handed over, which for an external
+// media source is a host nobody here controls, and the whole body is held in memory and decoded into
+// samples held beside it. A device with half a gigabyte does not survive a stream that goes on.
+const mostAudio = 2 * 60 * speaker.Rate * speaker.Channels * 2
+
 // Fetch downloads audio Home Assistant is serving and decodes it. The request carries the context, so
 // silencing a sound abandons the download rather than leaving it to arrive and be thrown away.
 func Fetch(ctx context.Context, url string) ([]int16, error) {
@@ -55,9 +63,14 @@ func Fetch(ctx context.Context, url string) ([]int16, error) {
 		return nil, fmt.Errorf("%s: %s", url, resp.Status)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	// One byte past the bound, so a body that is exactly at it still plays and anything larger is
+	// refused by name rather than played half way through.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, mostAudio+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(body) > mostAudio {
+		return nil, fmt.Errorf("%s: more than %d bytes of audio for one announcement", url, mostAudio)
 	}
 	var (
 		samples []int16
@@ -90,7 +103,7 @@ func Fetch(ctx context.Context, url string) ([]int16, error) {
 // plays, and each is brought to the same RMS target with peaks soft-limited. The dial scales from
 // there.
 const (
-	// speechTargetRMS is the level speech is normalised to, as a fraction of full scale (-18 dBFS).
+	// speechTargetRMS is the level speech is normalized to, as a fraction of full scale (-18 dBFS).
 	speechTargetRMS = 0.126
 	// speechMaxGain caps how far a very quiet clip is lifted, so silence and noise are not amplified
 	// without limit (+18 dB).
@@ -157,7 +170,7 @@ func Scale(in []int16, gain float64) []int16 {
 	return out
 }
 
-// isMP3 recognises what Home Assistant's tts_proxy serves when it does not convert: an MP3, with
+// isMP3 recognizes what Home Assistant's tts_proxy serves when it does not convert: an MP3, with
 // or without an ID3 tag in front.
 func isMP3(body []byte, contentType string) bool {
 	if strings.HasPrefix(contentType, "audio/mpeg") || strings.HasPrefix(contentType, "audio/mp3") {
@@ -178,9 +191,14 @@ func monoMP3(body []byte) ([]int16, wavFormat, error) {
 		return nil, f, fmt.Errorf("mp3: %w", err)
 	}
 	f.rate = d.SampleRate()
-	pcm, err := io.ReadAll(d)
+	// The same bound as the body, on what it decodes to: a few megabytes of MP3 are many more of
+	// samples, and go-mp3 always gives 16-bit stereo, which is the form mostAudio is counted in.
+	pcm, err := io.ReadAll(io.LimitReader(d, mostAudio+1))
 	if err != nil {
 		return nil, f, fmt.Errorf("mp3: %w", err)
+	}
+	if len(pcm) > mostAudio {
+		return nil, f, fmt.Errorf("mp3: more than %d bytes of samples for one announcement", mostAudio)
 	}
 	frames := len(pcm) / 4
 	mono := make([]int16, frames)

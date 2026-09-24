@@ -16,7 +16,9 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 INPUTS=${TECHO5_INPUTS:-$ROOT/inputs}
-# The unit's own LineageOS boot image (its kernel and header); never published.
+# The unit's own LineageOS boot image (its kernel and header); never published. Per board, not just
+# per unit: the header, load addresses and command line are taken from this file, so a 1st gen Show 5
+# or an Echo Show 8 needs its own here rather than the 2nd gen's default.
 KERNEL_IMAGE=${KERNEL_IMAGE:-$INPUTS/boot-lineage-18.1-20260904-cronos.img}
 # KERNEL=Image.gz-dtb: a kernel built from source replaces the one in KERNEL_IMAGE
 # (its header, load addresses and command line still come from KERNEL_IMAGE).
@@ -41,17 +43,27 @@ PY=${PYTHON:-$( (python3 -c 1) >/dev/null 2>&1 && echo python3 || echo python )}
 
 echo "== building tools for armv7"
 export GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0
+# audioprobe lives in the daemon's module so it shares the daemon's ALSA code rather than a copy of it.
 for c in fbprobe audioprobe rebootto btbridge; do
-	(cd "$ROOT" && "$GO" build -trimpath -ldflags "-s -w" -o "$ROOT/bin/$c-arm" "./cmd/$c")
+	m=$ROOT; [ -d "$ROOT/echod/cmd/$c" ] && m=$ROOT/echod
+	(cd "$m" && "$GO" build -trimpath -ldflags "-s -w" -o "$ROOT/bin/$c-arm" "./cmd/$c")
 done
 unset GOOS GOARCH GOARM CGO_ENABLED
 
+# The package file packages.txt lists, or else the version tools/fetch-inputs.py took in its place when
+# Alpine had dropped the listed one (it names the file for the version it fetched).
+apk_file() {
+	local name=${2%-*-r*.apk} have
+	[ -f "$1/$2" ] && { echo "$1/$2"; return; }
+	have=$(ls "$1/$name"-[0-9]*-r[0-9]*.apk 2>/dev/null | sort -V | tail -1)
+	echo "${have:-$1/$2}"
+}
 apks=()
 for a in $(sed 's/#.*//' "$ROOT/tools/linux/packages.txt"); do
 	case "$a" in
 	busybox-static-*) continue;;
-	wpa_supplicant-2.9*|libssl1.1*|libcrypto1.1*|libnl3-3.5*) apks+=(--apk "$(W "$INPUTS/apks312/$a")");;
-	*) apks+=(--apk "$(W "$INPUTS/apks/$a")");;
+	wpa_supplicant-2.9*|libssl1.1*|libcrypto1.1*|libnl3-3.5*) apks+=(--apk "$(W "$(apk_file "$INPUTS/apks312" "$a")")");;
+	*) apks+=(--apk "$(W "$(apk_file "$INPUTS/apks" "$a")")");;
 	esac
 done
 
@@ -72,6 +84,7 @@ key=(--copy "$I/techo5_ed25519.pub=/root/.ssh/authorized_keys"); [ -n "$NOKEY" ]
 	--add "$R/bin/btbridge-arm=/usr/local/bin/btbridge" \
 	--script "$R/tools/linux/slotctl=/usr/local/sbin/slotctl" \
 	--script "$R/tools/linux/techo5-lib.sh=/lib/techo5-lib.sh" \
+	--script "$R/tools/linux/rescue-profile.sh=/etc/profile.d/rescue.sh" \
 	"${key[@]}" \
 	--compress xz --cmdline-append techo5=linux -o "$(W "$OUT")"
 echo "built: $OUT"

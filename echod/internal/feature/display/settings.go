@@ -25,7 +25,7 @@ import (
 // interface listing.
 func (d *Display) gather(s scene, restartArm time.Time) settings {
 	d.mu.Lock()
-	st := settings{cat: d.cat, picker: d.picker, cardScroll: d.cardScroll, pickScroll: d.pickScroll, checking: d.checking, colours: d.colours, folder: d.folder, brightness: d.ceiling, auto: d.autoOn, now: s.now, restartArm: restartArm}
+	st := settings{cat: d.cat, picker: d.picker, cardScroll: d.cardScroll, pickScroll: d.pickScroll, checking: d.checking, colors: d.colors, folder: d.folder, brightness: d.ceiling, auto: d.autoOn, now: s.now, restartArm: restartArm}
 	d.mu.Unlock()
 	if st.brightness == 0 {
 		st.brightness = config.DefaultScreenBrightness
@@ -57,13 +57,13 @@ func (d *Display) gather(s scene, restartArm time.Time) settings {
 	d.mu.Unlock()
 	st.wifiOK = wifi.Available()
 	st.btProxy = bluetooth.Get().Enabled()
+	st.address = address()
 	if !wifi.Available() {
 		st.wifi = st.address
 	}
 	st.sendspin = sendspin.Get().Enabled()
 	st.insecureTLS = c.Diag.InsecureTLS
 	st.slot = slotName()
-	st.address = address()
 
 	return st
 }

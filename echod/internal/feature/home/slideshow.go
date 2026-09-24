@@ -1,12 +1,12 @@
 package home
 
 import (
-	"bytes"
 	"context"
 	"image"
 	"image/draw"
 	"log/slog"
 	"math/rand/v2"
+	"net/url"
 	"path"
 	"strings"
 	"time"
@@ -26,8 +26,21 @@ import (
 // neither knows nor cares which backend (Immich, a network share, anything else Home Assistant can
 // browse) a source came from. See docs/slideshow-plan.md; Show and Spot only (see screen.go).
 
-// slideshowEvery is how long one photo stays up before the next is fetched.
-const slideshowEvery = time.Minute
+// slideshowEvery is how long one photo stays up before the next is fetched when nothing is set, and
+// slideshowEveryMin/Max bound what may be.
+const (
+	slideshowEvery    = time.Minute
+	slideshowEveryMin = 5 * time.Second
+	slideshowEveryMax = time.Hour
+)
+
+// slideshowInterval is how long a photo stays up, as configured.
+func slideshowInterval(h config.Slideshow) time.Duration {
+	if h.EverySeconds <= 0 {
+		return slideshowEvery
+	}
+	return min(max(time.Duration(h.EverySeconds)*time.Second, slideshowEveryMin), slideshowEveryMax)
+}
 
 // slideshowFade is how long a new photo takes to cross-fade in over the last one; SlideshowFrame is
 // how often the display should redraw while it does, for a smooth blend rather than a jump cut.
@@ -50,6 +63,21 @@ const slideshowRetries = 5
 
 // browseEvery is how long a browsed child list is trusted before Home Assistant is asked again.
 const browseEvery = time.Hour
+
+// slideshowGiveUp is how many looks in a row may come back with nothing before the screen says so
+// rather than the device going on trying quietly, and slideshowWaitAfter is how long it then leaves
+// between looks: a folder that was renamed or unshared is not going to be there thirty seconds
+// later, and a large library is expensive to walk.
+const (
+	slideshowGiveUp    = 3
+	slideshowWaitAfter = 15 * time.Minute
+)
+
+// The lines the screen shows while the slideshow has no photo. Short: they sit in the footer.
+const (
+	slideshowUnreadable = "photos: folder unreadable"
+	slideshowEmpty      = "photos: folder is empty"
+)
 
 // slideshowIdleDefault is how long Screensaver mode waits for when IdleMinutes is unset.
 const slideshowIdleDefault = 5 * time.Minute
@@ -77,6 +105,13 @@ type slideshowState struct {
 	image *image.RGBA
 	prev  *image.RGBA // what was showing before image, faded out while at is within slideshowFade
 	at    time.Time   // when image took over, for both slideshowEvery and the fade
+
+	// trouble is why there is no photo, for the screen to show; empty while all is well. fails
+	// counts the looks that came back with nothing in a row, and waitUntil holds the next look off
+	// once there have been slideshowGiveUp of them.
+	trouble   string
+	fails     int
+	waitUntil time.Time
 }
 
 func (f *Feature) buildSlideshowSelect() {
@@ -110,6 +145,14 @@ func (f *Feature) buildSlideshowSelect() {
 		Min: 1, Max: 60, Step: 1, Unit: "min",
 		Mode: esphome.NumberBox,
 	}
+	f.slideshowFolderTxt = &esphome.TextSensor{
+		Base: esphome.Base{
+			ObjectID: "slideshow_folder",
+			Name:     "Slideshow folder",
+			Icon:     "mdi:folder-image",
+			Category: esphome.CategoryDiagnostic,
+		},
+	}
 	f.slideshowShuffleSw = &esphome.Switch{
 		Base: esphome.Base{
 			ObjectID: "slideshow_shuffle",
@@ -127,6 +170,24 @@ func (f *Feature) buildSlideshowSelect() {
 			Category: esphome.CategoryConfig,
 		},
 		OnCommand: func(on bool) { f.SetSlideshowSubfolders(on) },
+	}
+	f.slideshowEveryNum = &esphome.Number{
+		Base: esphome.Base{
+			ObjectID: "slideshow_interval",
+			Name:     "Slideshow time per photo",
+			Icon:     "mdi:timer-outline",
+			Category: esphome.CategoryConfig,
+		},
+		Min: float64(slideshowEveryMin / time.Second), Max: float64(slideshowEveryMax / time.Second), Step: 5, Unit: "s",
+		Mode: esphome.NumberBox,
+	}
+	f.slideshowEveryNum.OnCommand = func(v float32) {
+		f.slideshowEveryNum.Set(v)
+		s := config.Get().Home.Slideshow
+		s.EverySeconds = int(v)
+		if err := config.Set().Home().Slideshow(s); err != nil {
+			slog.Warn("home: saving the slideshow interval failed", "err", err)
+		}
 	}
 	f.slideshowIdleNum.OnCommand = func(v float32) {
 		f.slideshowIdleNum.Set(v)
@@ -246,9 +307,10 @@ func (f *Feature) changeSlideshow(change func(*config.Slideshow)) {
 		f.slideshow = slideshowState{} // nothing to show: the last photo goes too
 	} else {
 		shown := f.slideshow.image
-		f.slideshow = slideshowState{image: shown, prev: shown, at: time.Now().Add(-slideshowEvery)} // due now
+		f.slideshow = slideshowState{image: shown, prev: shown, at: time.Now().Add(-slideshowEveryMax)} // due now
 	}
 	f.mu.Unlock()
+	f.slideshowFolderTxt.Set(slideshowFolderName(next.Source))
 	f.Changed.Emit(struct{}{})
 }
 
@@ -257,6 +319,18 @@ func (f *Feature) changeSlideshow(change func(*config.Slideshow)) {
 func (f *Feature) SlideshowSettings() (source string, shuffle, subfolders bool) {
 	s := config.Get().Home.Slideshow
 	return s.Source, !s.InOrder, !s.TopOnly
+}
+
+// SlideshowEvery is how long a photo stays up, and SetSlideshowEvery changes it; both are in play on
+// the screen's Time per photo row as well as Home Assistant's number.
+func (f *Feature) SlideshowEvery() time.Duration {
+	return slideshowInterval(config.Get().Home.Slideshow)
+}
+
+func (f *Feature) SetSlideshowEvery(d time.Duration) {
+	d = min(max(d, slideshowEveryMin), slideshowEveryMax)
+	f.changeSlideshow(func(s *config.Slideshow) { s.EverySeconds = int(d / time.Second) })
+	f.slideshowEveryNum.Set(float32(d / time.Second))
 }
 
 // BrowseFolder lists one media source folder, for the screen's folder list.
@@ -287,7 +361,7 @@ func (f *Feature) advanceSlideshow() {
 		return
 	}
 	f.mu.Lock()
-	due := f.slideshow.image == nil || time.Since(f.slideshow.at) >= slideshowEvery
+	due := f.slideshow.image == nil || time.Since(f.slideshow.at) >= slideshowInterval(h)
 	f.mu.Unlock()
 	if !due {
 		return
@@ -316,11 +390,21 @@ func (f *Feature) advanceSlideshow() {
 func (f *Feature) nextSlideshowChild(h config.Slideshow) (string, bool) {
 	f.mu.Lock()
 	stale := time.Since(f.slideshow.browsed) > browseEvery || len(f.slideshow.children) == 0
+	waiting := stale && time.Now().Before(f.slideshow.waitUntil)
 	f.mu.Unlock()
+	if waiting {
+		return "", false // given up for now; the screen is saying why
+	}
 	if stale {
 		photos, err := gatherSlideshow(h)
 		if err != nil {
 			slog.Warn("home: browsing the slideshow source", "source", h.Source, "err", err)
+			f.slideshowNothing(slideshowUnreadable)
+			return "", false
+		}
+		if len(photos) == 0 {
+			slog.Warn("home: slideshow photos", "source", h.Source, "count", 0, "subfolders", !h.TopOnly)
+			f.slideshowNothing(slideshowEmpty)
 			return "", false
 		}
 		if !h.InOrder {
@@ -329,6 +413,7 @@ func (f *Feature) nextSlideshowChild(h config.Slideshow) (string, bool) {
 		slog.Info("home: slideshow photos", "count", len(photos), "subfolders", !h.TopOnly, "shuffled", !h.InOrder)
 		f.mu.Lock()
 		f.slideshow.children, f.slideshow.browsed, f.slideshow.idx = photos, time.Now(), 0
+		f.slideshow.trouble, f.slideshow.fails, f.slideshow.waitUntil = "", 0, time.Time{}
 		f.mu.Unlock()
 	}
 	f.mu.Lock()
@@ -347,6 +432,52 @@ func (f *Feature) nextSlideshowChild(h config.Slideshow) (string, bool) {
 	id := f.slideshow.children[f.slideshow.idx].ID
 	f.slideshow.idx++
 	return id, true
+}
+
+// slideshowNothing records a look that came back with nothing. After slideshowGiveUp of them in a
+// row the device stops looking for a while and the screen says why, so a folder that was renamed,
+// moved or unshared is visible instead of being retried quietly for ever.
+func (f *Feature) slideshowNothing(why string) {
+	f.mu.Lock()
+	f.slideshow.fails++
+	give := f.slideshow.fails >= slideshowGiveUp
+	if give {
+		f.slideshow.trouble, f.slideshow.waitUntil = why, time.Now().Add(slideshowWaitAfter)
+	}
+	f.mu.Unlock()
+	if give {
+		slog.Warn("home: slideshow", "err", why, "waiting", slideshowWaitAfter)
+		f.Changed.Emit(struct{}{})
+	}
+}
+
+// SlideshowTrouble is the line the screen shows when the slideshow has given up looking: why there
+// is no photo. Empty while the slideshow is off, working, or still trying.
+func (f *Feature) SlideshowTrouble() string {
+	mode := config.Get().Home.Slideshow.Mode
+	if mode != config.SlideshowBackground && mode != config.SlideshowScreensaver {
+		return ""
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.slideshow.trouble
+}
+
+// slideshowFolderName is the chosen source as Home Assistant should show it: the last folder of the
+// media source id, which is what the screen's Photo folder row names too.
+func slideshowFolderName(id string) string {
+	if id == "" {
+		return "None chosen"
+	}
+	rest := strings.TrimRight(strings.TrimPrefix(id, "media-source://"), "/")
+	name := rest[strings.LastIndex(rest, "/")+1:]
+	if u, err := url.PathUnescape(name); err == nil {
+		name = u
+	}
+	if name == "" || name == "media_source" {
+		return "All photos"
+	}
+	return name
 }
 
 // gatherSlideshow lists the photos a slideshow shows: the source's own and, unless TopOnly, those of
@@ -370,18 +501,23 @@ func gatherSlideshow(h config.Slideshow) ([]hass.Media, error) {
 	return photos, err
 }
 
-// isPhoto is whether a playable entry is a picture rather than a video or a sound, going by the
-// type Home Assistant gives it, or failing that its name.
+// isPhoto is whether a playable entry is a picture the device can show, going by the type Home
+// Assistant gives it, or failing that its name. Only JPEG and PNG: those are the decoders built in,
+// and a GIF or a WebP would only be fetched to be skipped.
 func isPhoto(m hass.Media) bool {
 	k := strings.ToLower(m.Kind)
-	if strings.HasPrefix(k, "image") {
+	switch k {
+	case "image/jpeg", "image/jpg", "image/png":
 		return true
+	}
+	if strings.HasPrefix(k, "image") {
+		return false
 	}
 	if k != "" && k != "application/octet-stream" {
 		return false
 	}
 	switch strings.ToLower(path.Ext(m.ID)) {
-	case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp":
+	case ".jpg", ".jpeg", ".png":
 		return true
 	}
 	return false
@@ -397,7 +533,7 @@ func fetchSlideshowImage(id string) (*image.RGBA, error) {
 	if err != nil {
 		return nil, err
 	}
-	src, _, err := image.Decode(bytes.NewReader(b))
+	src, err := decodeWithin(b, maxPhotoPixels, "slideshow photo "+id)
 	if err != nil {
 		return nil, err
 	}

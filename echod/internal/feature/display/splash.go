@@ -27,11 +27,11 @@ const (
 	// logoScale is how much larger than the file the mark is drawn; the file is 330×276.
 	logoScale = 1.25
 
-	// arcCentre is where the signal radiates from, in the file's own pixels: the middle of the
+	// arcCenter is where the signal radiates from, in the file's own pixels: the middle of the
 	// arcs drawn on the mark.
-	arcCentreX, arcCentreY = 164, 105
+	arcCenterX, arcCenterY = 164, 105
 
-	// The pulse: arcs leave the mark at arcFrom pixels from the centre and fade out by arcTo,
+	// The pulse: arcs leave the mark at arcFrom pixels from the center and fade out by arcTo,
 	// arcCount of them in flight, one full sweep every arcPeriod.
 	arcFrom   = 100.0
 	arcTo     = 380.0
@@ -40,6 +40,11 @@ const (
 	arcWidth  = 5.0
 	// arcSpread is how far above and below the horizontal the arcs reach, in radians.
 	arcSpread = 38 * math.Pi / 180
+
+	// waitingAfter is when the splash starts saying what it is waiting for: long enough that a
+	// device which is already adopted is up and gone before it shows, short enough that nobody
+	// sits watching a screen that looks stuck.
+	waitingAfter = 12 * time.Second
 
 	// splashMin is the least the splash is shown, so a fast connection still shows the mark.
 	splashMin = 4 * time.Second
@@ -51,12 +56,11 @@ var (
 	teal = color.RGBA{20, 147, 180, 255}
 )
 
-// splash is the mark, scaled once, and where its arcs are centred on the canvas.
+// splash is the mark, scaled once, and where its arcs are centered on the canvas.
 type splash struct {
-	img      *image.RGBA
-	at       image.Point // top-left on the canvas
-	cx, cy   float64     // arc centre on the canvas
-	loadedAt time.Time
+	img    *image.RGBA
+	at     image.Point // top-left on the canvas
+	cx, cy float64     // arc center on the canvas
 }
 
 func newSplash(w, h int) *splash {
@@ -72,8 +76,8 @@ func newSplash(w, h int) *splash {
 	at := image.Pt((w-sw)/2, (h-sh)/2)
 	return &splash{
 		img: img, at: at,
-		cx: float64(at.X) + arcCentreX*logoScale,
-		cy: float64(at.Y) + arcCentreY*logoScale,
+		cx: float64(at.X) + arcCenterX*logoScale,
+		cy: float64(at.Y) + arcCenterY*logoScale,
 	}
 }
 
@@ -86,6 +90,38 @@ func (r *renderer) drawSplash(s *splash, elapsed time.Duration) {
 	}
 	r.arcs(s, elapsed)
 	draw.Draw(r.dst, s.img.Bounds().Add(s.at), s.img, image.Point{}, draw.Over)
+	if elapsed >= waitingAfter {
+		r.splashWaiting(s)
+	}
+}
+
+// splashWaiting says what the splash is waiting for, once it has been up long enough that waiting is
+// the explanation.
+//
+// The mark stays until Home Assistant subscribes, which does not happen until somebody accepts the
+// device there. Between flashing a unit and adopting it that can be minutes, or as long as it takes
+// to walk to a computer, and the screen said nothing at all - so it reads as a device that has hung
+// on its first boot. Somebody sat in front of one for ten minutes before finding out that accepting
+// the ESPHome prompt was what freed it (techo5-checkers issue #2). It costs two lines to say so.
+//
+// Not said from the first frame: a device that is adopted already reaches Home Assistant in a couple
+// of seconds, and telling that owner to go and do something they did not need to do would be worse
+// than saying nothing.
+func (r *renderer) splashWaiting(s *splash) {
+	const (
+		what  = "Waiting for Home Assistant"
+		where = "Settings > Devices & services > ESPHome"
+	)
+	// Below the mark, which reaches within about seventy pixels of the bottom on this panel: the two
+	// lines go in what is left rather than over the wordmark. If a panel ever leaves less room than
+	// they need, they sit on the bottom edge instead of climbing onto the mark.
+	const gap, lead = 26, 32
+	y := s.at.Y + s.img.Bounds().Dy() + gap
+	if bottom := r.h - 6; y+lead > bottom {
+		y = bottom - lead
+	}
+	r.text(r.tiny, what, (r.w-r.width(r.tiny, what))/2, y, teal)
+	r.text(r.tiny, where, (r.w-r.width(r.tiny, where))/2, y+lead, dim)
 }
 
 // arcs draws arcCount rings expanding from the mark to both sides, each fading as it travels.

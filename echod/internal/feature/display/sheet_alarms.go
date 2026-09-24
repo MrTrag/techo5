@@ -10,6 +10,8 @@ import (
 
 	"github.com/HuskerMinion/techo5/echod/internal/config"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/alarm"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/ring"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/timer"
 )
 
 // The settings screen's Alarms & Timers card: the alarms, then how they ring. A tap on an alarm opens
@@ -33,7 +35,7 @@ func alarmsCard(sv sheetView) cardView {
 				sub: cmpOr(row.snoozed.Label, "Alarm"), bold: true, kind: ctlButton, button: "Cancel"})
 		case row.local != nil:
 			a := row.local
-			sub := capitalize(config.DaysLabel(a.Days))
+			sub := capitalize(a.When())
 			if a.Label != "" {
 				sub += " · " + a.Label
 			}
@@ -55,16 +57,82 @@ func alarmsCard(sv sheetView) cardView {
 	if len(v.rows) == 0 {
 		v.rows = append(v.rows, settingRow{label: "No alarms yet", sub: "Add one here, or from Home Assistant", kind: ctlValue})
 	}
+	v.rows = append(v.rows, timerRows(sv)...)
+	rows := []settingRow{
+		{id: "sunrise", label: "Wake with light", sub: sunriseSub(), kind: ctlChoice, value: sunriseValue()},
+	}
+	if anySunrise() {
+		rows = append(rows, settingRow{id: "sunface", label: "Sun with a face",
+			sub: "A face on it, for whoever has to look at it", kind: ctlToggle, on: config.Get().Alarms.SunriseFace})
+	}
+	v.rows = append(v.rows, rows...)
 	return v.withRows(
 		settingRow{id: "snooze", label: "Snooze length", kind: ctlStepper, value: fmt.Sprintf("%d min", sv.snooze)},
+		ringVolumeRow(),
 		settingRow{id: "alarmsound", label: "Alarm sound", sub: "Plays once when you choose it", kind: ctlChoice, value: alarm.Get().Sound()},
 	)
+}
+
+// ringVolumeRow is how loud alarms and timers ring. At zero it says what that means in words, since a
+// silent alarm is the one setting on this card that can make somebody late.
+func ringVolumeRow() settingRow {
+	n := ring.Level()
+	if n == 0 {
+		return settingRow{id: "ringvol", label: "Ring volume", sub: "Alarms and timers will make no sound", kind: ctlStepper, value: "Silent"}
+	}
+	return settingRow{id: "ringvol", label: "Ring volume", sub: "Alarms and timers, not the music", kind: ctlStepper,
+		value: fmt.Sprintf("%d of %d", n, sheetVolumeSteps)}
 }
 
 func (v cardView) withRows(rows ...settingRow) cardView {
 	v.rows = append(v.rows, rows...)
 	return v
 }
+
+// timerRows are the Alarms & Timers card's timers: what is counting down now, then a row that sets
+// one. A timer set here can be stopped here; one from Home Assistant is stopped where it was set, so
+// it is shown and left alone.
+func timerRows(sv sheetView) []settingRow {
+	var rows []settingRow
+	for _, c := range sv.timers {
+		if !c.Active {
+			continue
+		}
+		where := "From Home Assistant"
+		if c.Local {
+			where = "Set here"
+		}
+		if c.Name != "" && c.Name != "Timer" {
+			where += " · " + c.Name
+		}
+		row := settingRow{id: "timer:" + c.ID, label: timerLeft(c.Left), sub: where, bold: true, kind: ctlValue, value: "Running"}
+		if c.Local {
+			row.kind, row.button, row.value = ctlButton, "Stop", ""
+		}
+		rows = append(rows, row)
+	}
+	// The row that sets one goes under whatever is already counting down.
+	return append(rows, settingRow{id: "newtimer", label: "New timer",
+		sub: "Rings from this device itself", kind: ctlButton, button: "Set"})
+}
+
+// timerLeft is how long a timer has to run, as the row says it: minutes and seconds under an hour,
+// hours and minutes over it.
+func timerLeft(d time.Duration) string {
+	d = d.Round(time.Second)
+	if d >= time.Hour {
+		return fmt.Sprintf("%d:%02d:%02d", int(d/time.Hour), int(d/time.Minute)%60, int(d/time.Second)%60)
+	}
+	return fmt.Sprintf("%d:%02d", int(d/time.Minute), int(d/time.Second)%60)
+}
+
+// The New timer row's choices.
+var (
+	timerLengths = []time.Duration{time.Minute, 2 * time.Minute, 3 * time.Minute, 5 * time.Minute,
+		10 * time.Minute, 15 * time.Minute, 20 * time.Minute, 30 * time.Minute, 45 * time.Minute, time.Hour}
+	timerLabels = []string{"1 minute", "2 minutes", "3 minutes", "5 minutes", "10 minutes", "15 minutes",
+		"20 minutes", "30 minutes", "45 minutes", "1 hour"}
+)
 
 // alarmEditorCard is one alarm being set. Its heading says when it will ring, so a change reads
 // back at once.
@@ -78,6 +146,9 @@ func alarmEditorCard(sv sheetView, d alarmDraft) cardView {
 	blurb := "Rings at " + when + ", " + config.DaysLabel(a.Days)
 	if a.Days&config.DaysEvery == config.DaysOnce {
 		blurb = "Rings once, at " + when
+		if t, ok := a.OnDate(); ok {
+			blurb += ", " + t.Format("Monday, January 2")
+		}
 	}
 	v := cardView{
 		title: title, blurb: blurb,
@@ -88,6 +159,10 @@ func alarmEditorCard(sv sheetView, d alarmDraft) cardView {
 			{id: "e.repeat", label: "Repeat", kind: ctlChoice, value: repeatName(a.Days)},
 			{id: "e.days", label: "Days", kind: ctlDays, days: a.Days},
 		},
+	}
+	// A reminder is nobody waking up, so it has no light of its own to choose.
+	if !a.Remind {
+		v.rows = append(v.rows, settingRow{id: "e.sunrise", label: "Wake with light", kind: ctlChoice, value: alarmSunriseValue(a)})
 	}
 	if !d.isNew {
 		del := settingRow{id: "e.delete", label: "Delete alarm", sub: "Asks twice", kind: ctlDanger, button: "Delete"}
@@ -137,9 +212,9 @@ func (d *Display) actionTap(id string) {
 	switch id {
 	case "back":
 		d.sheetBack()
-	case "coloursdone":
+	case "colorsdone":
 		d.mu.Lock()
-		d.colours, d.cardScroll = false, 0
+		d.colors, d.cardScroll = false, 0
 		d.mu.Unlock()
 	case "add":
 		d.EditNewAlarm()
@@ -156,7 +231,11 @@ func (d *Display) actionTap(id string) {
 		a.On = true
 		var err error
 		if dr.isNew {
-			_, err = alarm.Get().Set(a.Hour, a.Minute, a.Days, a.Label)
+			var al config.Alarm
+			if al, err = alarm.Get().Set(a.Hour, a.Minute, a.Days, a.Label); err == nil && al.Sunrise != a.Sunrise {
+				al.Sunrise = a.Sunrise
+				err = alarm.Get().Put(al)
+			}
 		} else {
 			err = alarm.Get().Put(a)
 		}
@@ -188,6 +267,11 @@ func (d *Display) editDraft(f func(*alarmDraft)) {
 // alarmRowTap is a tap on one of the Alarms card's rows, or the editor's; it reports whether the row
 // was one of theirs.
 func (d *Display) alarmRowTap(id string, p part, opt int) bool {
+	if key, ok := strings.CutPrefix(id, "timer:"); ok {
+		// Only the device's own stop here; Home Assistant's row has no button to tap.
+		timer.Get().Cancel(key)
+		return true
+	}
 	if key, ok := strings.CutPrefix(id, "alarm:"); ok {
 		for _, a := range config.Get().Alarms.List {
 			if a.ID != key {
@@ -217,7 +301,15 @@ func (d *Display) alarmRowTap(id string, p part, opt int) bool {
 		case partPlus:
 			alarm.Get().SetSnooze(n + 1)
 		}
-	case "alarmsound", "e.repeat":
+	case "ringvol":
+		n := ring.Level()
+		switch p {
+		case partMinus:
+			alarm.Get().SetRingVolume(n-1, true)
+		case partPlus:
+			alarm.Get().SetRingVolume(n+1, true)
+		}
+	case "alarmsound", "e.repeat", "e.sunrise":
 		d.openPicker(id)
 	case "e.hour":
 		d.editDraft(func(dr *alarmDraft) {
