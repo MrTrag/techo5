@@ -130,6 +130,7 @@ var registered = []string{
 	"sendspin",
 	"sendspin_state",
 	"setup_page",
+	"shadow_2",
 	"sleep_timer",
 	"slideshow_folder",
 	"slideshow_interval",

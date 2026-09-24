@@ -37,6 +37,12 @@ const (
 	NearMissSettle = 700 * time.Millisecond
 )
 
+// ShadowClip is how much audio a shadowed slot keeps of a detection: the whole of what the microphone
+// holds, taken at the instant the score crossed. It is the same two seconds a real turn's recording
+// opens with, which was measured to hold the word whole (recording.Prewake), so a shadow clip and a
+// live one replay through the desk scorer on equal terms.
+const ShadowClip = 2 * time.Second
+
 // Engine feeds microphone frames to the wake words of one backend.
 //
 // Slots are Home Assistant's: it offers a fixed number of wake word choices, each paired with its
@@ -66,6 +72,17 @@ type Engine struct {
 
 	// OnDetect runs on a detection, off the audio path.
 	OnDetect func(slot int)
+
+	// Shadowed reports whether a slot is watched rather than acted on. A shadowed slot's detection is
+	// logged and handed to OnShadow with the audio that caused it, and OnDetect is not called; a near
+	// miss on it is logged and goes no further, since ducking the music for a word the device is not
+	// acting on would be acting on it. Asked at every crossing, like Threshold, so a change in Home
+	// Assistant takes effect at once. Nil is nothing shadowed.
+	Shadowed func(slot int) bool
+
+	// OnShadow runs when a shadowed slot would have fired, off the audio path, with the wake word's id,
+	// the score that crossed, and ShadowClip of audio ending at that instant.
+	OnShadow func(slot int, id string, score float64, history []int16)
 
 	// OnNearMiss runs when an utterance peaked over NearMiss and fell away without firing, with the peak
 	// it reached, off the audio path. A near miss is the only sign the device gets that somebody tried
@@ -104,6 +121,10 @@ type slot struct {
 	holding  bool
 	holdEnds time.Time
 	crossing float64
+
+	// shadow is whether the detection being held was watched rather than acted on, so the peak is
+	// reported as such when the hold ends.
+	shadow bool
 }
 
 // New describes an engine. Nothing is built until Start.
@@ -417,9 +438,13 @@ func (e *Engine) judge(n int, s *slot, score float64, now time.Time, source *mic
 			return
 		}
 
-		slog.Info("wake detected", "slot", n+1, "id", s.model.ID, "peak", s.peak,
+		what := "wake detected"
+		if s.shadow {
+			what = "wake shadowed: would have fired"
+		}
+		slog.Info(what, "slot", n+1, "id", s.model.ID, "peak", s.peak,
 			"crossing", s.crossing, "cutoff", cutoff, "dropped", source.Dropped())
-		s.holding, s.peak = false, 0
+		s.holding, s.shadow, s.peak = false, false, 0
 		s.quiet = now.Add(Refractory)
 		return
 	}
@@ -430,9 +455,10 @@ func (e *Engine) judge(n int, s *slot, score float64, now time.Time, source *mic
 		}
 		// The utterance peaked and fell away without firing.
 		if s.peak >= NearMiss && now.Sub(s.peakAt) > NearMissSettle {
+			shadow := e.shadowed(n)
 			slog.Info("wake near miss", "slot", n+1, "id", s.model.ID, "peak", s.peak,
-				"cutoff", cutoff, "dropped", source.Dropped())
-			if e.OnNearMiss != nil {
+				"cutoff", cutoff, "shadow", shadow, "dropped", source.Dropped())
+			if e.OnNearMiss != nil && !shadow {
 				i, peak := n, s.peak
 				safe.Go("wake near miss", func() { e.OnNearMiss(i, peak) })
 			}
@@ -445,10 +471,28 @@ func (e *Engine) judge(n int, s *slot, score float64, now time.Time, source *mic
 	s.holding, s.holdEnds = true, now.Add(Hold)
 	s.crossing, s.peak = score, score
 
+	// A shadowed slot keeps the audio instead of opening a turn. The history is taken here, under the
+	// lock and on the audio path, so the clip ends at the frame that crossed rather than at whichever
+	// frame a goroutine got round to it.
+	if s.shadow = e.shadowed(n); s.shadow {
+		var history []int16
+		if source != nil {
+			history = source.Recent(ShadowClip)
+		}
+		if e.OnShadow != nil {
+			id := s.model.ID
+			safe.Go("wake shadowed", func() { e.OnShadow(n, id, score, history) })
+		}
+		return
+	}
+
 	if e.OnDetect != nil {
 		safe.Go("wake detected", func() { e.OnDetect(n) })
 	}
 }
+
+// shadowed is whether slot n is watched rather than acted on. Held with mu.
+func (e *Engine) shadowed(n int) bool { return e.Shadowed != nil && e.Shadowed(n) }
 
 // Quiet drops the engines while the microphones are cut, and builds them again when they come back.
 //

@@ -71,6 +71,12 @@ type WakeWord struct {
 
 	// Recordings is how many of this slot's turns to keep the audio of on disk. Zero keeps none.
 	Recordings int `json:"recordings"`
+
+	// Shadow watches this slot's wake word without acting on it: a detection is logged and its audio
+	// kept under Recordings, and no turn opens. It is how a candidate model is judged in the rooms, on
+	// the same nights and the same sounds as the live word in the other slot, before it goes live.
+	// Off by default and stored only when on, so a slot saved before this existed needs no key for it.
+	Shadow bool `json:"shadow,omitempty"`
 }
 
 const (
@@ -193,6 +199,10 @@ func (w WakeWriter) MaxThink(seconds int) error {
 
 func (w WakeWriter) Recordings(count int) error {
 	return w.word(func(word *WakeWord) { word.Recordings = count })
+}
+
+func (w WakeWriter) Shadow(v bool) error {
+	return w.word(func(word *WakeWord) { word.Shadow = v })
 }
 
 // word grows the list to reach the slot, so slot 1 can be set on a device where slot 0 never was.

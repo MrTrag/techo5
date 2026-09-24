@@ -84,3 +84,48 @@ func TestATurnWithAnUnusableIDIsNotRecorded(t *testing.T) {
 		t.Errorf("a turn opened as %q", s.open)
 	}
 }
+
+// A shadow clip's sidecar says what it is: the word that would have fired and the score it crossed
+// at, on top of what every recording carries. A turn's sidecar carries none of that, so an old
+// reader and an old file both still agree.
+func TestAShadowClipIsMarkedAsOne(t *testing.T) {
+	kept(t, "4f7a1c9e2b8d0a65")
+
+	id := shadowPrefix + "0123456789abcdef"
+	if err := writeWith(id, meta{Slot: 1, Shadow: true, Model: "jarvis_r5", Score: 0.91}, bytesOf(make([]int16, 1600))); err != nil {
+		t.Fatalf("writing a shadow clip: %v", err)
+	}
+
+	m, err := readMeta(id)
+	if err != nil {
+		t.Fatalf("reading the sidecar back: %v", err)
+	}
+	if !m.Shadow || m.Model != "jarvis_r5" || m.Score != 0.91 || m.Slot != 1 {
+		t.Errorf("sidecar is %+v, want a shadow of jarvis_r5 at 0.91 on slot 2", m)
+	}
+	if m.Bytes != 3200 || m.At == 0 {
+		t.Errorf("sidecar has bytes=%d at=%d, want 3200 bytes and a time", m.Bytes, m.At)
+	}
+	if s := (&Store{}).Seconds(id); s != 0.1 {
+		t.Errorf("a 1600-sample clip reports %v s, want 0.1", s)
+	}
+
+	turn, err := readMeta("4f7a1c9e2b8d0a65")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.Shadow || turn.Model != "" || turn.Score != 0 {
+		t.Errorf("a turn's sidecar is %+v, want no shadow fields", turn)
+	}
+}
+
+// Samples go to the WAV least significant byte first, which is what the header promises.
+func TestBytesOfIsLittleEndian(t *testing.T) {
+	got := bytesOf([]int16{0x0102, -1})
+	want := []byte{0x02, 0x01, 0xff, 0xff}
+	for i := range want {
+		if i >= len(got) || got[i] != want[i] {
+			t.Fatalf("bytesOf gave % x, want % x", got, want)
+		}
+	}
+}

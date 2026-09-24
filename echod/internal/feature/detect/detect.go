@@ -13,6 +13,7 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/feature/diag"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/mute"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/phone"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/recording"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/ring"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/voice"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/wakeword"
@@ -112,6 +113,14 @@ func newDetect() *Detect {
 			return
 		}
 		voice.Get().Start(slot)
+	}
+
+	// A shadowed slot never reaches the turn. What it heard is kept, with the score and the word that
+	// heard it, so the candidate in that slot is judged on the same nights and the same sounds as the
+	// word that is live, and the clip replays on the desk exactly as the device scored it.
+	e.Shadowed = wakeword.Shadow
+	e.OnShadow = func(slot int, id string, score float64, history []int16) {
+		recording.Get().Shadow(slot, id, score, history)
 	}
 
 	d := &Detect{engine: e, busy: newWakeBusy(led.Get().Busy(), e.Ready)}

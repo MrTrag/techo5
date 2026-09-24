@@ -9,13 +9,16 @@
 package recording
 
 import (
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -69,6 +72,13 @@ type meta struct {
 	Slot  int   `json:"slot"`
 	Bytes int   `json:"bytes"`
 	At    int64 `json:"at"`
+
+	// A shadow clip is a detection that was watched and not acted on (detect.Engine.Shadowed): the
+	// wake word that would have fired and the score it crossed at, so the clip can be told from a
+	// turn and judged against what the live word did with the same sound. Absent on a turn.
+	Shadow bool    `json:"shadow,omitempty"`
+	Model  string  `json:"model,omitempty"`
+	Score  float64 `json:"score,omitempty"`
 }
 
 type Store struct {
@@ -213,11 +223,54 @@ func (s *Store) Opens(id string, slot int, history []int16) {
 		s.open, s.buf = "", nil
 		return
 	}
-	buf := make([]byte, 0, 2*len(history))
-	for _, v := range history {
+	s.open, s.slot, s.buf = id, slot, bytesOf(history)
+}
+
+// shadowPrefix leads the id of a shadow clip, so a listing tells one from a turn without opening its
+// sidecar. The rest is random, as a turn's id is.
+const shadowPrefix = "shadow-"
+
+// Shadow keeps the audio of a detection that was watched rather than acted on, whole and at once:
+// there is no turn to stream the rest of, so what the microphone held at the crossing is the whole of
+// the clip. It counts against the slot's own Recordings, so the "Recordings kept" of the assistant
+// being shadowed is how many of these stay, and an assistant set to keep none keeps none of these
+// either.
+func (s *Store) Shadow(slot int, model string, score float64, history []int16) {
+	if keeps(slot) <= 0 || len(history) == 0 {
+		return
+	}
+	id := shadowPrefix + randomID()
+
+	s.disk.Lock()
+	defer s.disk.Unlock()
+
+	m := meta{Slot: slot, Shadow: true, Model: model, Score: score}
+	if err := writeWith(id, m, bytesOf(history)); err != nil {
+		slog.Error("saving a shadow clip failed", "id", id, "err", err)
+		return
+	}
+	slog.Info("shadow clip kept", "id", id, "slot", slot+1, "model", model, "score", score,
+		"seconds", float64(len(history))/float64(mic.Rate))
+	s.prune()
+}
+
+// bytesOf is samples as the little-endian bytes the WAV holds.
+func bytesOf(samples []int16) []byte {
+	buf := make([]byte, 0, 2*len(samples))
+	for _, v := range samples {
 		buf = append(buf, byte(v), byte(v>>8))
 	}
-	s.open, s.slot, s.buf = id, slot, buf
+	return buf
+}
+
+// randomID is sixteen hex digits from the system's randomness, as a turn's id is, and the clock if
+// that is somehow unavailable.
+func randomID() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 16)
+	}
+	return hex.EncodeToString(b)
 }
 
 // Frame takes audio for whichever turn is open. Called from the streamer, which does not know or care
@@ -386,6 +439,12 @@ const (
 )
 
 func write(id string, slot int, pcm []byte) error {
+	return writeWith(id, meta{Slot: slot}, pcm)
+}
+
+// writeWith is write with the rest of the sidecar chosen by the caller. The size and the time are
+// filled in here, since they are what the audio and the clock say rather than anything to choose.
+func writeWith(id string, m meta, pcm []byte) error {
 	if err := os.MkdirAll(layout.RecordingDir, dirMode); err != nil {
 		return err
 	}
@@ -397,7 +456,8 @@ func write(id string, slot int, pcm []byte) error {
 		return err
 	}
 
-	blob, err := json.Marshal(meta{Slot: slot, Bytes: len(pcm), At: time.Now().Unix()})
+	m.Bytes, m.At = len(pcm), time.Now().Unix()
+	blob, err := json.Marshal(m)
 	if err != nil {
 		return err
 	}

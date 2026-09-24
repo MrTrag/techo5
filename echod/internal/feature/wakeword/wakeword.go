@@ -53,6 +53,9 @@ type slot struct {
 	followUpTone *esphome.Select
 	maxListen    *esphome.Number
 	maxThink     *esphome.Number
+
+	// shadow is offered on every slot but the first, and is nil on that one: see newSlot.
+	shadow *esphome.Switch
 }
 
 var (
@@ -273,6 +276,29 @@ func newSlot(n int) slot {
 			slog.Error("saving the thinking limit failed", "slot", n+1, "err", err)
 		}
 	}
+
+	// Shadow mode is offered on every slot but the first. The first is the word the device answers to,
+	// and a shadow there would leave it deaf while Home Assistant showed a wake word it listened for;
+	// a second slot is where a candidate goes to be judged against the first. The engine asks the
+	// setting at every crossing, so there is nothing to reload when it changes.
+	if n > 0 {
+		s.shadow = &esphome.Switch{
+			Base: esphome.Base{
+				ObjectID: fmt.Sprintf("shadow_%d", n+1),
+				Name:     "Shadow mode",
+				Icon:     "mdi:eye-outline",
+				Category: esphome.CategoryConfig,
+				DeviceID: on,
+			},
+		}
+		s.shadow.OnCommand = func(v bool) {
+			s.shadow.Set(v)
+			if err := config.Set().Wake(n).Shadow(v); err != nil {
+				slog.Error("saving shadow mode failed", "slot", n+1, "err", err)
+			}
+			slog.Info("shadow mode", "slot", n+1, "on", v)
+		}
+	}
 	return s
 }
 
@@ -337,6 +363,9 @@ func (w *WakeWord) Entities() []esphome.Entity {
 	for _, s := range w.slots {
 		ents = append(ents, s.wake, s.threshold, s.tone, s.effect, s.thinking, s.replying,
 			s.delivery, s.buffer, s.followUp, s.followUpTone, s.maxListen, s.maxThink)
+		if s.shadow != nil {
+			ents = append(ents, s.shadow)
+		}
 	}
 	return ents
 }
@@ -360,6 +389,9 @@ func (w *WakeWord) Restore(c config.Config) {
 		s.followUpTone.Set(followUpToneLabel(saved.FollowUpTone))
 		s.maxListen.Set(float32(saved.MaxListen))
 		s.maxThink.Set(float32(saved.MaxThink))
+		if s.shadow != nil {
+			s.shadow.Set(saved.Shadow)
+		}
 	}
 	slog.Info("restored", "what", "wake word settings", "slots", len(w.slots))
 }
