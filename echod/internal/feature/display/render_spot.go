@@ -15,7 +15,6 @@ import (
 	"golang.org/x/image/font/gofont/gobold"
 	"golang.org/x/image/font/gofont/goregular"
 	"golang.org/x/image/font/opentype"
-	"golang.org/x/image/math/fixed"
 
 	"github.com/HuskerMinion/techo5/echod/internal/config"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/announce"
@@ -116,10 +115,13 @@ type roundScene struct {
 	cameras   []config.Camera
 	cameraSel int
 
-	// phoneReady is whether the phone is signed in; contacts are who Call lists (while it is open),
+	// phoneReady is whether the phone is signed in, houseReady whether this device has a house word;
+	// callButton is the face's Call button switched on; contacts are who Call lists (while it is open),
 	// contactCount how many there are.
 	phoneReady   bool
-	contacts     []phone.Contact
+	contacts     []phone.Callee
+	houseReady   bool
+	callButton   bool
 	contactCount int
 	contactTop   int // the first contact shown
 
@@ -169,6 +171,7 @@ type roundScene struct {
 
 type roundRenderer struct {
 	paint                            // the canvas, and the settings screen's tap zones
+	callDrawn                        bool // the frame last drawn has the Call button on it; for taps
 	clock, title, body, small, label font.Face
 	tiny                             font.Face
 
@@ -205,6 +208,7 @@ func newRoundRenderer(dst *image.RGBA) *roundRenderer {
 
 func (r *roundRenderer) draw(s roundScene) {
 	draw.Draw(r.dst, r.dst.Rect, image.NewUniform(colBackground), image.Point{}, draw.Src)
+	r.callDrawn = false
 
 	// Muted is drawn last, over whatever the face turns out to be: see mutedRim.
 	defer func() {
@@ -272,7 +276,11 @@ func (r *roundRenderer) draw(s roundScene) {
 		if s.slideshow != nil {
 			r.slideshowBackground(s.slideshow)
 		}
-		r.clockFace(s)
+		r.readableOver(s.slideshow, colBackground, slideshowWash, func() { r.clockFace(s) })
+		if s.callButton && !s.menuOpen && s.phase == "idle" {
+			r.callButtonFace()
+			r.callDrawn = true
+		}
 	}
 	if s.menuOpen {
 		r.menu(s)
@@ -530,8 +538,7 @@ func (r *roundRenderer) blend(x, y int, c color.RGBA, cover float64) {
 }
 
 func (r *roundRenderer) text(face font.Face, s string, x, baseline int, c color.Color) {
-	d := &font.Drawer{Dst: r.dst, Src: image.NewUniform(c), Face: face, Dot: fixed.P(x, baseline)}
-	d.DrawString(s)
+	r.paint.text(face, s, x, baseline, c)
 }
 
 func (r *roundRenderer) width(face font.Face, s string) int {

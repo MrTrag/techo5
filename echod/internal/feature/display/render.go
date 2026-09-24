@@ -116,6 +116,10 @@ type scene struct {
 	camera     home.CameraView
 	cameras    []config.Camera
 
+	// callees are who the drawer's Call tab offers; callButton is the clock's Call button showing.
+	callees    []phone.Callee
+	callButton bool
+
 	// slideshow is Background mode's current photo, drawn under the idle clock in place of the
 	// flat background; nil off that mode or before a first photo arrives.
 	slideshow *image.RGBA
@@ -352,6 +356,7 @@ func (r *renderer) draw(s scene) {
 		return
 	}
 
+	var behind *image.RGBA // the photo behind the idle page, when it has one
 	switch s.phase {
 	case "listening":
 		r.status(s, "Listening…", true)
@@ -373,11 +378,16 @@ func (r *renderer) draw(s scene) {
 		} else {
 			if s.slideshow != nil {
 				r.slideshowBackground(s.slideshow)
+				behind = s.slideshow
 			}
-			r.bigClock(s)
+			r.readableOver(behind, walnut, slideshowWash, func() { r.bigClock(s) })
+			if s.callButton {
+				r.callButtonDraw()
+			}
 		}
 	}
-	r.footer(s)
+	// The footer's words sit on the photo too, when there is one.
+	r.readableOver(behind, walnut, slideshowWash, func() { r.footer(s) })
 	if s.strip && s.phase == "idle" && s.sunrise == 0 {
 		r.musicStrip(s)
 	}
@@ -475,6 +485,7 @@ func (r *renderer) weatherCorner(s scene) {
 	x := r.margin
 	if w.Condition != "" && conditionWords(w.Condition) != "" {
 		r.weatherIcon(w.Condition, r.margin+weatherMark/2, r.margin+15, weatherMark)
+		r.over.note(image.Rect(r.margin, r.margin+15-weatherMark/2, r.margin+weatherMark, r.margin+15+weatherMark/2))
 		x += weatherMark + 14
 	}
 	r.text(r.small, line, x, r.margin+26, dim)
@@ -611,6 +622,25 @@ func playingWord(s scene) string {
 
 // playingButton is where the footer's word for the music sits: the right end of the bottom edge. The
 // whole of it is the target, because the word moves when a connected device is named beside it.
+// callButtonRect is the clock's Call button: a round one in the bottom-left corner, above the footer's
+// line and clear of the time and date.
+func (r *renderer) callButtonRect() image.Rectangle {
+	side := r.s(76)
+	return image.Rect(r.margin, r.h-r.s(52)-side, r.margin+side, r.h-r.s(52))
+}
+
+// callButtonDraw draws it: the call green, with a handset, raised off whatever is behind it.
+func (r *renderer) callButtonDraw() {
+	b := r.callButtonRect()
+	rad := float64(b.Dx()) / 2
+	green := color.RGBA{0x2e, 0xa0, 0x4f, 0xff}
+	r.roundShadow(b, rad, r.sf(10), r.s(3), shadowAlpha())
+	r.roundFill(b, rad, shift(green, 16), shift(green, -12))
+	r.roundHighlight(b, rad)
+	icon := r.s(44)
+	r.mdiIcon("phone", b.Min.X+(b.Dx()-icon)/2, b.Min.Y+(b.Dy()-icon)/2, 44, cream)
+}
+
 func (r *renderer) playingButton() image.Rectangle {
 	return image.Rect(r.w-r.s(280), r.h-r.s(42), r.w, r.h-r.s(4))
 }

@@ -82,6 +82,7 @@ Each step of a call fires `esphome.techo5_phone` on Home Assistant's bus, with:
 | `device` | The device's name |
 | `peer` | The other party: a number, an extension, or a caller ID name and number |
 | `direction` | `incoming` or `outgoing` |
+| `kind` | `phone`, or `intercom` for a call between two devices in the house |
 | `by`, `seconds` | On `ended`: who hung up (`device` or `far end`) and how long the call lasted |
 
 The device needs **Allow the device to perform Home Assistant actions** turned on in its ESPHome
@@ -188,6 +189,34 @@ actions:
 At VoIP.ms, give your phone number a **ring group** with each device's sub-account in it and a
 failover (your mobile, or voicemail) for when nobody answers. Every device rings; the first to answer
 takes the call and the others stop.
+
+## Calling another device in the house
+
+The intercom calls one TECHO5 device from another with no phone account at all: the
+`intercom_call` action ([actions.md](actions.md#call-another-device-in-the-house)) with the other
+device's name. It rings, answers and hangs up like a phone call, on the same page and the same
+button, and fires the same events with `kind: intercom`. Both devices need the same house word from
+the setup page. The sound is the microphones' own 16 kHz rather than a phone line's 8 kHz, encrypted
+between the two devices with the house word as the key. What is planned next is in
+[intercom-plan.md](intercom-plan.md).
+
+**Calling from the screen.** On a Show, the drawer (swipe in from the right edge) has a **Call** tab:
+the other devices in the house first, then your contacts, each with a Call button. On a Spot, the
+ring menu's **Call** item opens the same list. Devices are listed once a house word is set; contacts
+once the phone is signed in. To put a green Call button on the home screen that opens the list, turn
+on **Call button** in Settings, Display (or the **Call button on the home screen** switch in Home
+Assistant). It is off by default.
+
+**Do Not Disturb and Drop In.** Each device decides how it takes intercom calls. **Do not disturb**
+(Settings, Sound & Voice, or the **Intercom do not disturb** switch) turns them away and tells the
+caller why. **Allow Drop In** (Settings, Privacy & Security, or the **Allow Drop In** switch) lets a
+call connect by itself after a short chime, with **Drop In** and the caller's name on the screen; it is
+a way to listen in on a room, so it is off unless you turn it on. Drop In only answers by itself for
+another TECHO5 device the house already knows, calling from that device's own address; any other
+caller rings as usual. The chime plays at a minimum volume, so a turned-down room still hears it. The
+house word itself is sent unencrypted with announcements, so anyone who can watch your network traffic
+could learn it: keep the devices on a network you trust. On a Dot, which has no screen, both are the
+Home Assistant switches, and the action button answers and hangs up.
 
 ## How it works
 

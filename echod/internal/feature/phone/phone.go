@@ -28,6 +28,7 @@ import (
 
 	"github.com/HuskerMinion/techo5/echod/internal/component"
 	"github.com/HuskerMinion/techo5/echod/internal/config"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/web"
 	"github.com/HuskerMinion/techo5/echod/internal/hardware/led"
 	"github.com/HuskerMinion/techo5/echod/internal/layout"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/hook"
@@ -81,6 +82,8 @@ type State struct {
 	Phase      Phase
 	Peer       string // who is on the other end, or calling
 	Incoming   bool
+	Intercom   bool      // the call is with another device in the house, not over the phone line
+	DropIn     bool      // an intercom call that connected by itself: somebody is listening in
 	Since      time.Time // when the phase began
 	Problem    string    // why the phone cannot be used, if it cannot
 }
@@ -88,6 +91,7 @@ type State struct {
 type Phone struct {
 	status, peer     *esphome.TextSensor
 	answer, hangup   *esphome.Button
+	dropIn, dnd      *esphome.Switch
 	ringLED, callLED *led.Claim
 
 	// Changed fires when State does; listeners must not block.
@@ -102,6 +106,10 @@ type Phone struct {
 	answered chan struct{}
 	end      context.CancelFunc
 	say      chan []int16
+
+	// declined is when each device's last intercom call here was turned down, so it cannot ring
+	// again straight away.
+	declined map[string]time.Time
 }
 
 var (
@@ -124,6 +132,11 @@ func build() *Phone {
 		say:    make(chan []int16, 16),
 	}
 	p.answer.OnPress = func() { p.Answer() }
+	p.dropIn = &esphome.Switch{Base: esphome.Base{ObjectID: "intercom_drop_in", Name: "Allow Drop In", Icon: "mdi:phone-in-talk", Category: esphome.CategoryConfig}}
+	p.dnd = &esphome.Switch{Base: esphome.Base{ObjectID: "intercom_do_not_disturb", Name: "Intercom do not disturb", Icon: "mdi:phone-cancel", Category: esphome.CategoryConfig}}
+	p.dropIn.OnCommand = p.SetDropIn
+	p.dnd.OnCommand = p.SetDoNotDisturb
+	web.Handle(intercomPath, "", intercomOpen, p.intercomIn)
 	p.hangup.OnPress = func() { p.Hangup() }
 	p.ringLED = led.Get().Claim(led.PriorityAlarm)
 	p.callLED = led.Get().Claim(led.PriorityTurn)
@@ -135,7 +148,35 @@ func build() *Phone {
 func (p *Phone) Name() string { return "phone" }
 
 func (p *Phone) Entities() []esphome.Entity {
-	return []esphome.Entity{p.status, p.peer, p.answer, p.hangup}
+	return []esphome.Entity{p.status, p.peer, p.answer, p.hangup, p.dropIn, p.dnd}
+}
+
+// Restore puts the intercom's two switches back the way they were left.
+func (p *Phone) Restore(c config.Config) {
+	p.dropIn.Set(c.Home.DropIn)
+	p.dnd.Set(c.Home.DoNotDisturb)
+}
+
+// SetDropIn lets intercom calls connect by themselves, or has them ring again.
+func (p *Phone) SetDropIn(on bool) {
+	if err := config.Set().Home().DropIn(on); err != nil {
+		slog.Error("phone: saving drop in", "err", err)
+		return
+	}
+	p.dropIn.Set(on)
+	slog.Info("intercom: drop in", "allowed", on)
+	p.Changed.Emit(p.State())
+}
+
+// SetDoNotDisturb turns intercom calls away, or lets them ring again.
+func (p *Phone) SetDoNotDisturb(on bool) {
+	if err := config.Set().Home().DoNotDisturb(on); err != nil {
+		slog.Error("phone: saving do not disturb", "err", err)
+		return
+	}
+	p.dnd.Set(on)
+	slog.Info("intercom: do not disturb", "on", on)
+	p.Changed.Emit(p.State())
 }
 
 // State is a copy of what the phone is doing.
@@ -190,6 +231,9 @@ func (p *Phone) set(f func(s *State)) {
 	p.mu.Lock()
 	before := p.state
 	f(&p.state)
+	if p.state.Phase == Idle {
+		p.state.Intercom, p.state.DropIn = false, false
+	}
 	if p.state.Phase != before.Phase {
 		p.state.Since = time.Now()
 	}
@@ -231,6 +275,10 @@ func statusText(s State) string {
 func fire(event string, st State, extra ...string) {
 	// device names which one this was: every device's events arrive on the one bus under one name.
 	data := map[string]string{"event": event, "peer": st.Peer, "device": config.Get().Device.Name}
+	data["kind"] = "phone"
+	if st.Intercom {
+		data["kind"] = "intercom"
+	}
 	if st.Incoming {
 		data["direction"] = "incoming"
 	} else {
@@ -306,7 +354,14 @@ func (p *Phone) serve(ctx context.Context, acct Account) error {
 	p.line = l
 	p.mu.Unlock()
 	defer func() {
-		p.Hangup()
+		// The line going - a reload of the account, a failure - ends a call on it, and only that:
+		// an intercom call between two rooms has nothing to do with the provider.
+		p.mu.Lock()
+		intercom := p.state.Intercom
+		p.mu.Unlock()
+		if !intercom {
+			p.Hangup()
+		}
 		p.mu.Lock()
 		p.line = nil
 		p.mu.Unlock()
@@ -385,7 +440,8 @@ func (p *Phone) Call(number string) error {
 			return
 		}
 		defer d.Close()
-		p.talk(ctx, d.Context(), &d.DialogMedia, func(hctx context.Context) error { return d.Hangup(hctx) })
+		p.talk(ctx, d.Context(), func(tctx context.Context) error { return talk(tctx, &d.DialogMedia, p.say) },
+			func(hctx context.Context) error { return d.Hangup(hctx) })
 	})
 	return nil
 }
@@ -430,7 +486,8 @@ func (p *Phone) incoming(d *diago.DialogServerSession) {
 			p.set(func(s *State) { s.Phase, s.Peer = Idle, "" })
 			return
 		}
-		p.talk(ctx, d.Context(), &d.DialogMedia, func(hctx context.Context) error { return d.Hangup(hctx) })
+		p.talk(ctx, d.Context(), func(tctx context.Context) error { return talk(tctx, &d.DialogMedia, p.say) },
+			func(hctx context.Context) error { return d.Hangup(hctx) })
 	case <-ctx.Done():
 		stopRing()
 		_ = d.Respond(603, "Decline", nil)
@@ -450,8 +507,9 @@ func (p *Phone) incoming(d *diago.DialogServerSession) {
 	}
 }
 
-// talk runs an answered call until either end hangs up.
-func (p *Phone) talk(ctx, callCtx context.Context, m *diago.DialogMedia, hangup func(context.Context) error) {
+// talk runs an answered call until either end hangs up. audio carries the call's sound until it is
+// told to stop, over whichever line the call is on.
+func (p *Phone) talk(ctx, callCtx context.Context, audio func(context.Context) error, hangup func(context.Context) error) {
 	p.set(func(s *State) { s.Phase = Talking })
 	fire("answered", p.State())
 	slog.Info("phone: call up", "peer", p.State().Peer)
@@ -469,7 +527,7 @@ func (p *Phone) talk(ctx, callCtx context.Context, m *diago.DialogMedia, hangup 
 		}
 		cancel()
 	})
-	if err := talk(tctx, m, p.say); err != nil {
+	if err := audio(tctx); err != nil {
 		slog.Warn("phone: call audio", "err", err)
 	}
 	cancel()
@@ -500,6 +558,19 @@ func (p *Phone) Answer() {
 	p.answered = nil
 }
 
+// answerIf answers only the call whose answer channel this is. Drop In answers by itself after its
+// chime, and a hangup in between lets the line go: a call that has claimed it since is not this
+// one's to pick up.
+func (p *Phone) answerIf(answered chan struct{}) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.state.Phase != Ringing || p.answered == nil || p.answered != answered {
+		return
+	}
+	close(p.answered)
+	p.answered = nil
+}
+
 // Hangup ends the call in progress, stops one being placed, or declines one that is ringing.
 func (p *Phone) Hangup() {
 	p.mu.Lock()
@@ -513,8 +584,8 @@ func (p *Phone) Hangup() {
 }
 
 // Actions: phone_account signs the device in (an empty username signs it out); phone_call places a
-// call; phone_contacts sets who a screen offers to call; phone_answer and phone_hangup act on the call
-// that is up.
+// call; intercom_call calls another device in the house; phone_contacts sets who a screen offers to
+// call; phone_answer and phone_hangup act on the call that is up, whichever line it is on.
 func (p *Phone) Actions() []*esphome.Action {
 	return []*esphome.Action{
 		{
@@ -560,6 +631,11 @@ func (p *Phone) Actions() []*esphome.Action {
 				p.Changed.Emit(p.State())
 				return nil, nil
 			},
+		},
+		{
+			Name: "intercom_call",
+			Args: []esphome.Arg{{Name: "device", Type: esphome.ArgString}},
+			Run:  func(c esphome.Call) (any, error) { return nil, p.CallDevice(c.String("device")) },
 		},
 		{Name: "phone_answer", Run: func(esphome.Call) (any, error) { p.Answer(); return nil, nil }},
 		{Name: "phone_hangup", Run: func(esphome.Call) (any, error) { p.Hangup(); return nil, nil }},
