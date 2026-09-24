@@ -50,6 +50,13 @@ const Longest = 30 * mic.Rate * 2
 // someone said is off until they turn it on.
 const KeepMost = 10
 
+// Prewake is how much of the microphone's history opens every recording, whatever the turn sends on
+// to the pipeline. A wake word can only be recognized once it has been spoken, so a recording that
+// began where the stream did held the tail of the request and never the word: what a kept turn is
+// worth as training material, and what a false wake can be replayed to find out about, is in this
+// second. It is the whole of what the microphone keeps (mic/history.go), 32 KB a turn.
+const Prewake = time.Second
+
 const (
 	wavExt  = ".wav"
 	metaExt = ".json"
