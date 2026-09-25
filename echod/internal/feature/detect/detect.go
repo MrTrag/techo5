@@ -119,8 +119,8 @@ func newDetect() *Detect {
 	// heard it, so the candidate in that slot is judged on the same nights and the same sounds as the
 	// word that is live, and the clip replays on the desk exactly as the device scored it.
 	e.Shadowed = wakeword.Shadow
-	e.OnShadow = func(slot int, id string, score float64, history []int16) {
-		recording.Get().Shadow(slot, id, score, history)
+	e.OnShadow = func(slot int, id string, score float64, history []int16, trace []float64) {
+		recording.Get().Shadow(slot, id, score, history, trace)
 	}
 
 	d := &Detect{engine: e, busy: newWakeBusy(led.Get().Busy(), e.Ready)}

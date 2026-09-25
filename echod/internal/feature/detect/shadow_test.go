@@ -18,12 +18,15 @@ func TestAShadowedSlotIsWatchedNotActedOn(t *testing.T) {
 	fired := make(chan int, 2)
 	shadowed := make(chan string, 2)
 	e.OnDetect = func(slot int) { fired <- slot }
-	e.OnShadow = func(slot int, id string, score float64, _ []int16) {
+	e.OnShadow = func(slot int, id string, score float64, _ []int16, trace []float64) {
 		if slot != 1 {
 			t.Errorf("shadow reported for slot %d, want slot 2", slot+1)
 		}
 		if score < 0.9 {
 			t.Errorf("shadow score %v, want the score that crossed", score)
+		}
+		if len(trace) == 0 || trace[len(trace)-1] != score {
+			t.Errorf("trace %v, want it to end with the score that crossed", trace)
 		}
 		shadowed <- id
 	}
@@ -69,6 +72,39 @@ func TestAShadowedSlotIsWatchedNotActedOn(t *testing.T) {
 	}
 	if s := e.slots[0]; !s.holding || s.shadow {
 		t.Errorf("the live slot is holding=%v shadow=%v, want holding and not shadow", s.holding, s.shadow)
+	}
+}
+
+// A slot's trace is its scores in the order they came, capped at the last TraceFrames of them, so
+// the last entry is always the newest score and the whole of it lines up with the microphone's
+// history frame for frame.
+func TestATraceIsTheLastScoresInOrder(t *testing.T) {
+	var s slot
+	if got := s.recent(); len(got) != 0 {
+		t.Errorf("an unscored slot has trace %v, want none", got)
+	}
+
+	for i := range TraceFrames + 7 {
+		s.record(float64(i))
+	}
+	got := s.recent()
+	if len(got) != TraceFrames {
+		t.Fatalf("trace holds %d scores, want %d", len(got), TraceFrames)
+	}
+	if got[0] != 7 || got[len(got)-1] != float64(TraceFrames+6) {
+		t.Errorf("trace runs %v..%v, want the last %d scores oldest first", got[0], got[len(got)-1], TraceFrames)
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i] != got[i-1]+1 {
+			t.Fatalf("trace is out of order at %d: %v", i, got[i-4:i+1])
+		}
+	}
+
+	if TraceFrames != 100 || TraceStep != 20*time.Millisecond {
+		t.Errorf("trace is %d frames of %v, want 100 of 20ms: two seconds, as the shadow clip is", TraceFrames, TraceStep)
+	}
+	if c := compact([]float64{0, 0.004, 0.005, 0.5, 0.996, 1.2}); c != "00 00 01 50 99 99" {
+		t.Errorf("compact gives %q, want hundredths, two digits, clipped", c)
 	}
 }
 

@@ -43,6 +43,17 @@ const (
 // live one replay through the desk scorer on equal terms.
 const ShadowClip = 2 * time.Second
 
+// TraceFrames is how many of a slot's most recent scores are kept, one per microphone frame, so a
+// crossing can say how the score got there. It spans ShadowClip exactly: the last score in a trace
+// is the frame that crossed, which is the last frame of the shadow clip and of the two seconds a
+// turn's recording opens with, so the trace lines up with the audio frame for frame. That is what
+// lets the device's curve be laid next to the desk scorer's for the same sound, which is the only
+// way to find out why the two disagree on a word.
+const TraceFrames = int(ShadowClip / (time.Second / (mic.Rate / mic.FrameSamples)))
+
+// TraceStep is the time between two scores in a trace: one microphone frame.
+const TraceStep = time.Second / (mic.Rate / mic.FrameSamples)
+
 // Engine feeds microphone frames to the wake words of one backend.
 //
 // Slots are Home Assistant's: it offers a fixed number of wake word choices, each paired with its
@@ -81,8 +92,9 @@ type Engine struct {
 	Shadowed func(slot int) bool
 
 	// OnShadow runs when a shadowed slot would have fired, off the audio path, with the wake word's id,
-	// the score that crossed, and ShadowClip of audio ending at that instant.
-	OnShadow func(slot int, id string, score float64, history []int16)
+	// the score that crossed, ShadowClip of audio ending at that instant, and the slot's scores over
+	// that same audio, one per frame, the last of them the score that crossed.
+	OnShadow func(slot int, id string, score float64, history []int16, trace []float64)
 
 	// OnNearMiss runs when an utterance peaked over NearMiss and fell away without firing, with the peak
 	// it reached, off the audio path. A near miss is the only sign the device gets that somebody tried
@@ -125,6 +137,48 @@ type slot struct {
 	// shadow is whether the detection being held was watched rather than acted on, so the peak is
 	// reported as such when the hold ends.
 	shadow bool
+
+	// trace is the slot's last TraceFrames scores, a ring written at every judged frame, refractory
+	// or not, so it stays in step with the audio the microphone holds. next is where the next score
+	// goes; seen is how many have been written, capped at the ring's size.
+	trace []float64
+	next  int
+	seen  int
+}
+
+// record puts one score in the slot's trace.
+func (s *slot) record(score float64) {
+	if s.trace == nil {
+		s.trace = make([]float64, TraceFrames)
+	}
+	s.trace[s.next] = score
+	s.next = (s.next + 1) % TraceFrames
+	s.seen = min(s.seen+1, TraceFrames)
+}
+
+// recent is the trace in order, oldest first, ending with the score last recorded.
+func (s *slot) recent() []float64 {
+	out := make([]float64, 0, s.seen)
+	start := (s.next - s.seen + TraceFrames) % TraceFrames
+	for i := range s.seen {
+		out = append(out, s.trace[(start+i)%TraceFrames])
+	}
+	return out
+}
+
+// compact is a trace as one short string for the log: each score in hundredths, two digits, so a
+// two-second curve reads as a row of numbers rather than a page of floats.
+func compact(trace []float64) string {
+	b := make([]byte, 0, 3*len(trace))
+	for i, v := range trace {
+		if i > 0 {
+			b = append(b, ' ')
+		}
+		h := int(v*100 + 0.5)
+		h = max(0, min(99, h))
+		b = append(b, byte('0'+h/10), byte('0'+h%10))
+	}
+	return string(b)
 }
 
 // New describes an engine. Nothing is built until Start.
@@ -421,6 +475,10 @@ func (e *Engine) judge(n int, s *slot, score float64, now time.Time, source *mic
 		cutoff = e.Threshold(n)
 	}
 
+	// Every judged frame goes in the trace, before any of the reasons below not to act on it, so the
+	// trace covers the same frames the microphone's history does.
+	s.record(score)
+
 	if now.Before(s.quiet) {
 		s.suppressed++
 		return
@@ -471,6 +529,13 @@ func (e *Engine) judge(n int, s *slot, score float64, now time.Time, source *mic
 	s.holding, s.holdEnds = true, now.Add(Hold)
 	s.crossing, s.peak = score, score
 
+	// How the score got here, frame by frame, ending on this one. Logged for every crossing, live or
+	// shadowed: it is the device's own curve over the audio that a turn's recording or a shadow clip
+	// begins with, and the desk scorer's curve over the same file is what it is compared against.
+	trace := s.recent()
+	slog.Info("wake trace", "slot", n+1, "id", s.model.ID, "frames", len(trace),
+		"step_ms", TraceStep.Milliseconds(), "scores", compact(trace))
+
 	// A shadowed slot keeps the audio instead of opening a turn. The history is taken here, under the
 	// lock and on the audio path, so the clip ends at the frame that crossed rather than at whichever
 	// frame a goroutine got round to it.
@@ -481,7 +546,7 @@ func (e *Engine) judge(n int, s *slot, score float64, now time.Time, source *mic
 		}
 		if e.OnShadow != nil {
 			id := s.model.ID
-			safe.Go("wake shadowed", func() { e.OnShadow(n, id, score, history) })
+			safe.Go("wake shadowed", func() { e.OnShadow(n, id, score, history, trace) })
 		}
 		return
 	}

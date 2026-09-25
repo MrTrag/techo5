@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -79,6 +80,12 @@ type meta struct {
 	Shadow bool    `json:"shadow,omitempty"`
 	Model  string  `json:"model,omitempty"`
 	Score  float64 `json:"score,omitempty"`
+
+	// Trace is the device's own score over the clip, one per TraceMS of audio, the last of them the
+	// score that crossed on the clip's last frame. It is what the desk scorer's curve over the same
+	// file is compared against. Absent on a turn.
+	Trace   []float64 `json:"trace,omitempty"`
+	TraceMS int       `json:"trace_ms,omitempty"`
 }
 
 type Store struct {
@@ -235,7 +242,7 @@ const shadowPrefix = "shadow-"
 // the clip. It counts against the slot's own Recordings, so the "Recordings kept" of the assistant
 // being shadowed is how many of these stay, and an assistant set to keep none keeps none of these
 // either.
-func (s *Store) Shadow(slot int, model string, score float64, history []int16) {
+func (s *Store) Shadow(slot int, model string, score float64, history []int16, trace []float64) {
 	if keeps(slot) <= 0 || len(history) == 0 {
 		return
 	}
@@ -245,6 +252,15 @@ func (s *Store) Shadow(slot int, model string, score float64, history []int16) {
 	defer s.disk.Unlock()
 
 	m := meta{Slot: slot, Shadow: true, Model: model, Score: score}
+	if len(trace) > 0 {
+		// Four places is all the model's output resolves to, and it keeps the sidecar small.
+		m.Trace = make([]float64, len(trace))
+		for i, v := range trace {
+			m.Trace[i] = math.Round(v*10000) / 10000
+		}
+		// One score per microphone frame, which is what the engine records (detect.TraceStep).
+		m.TraceMS = mic.FrameSamples * 1000 / mic.Rate
+	}
 	if err := writeWith(id, m, bytesOf(history)); err != nil {
 		slog.Error("saving a shadow clip failed", "id", id, "err", err)
 		return
@@ -327,6 +343,11 @@ type Answer struct {
 	Pages   int    `json:"pages"`
 	MIME    string `json:"mime"`
 	Data    string `json:"data"`
+
+	// Meta is the recording's sidecar, sent with the first page only, so whatever pulls the audio
+	// off the device gets what the device knew about it (a shadow clip's word, score and trace)
+	// without a shell. A reader that only wants the audio ignores it.
+	Meta *meta `json:"meta,omitempty"`
 }
 
 // page reads the WAV and hands back one slice of it. The whole file is already a WAV, so the first
@@ -350,14 +371,22 @@ func (s *Store) page(id string, page int) (*Answer, error) {
 	}
 
 	end := min((page+1)*Page, len(whole))
-	return &Answer{
+	a := &Answer{
 		Version: 1,
 		ID:      id,
 		Page:    page,
 		Pages:   pages,
 		MIME:    "audio/wav",
 		Data:    base64.StdEncoding.EncodeToString(whole[page*Page : end]),
-	}, nil
+	}
+	// The sidecar is optional here: a recording whose sidecar is missing or unreadable is still
+	// audio worth having.
+	if page == 0 {
+		if m, err := readMeta(id); err == nil {
+			a.Meta = &m
+		}
+	}
+	return a, nil
 }
 
 // Prune keeps the newest few for each assistant and clears away the rest, so a slot set lower, a

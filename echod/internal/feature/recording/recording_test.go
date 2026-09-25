@@ -3,8 +3,11 @@ package recording
 import (
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
+	"github.com/HuskerMinion/techo5/echod/internal/config"
 	"github.com/HuskerMinion/techo5/echod/internal/layout"
 )
 
@@ -116,6 +119,60 @@ func TestAShadowClipIsMarkedAsOne(t *testing.T) {
 	}
 	if turn.Shadow || turn.Model != "" || turn.Score != 0 {
 		t.Errorf("a turn's sidecar is %+v, want no shadow fields", turn)
+	}
+}
+
+// A shadow clip carries the device's own score curve over its audio, rounded, and the first page of
+// its audio carries the sidecar with it, so a pull over Home Assistant gets both without a shell.
+// The other pages, and a turn's first page, carry no trace.
+func TestAShadowClipCarriesItsTrace(t *testing.T) {
+	kept(t, "4f7a1c9e2b8d0a65")
+
+	// Both slots keep ten, so neither the clip nor the turn is pruned the moment the clip lands.
+	config.Use(filepath.Join(t.TempDir(), "state.json"))
+	for slot := range 2 {
+		if err := config.Set().Wake(slot).Recordings(10); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s := &Store{}
+	s.Shadow(1, "jarvis_r5", 0.7529, make([]int16, 1600), []float64{0.1, 0.52345, 0.7529})
+
+	ids, err := s.available()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	for _, i := range ids.IDs {
+		if strings.HasPrefix(i, shadowPrefix) {
+			id = i
+		}
+	}
+	if id == "" {
+		t.Fatalf("no shadow clip among %v", ids.IDs)
+	}
+
+	first, err := s.page(id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Meta == nil || !first.Meta.Shadow || first.Meta.Model != "jarvis_r5" {
+		t.Fatalf("page 0 carries %+v, want the shadow sidecar", first.Meta)
+	}
+	if got, want := first.Meta.Trace, []float64{0.1, 0.5235, 0.7529}; !slices.Equal(got, want) {
+		t.Errorf("trace is %v, want %v rounded to four places", got, want)
+	}
+	if first.Meta.TraceMS != 20 {
+		t.Errorf("trace step is %d ms, want 20", first.Meta.TraceMS)
+	}
+
+	turn, err := s.page("4f7a1c9e2b8d0a65", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.Meta == nil || turn.Meta.Trace != nil || turn.Meta.Shadow {
+		t.Errorf("a turn's first page carries %+v, want its plain sidecar and no trace", turn.Meta)
 	}
 }
 
