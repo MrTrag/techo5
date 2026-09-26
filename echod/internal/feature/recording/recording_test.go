@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/HuskerMinion/techo5/echod/internal/config"
+	"github.com/HuskerMinion/techo5/echod/internal/hardware/mic"
 	"github.com/HuskerMinion/techo5/echod/internal/layout"
 )
 
@@ -82,7 +83,7 @@ func TestTurnAudioRefusesAnIDThatLeavesTheDirectory(t *testing.T) {
 // points when it closes.
 func TestATurnWithAnUnusableIDIsNotRecorded(t *testing.T) {
 	s := &Store{}
-	s.Opens("../escaped", 0, nil)
+	s.Opens("../escaped", 0, nil, mic.Loudness{})
 	if s.open != "" {
 		t.Errorf("a turn opened as %q", s.open)
 	}
@@ -137,7 +138,8 @@ func TestAShadowClipCarriesItsTrace(t *testing.T) {
 	}
 
 	s := &Store{}
-	s.Shadow(1, "jarvis_r5", 0.7529, make([]int16, 1600), []float64{0.1, 0.52345, 0.7529})
+	s.Shadow(1, "jarvis_r5", 0.7529, make([]int16, 1600), []float64{0.1, 0.52345, 0.7529},
+		mic.Loudness{Heard: -40.04, Raw: -62.46, Floor: -71.96})
 
 	ids, err := s.available()
 	if err != nil {
@@ -166,6 +168,9 @@ func TestAShadowClipCarriesItsTrace(t *testing.T) {
 	if first.Meta.TraceMS != 20 {
 		t.Errorf("trace step is %d ms, want 20", first.Meta.TraceMS)
 	}
+	if l := first.Meta.Loudness; l == nil || *l != (loudness{Heard: -40, Raw: -62.5, Floor: -72}) {
+		t.Errorf("shadow loudness is %+v, want heard -40, raw -62.5, floor -72", l)
+	}
 
 	turn, err := s.page("4f7a1c9e2b8d0a65", 0)
 	if err != nil {
@@ -173,6 +178,32 @@ func TestAShadowClipCarriesItsTrace(t *testing.T) {
 	}
 	if turn.Meta == nil || turn.Meta.Trace != nil || turn.Meta.Shadow {
 		t.Errorf("a turn's first page carries %+v, want its plain sidecar and no trace", turn.Meta)
+	}
+}
+
+// A turn keeps how loud its wake word was from the moment it opened to the sidecar it closes with,
+// since that is what tells a word said in the room from one heard through a wall.
+func TestATurnKeepsItsLoudness(t *testing.T) {
+	kept(t, "4f7a1c9e2b8d0a65")
+	config.Use(filepath.Join(t.TempDir(), "state.json"))
+	if err := config.Set().Wake(0).Recordings(10); err != nil {
+		t.Fatal(err)
+	}
+
+	s := &Store{}
+	s.Opens("0123456789abcdef", 0, make([]int16, 1600), mic.Loudness{Heard: -24.96, Raw: -51.04, Floor: -68.5})
+	s.Frame(make([]byte, 640))
+	s.Closes()
+
+	m, err := readMeta("0123456789abcdef")
+	if err != nil {
+		t.Fatalf("the turn was not kept: %v", err)
+	}
+	if m.Loudness == nil || *m.Loudness != (loudness{Heard: -25, Raw: -51, Floor: -68.5}) {
+		t.Errorf("turn loudness is %+v, want heard -25, raw -51, floor -68.5", m.Loudness)
+	}
+	if m.Shadow || m.Trace != nil {
+		t.Errorf("a turn's sidecar is %+v, want no shadow fields", m)
 	}
 }
 

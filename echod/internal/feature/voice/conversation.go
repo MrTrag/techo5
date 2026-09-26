@@ -556,6 +556,7 @@ func (c *conversation) start(n nextTurn) {
 	// sound and the round trip to Home Assistant take longer than the ring is deep, so by the time
 	// the streamer starts the word has gone. It opens the recording: see recording.Prewake.
 	history := c.source.Recent(recording.Prewake)
+	loud := c.source.Loudness(recording.Prewake)
 
 	// Before the chime, and before Home Assistant is told anything. Ducking is what the room hears
 	// first, and it has a second of queued music to get through, so every step it waits behind is a
@@ -573,7 +574,7 @@ func (c *conversation) start(n nextTurn) {
 		c.log.Woke(phrase)
 	}
 	c.turn = c.log.Begin(slot+1, phrase)
-	recording.Get().Opens(c.turn.ID(), slot, history)
+	recording.Get().Opens(c.turn.ID(), slot, history, loud)
 	c.send("start", func() error { return c.vs.StartTurn(phrase, audioSettings()) })
 
 	c.shown = State{}

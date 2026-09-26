@@ -86,6 +86,23 @@ type meta struct {
 	// file is compared against. Absent on a turn.
 	Trace   []float64 `json:"trace,omitempty"`
 	TraceMS int       `json:"trace_ms,omitempty"`
+
+	// Loudness is how loud the wake word was at the moment it was detected, on a turn and on a shadow
+	// clip alike: what tells a word said in this room from one heard through a wall. Absent on
+	// recordings made before it was kept.
+	Loudness *loudness `json:"loudness,omitempty"`
+}
+
+// loudness is mic.Loudness as the sidecar stores it, in dBFS to a tenth.
+type loudness struct {
+	Heard float64 `json:"heard_db"`
+	Raw   float64 `json:"raw_db"`
+	Floor float64 `json:"floor_db"`
+}
+
+func loudnessOf(l mic.Loudness) *loudness {
+	r := func(v float64) float64 { return math.Round(v*10) / 10 }
+	return &loudness{Heard: r(l.Heard), Raw: r(l.Raw), Floor: r(l.Floor)}
 }
 
 type Store struct {
@@ -94,6 +111,7 @@ type Store struct {
 	open string
 	slot int
 	buf  []byte
+	loud mic.Loudness
 
 	// disk serializes writing a recording against pruning, so a sweep cannot delete a turn in the
 	// instant between its two files being written.
@@ -211,9 +229,10 @@ func (s *Store) available() (*Available, error) {
 }
 
 // Opens starts recording a turn, beginning with history: the microphone's last second as it was at
-// the moment of the wake, which holds the word itself (see Prewake). An assistant set to keep none
-// records nothing, which is how somebody turns it off for one of them without touching the other.
-func (s *Store) Opens(id string, slot int, history []int16) {
+// the moment of the wake, which holds the word itself (see Prewake). loud is how loud the word in it
+// was, kept in the sidecar. An assistant set to keep none records nothing, which is how somebody turns
+// it off for one of them without touching the other.
+func (s *Store) Opens(id string, slot int, history []int16, loud mic.Loudness) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -230,7 +249,7 @@ func (s *Store) Opens(id string, slot int, history []int16) {
 		s.open, s.buf = "", nil
 		return
 	}
-	s.open, s.slot, s.buf = id, slot, bytesOf(history)
+	s.open, s.slot, s.buf, s.loud = id, slot, bytesOf(history), loud
 }
 
 // shadowPrefix leads the id of a shadow clip, so a listing tells one from a turn without opening its
@@ -242,7 +261,7 @@ const shadowPrefix = "shadow-"
 // the clip. It counts against the slot's own Recordings, so the "Recordings kept" of the assistant
 // being shadowed is how many of these stay, and an assistant set to keep none keeps none of these
 // either.
-func (s *Store) Shadow(slot int, model string, score float64, history []int16, trace []float64) {
+func (s *Store) Shadow(slot int, model string, score float64, history []int16, trace []float64, loud mic.Loudness) {
 	if keeps(slot) <= 0 || len(history) == 0 {
 		return
 	}
@@ -251,7 +270,7 @@ func (s *Store) Shadow(slot int, model string, score float64, history []int16, t
 	s.disk.Lock()
 	defer s.disk.Unlock()
 
-	m := meta{Slot: slot, Shadow: true, Model: model, Score: score}
+	m := meta{Slot: slot, Shadow: true, Model: model, Score: score, Loudness: loudnessOf(loud)}
 	if len(trace) > 0 {
 		// Four places is all the model's output resolves to, and it keeps the sidecar small.
 		m.Trace = make([]float64, len(trace))
@@ -305,7 +324,7 @@ func (s *Store) Frame(pcm []byte) {
 // than saved as an empty file somebody could press play on.
 func (s *Store) Closes() {
 	s.mu.Lock()
-	id, slot, buf := s.open, s.slot, s.buf
+	id, slot, buf, loud := s.open, s.slot, s.buf, s.loud
 	s.open, s.buf = "", nil
 	s.mu.Unlock()
 
@@ -316,7 +335,7 @@ func (s *Store) Closes() {
 	s.disk.Lock()
 	defer s.disk.Unlock()
 
-	if err := write(id, slot, buf); err != nil {
+	if err := writeWith(id, meta{Slot: slot, Loudness: loudnessOf(loud)}, buf); err != nil {
 		slog.Error("saving a recording failed", "id", id, "err", err)
 		return
 	}

@@ -421,6 +421,10 @@ func (s *Source) broadcast(raw []byte) {
 		s.wasDenoising = false
 	}
 
+	// How loud the frame is as it arrives, before any gain: the one measure of a voice that does not
+	// depend on how long the leveler has spent lifting a quiet room. Kept with the frame (see Loudness).
+	before := meanSquare(frame)
+
 	// Turning leveling off throws away what it learned, so a room it has adapted badly to is
 	// recovered by switching it off and on rather than by restarting anything.
 	on := s.leveling.Load()
@@ -439,7 +443,7 @@ func (s *Source) broadcast(raw []byte) {
 		}
 	}
 	s.wasLeveling = on
-	s.remember(frame)
+	s.remember(frame, before)
 
 	for _, l := range s.listeners {
 		select {

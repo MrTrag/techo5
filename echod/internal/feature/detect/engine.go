@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 
@@ -42,6 +43,16 @@ const (
 // opens with, which was measured to hold the word whole (recording.Prewake), so a shadow clip and a
 // live one replay through the desk scorer on equal terms.
 const ShadowClip = 2 * time.Second
+
+// QuietWord is how quiet a wake word can be, as heard (mic.Loudness.Heard), before it is taken for one
+// said in another room. Nothing acts on it yet: a crossing under it is logged as one that would have
+// been ignored, so some days of real wakes can show whether the line holds for everyone in the house
+// before anything is dropped.
+//
+// From the three Dots on 25 and 26 September 2026, in a bungalow where talking carries: a word said
+// in the Dot's own room reached it at -18 to -31 dBFS, the same words through the walls at -36 to
+// -45. This sits between the two.
+const QuietWord = -33.5
 
 // TraceFrames is how many of a slot's most recent scores are kept, one per microphone frame, so a
 // crossing can say how the score got there. It spans ShadowClip exactly: the last score in a trace
@@ -92,9 +103,10 @@ type Engine struct {
 	Shadowed func(slot int) bool
 
 	// OnShadow runs when a shadowed slot would have fired, off the audio path, with the wake word's id,
-	// the score that crossed, ShadowClip of audio ending at that instant, and the slot's scores over
-	// that same audio, one per frame, the last of them the score that crossed.
-	OnShadow func(slot int, id string, score float64, history []int16, trace []float64)
+	// the score that crossed, ShadowClip of audio ending at that instant, the slot's scores over
+	// that same audio, one per frame, the last of them the score that crossed, and how loud the word
+	// in that audio was.
+	OnShadow func(slot int, id string, score float64, history []int16, trace []float64, loud mic.Loudness)
 
 	// OnNearMiss runs when an utterance peaked over NearMiss and fell away without firing, with the peak
 	// it reached, off the audio path. A near miss is the only sign the device gets that somebody tried
@@ -536,17 +548,32 @@ func (e *Engine) judge(n int, s *slot, score float64, now time.Time, source *mic
 	slog.Info("wake trace", "slot", n+1, "id", s.model.ID, "frames", len(trace),
 		"step_ms", TraceStep.Milliseconds(), "scores", compact(trace))
 
+	// How loud the word was, for every crossing, live or shadowed. Nothing is decided on it yet: a
+	// word quieter than QuietWord is logged as one that would have been ignored, and that is all.
+	shadow := e.shadowed(n)
+	var loud mic.Loudness
+	if source != nil {
+		loud = source.Loudness(ShadowClip)
+		what := "wake loudness"
+		if loud.Heard < QuietWord {
+			what = "wake too quiet: would have been ignored"
+		}
+		slog.Info(what, "slot", n+1, "id", s.model.ID, "shadow", shadow,
+			"heard_db", round1(loud.Heard), "raw_db", round1(loud.Raw),
+			"gain_db", round1(loud.Heard-loud.Raw), "floor_db", round1(loud.Floor), "quiet_db", QuietWord)
+	}
+
 	// A shadowed slot keeps the audio instead of opening a turn. The history is taken here, under the
 	// lock and on the audio path, so the clip ends at the frame that crossed rather than at whichever
 	// frame a goroutine got round to it.
-	if s.shadow = e.shadowed(n); s.shadow {
+	if s.shadow = shadow; s.shadow {
 		var history []int16
 		if source != nil {
 			history = source.Recent(ShadowClip)
 		}
 		if e.OnShadow != nil {
 			id := s.model.ID
-			safe.Go("wake shadowed", func() { e.OnShadow(n, id, score, history, trace) })
+			safe.Go("wake shadowed", func() { e.OnShadow(n, id, score, history, trace, loud) })
 		}
 		return
 	}
@@ -558,6 +585,9 @@ func (e *Engine) judge(n int, s *slot, score float64, now time.Time, source *mic
 
 // shadowed is whether slot n is watched rather than acted on. Held with mu.
 func (e *Engine) shadowed(n int) bool { return e.Shadowed != nil && e.Shadowed(n) }
+
+// round1 is a level to a tenth of a decibel, which is finer than anything it will be judged by.
+func round1(v float64) float64 { return math.Round(v*10) / 10 }
 
 // Quiet drops the engines while the microphones are cut, and builds them again when they come back.
 //

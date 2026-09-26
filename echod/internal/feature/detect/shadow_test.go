@@ -18,7 +18,7 @@ func TestAShadowedSlotIsWatchedNotActedOn(t *testing.T) {
 	fired := make(chan int, 2)
 	shadowed := make(chan string, 2)
 	e.OnDetect = func(slot int) { fired <- slot }
-	e.OnShadow = func(slot int, id string, score float64, _ []int16, trace []float64) {
+	e.OnShadow = func(slot int, id string, score float64, _ []int16, trace []float64, _ mic.Loudness) {
 		if slot != 1 {
 			t.Errorf("shadow reported for slot %d, want slot 2", slot+1)
 		}
