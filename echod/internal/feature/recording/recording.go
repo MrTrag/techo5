@@ -52,7 +52,13 @@ const Longest = 30 * mic.Rate * 2
 
 // KeepMost is the most an assistant can be set to hold. A fresh device keeps none: recording what
 // someone said is off until they turn it on.
-const KeepMost = 10
+//
+// 200 rather than the 10 it was: with the shadowed slot set low enough to keep a clip whenever
+// somebody nearly woke the device, ten were gone within one evening of television, before anyone
+// could fetch them, and those near misses are the training material the wake word is short of. A
+// clip is 64 KB and a turn a few seconds more, so 200 a slot is tens of megabytes on a 4 GB device;
+// the listing of every id stays near 10 KB, well inside one message.
+const KeepMost = 200
 
 // Prewake is how much of the microphone's history opens every recording, whatever the turn sends on
 // to the pipeline. A wake word can only be recognized once it has been spoken, and detection fires
