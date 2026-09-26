@@ -7,6 +7,52 @@ type Wake struct {
 	// Stop is the device's own word for interrupting what it is saying. It is not one of the slots
 	// above: Home Assistant does not choose it, and it opens no pipeline.
 	Stop Stop `json:"stop"`
+
+	// Gate is the other-room floor: see Gate.
+	Gate Gate `json:"gate"`
+}
+
+// Gate stops a device answering a wake word that was said in another room.
+//
+// In a house where talking carries, every device hears every "Jarvis", and Home Assistant takes
+// whichever reports first, which is not always the one in the room. What tells them apart is how loud
+// the word reached the microphones BEFORE the leveler lifted it (mic.Loudness.Raw): see DefaultGateDB.
+// After leveling the gap shrinks, because the leveler lifts far words the most, so the gate is on the
+// raw level.
+//
+// Off, a word under the floor is only logged as one that would have been ignored. On, it is ignored:
+// no chime, no turn. A shadowed slot is never gated (it acts on nothing anyway, and its clips are how
+// the floor gets checked), nor is the stop word (shouting stop from the next room should still work).
+type Gate struct {
+	On bool    `json:"on,omitempty"`
+	DB float64 `json:"db,omitempty"`
+}
+
+// DefaultGateDB is set from the 26 September 2026 training sessions, where every word was recorded on
+// all three Dots at once, measured the way the device measures (the loudest 240 ms, before leveling):
+// 232 words from Steve and Deb, median -50.6 dBFS at the Dot in the room they were said in, and -61.1
+// at the other two. At -56, 7 of the 232 would be ignored (mostly said walking between rooms) and 14 of
+// the 464 through-the-wall copies would still get through; at -55 it was 14 and 7, at -58 1 and 54.
+// Moved in Home Assistant per device if a room needs it.
+const DefaultGateDB = -56.0
+
+// Level is the floor in dBFS, the default until one is set.
+func (g Gate) Level() float64 {
+	if g.DB == 0 {
+		return DefaultGateDB
+	}
+	return g.DB
+}
+
+// GateWriter is the other-room floor, which belongs to no slot.
+type GateWriter struct{ st *Store }
+
+func (w GateWriter) On(v bool) error {
+	return w.st.Update(func(c *Config) { c.Wake.Gate.On = v })
+}
+
+func (w GateWriter) DB(v float64) error {
+	return w.st.Update(func(c *Config) { c.Wake.Gate.DB = v })
 }
 
 // Stop is the interrupting word.

@@ -44,15 +44,18 @@ const (
 // live one replay through the desk scorer on equal terms.
 const ShadowClip = 2 * time.Second
 
-// QuietWord is how quiet a wake word can be, as heard (mic.Loudness.Heard), before it is taken for one
-// said in another room. Nothing acts on it yet: a crossing under it is logged as one that would have
-// been ignored, so some days of real wakes can show whether the line holds for everyone in the house
-// before anything is dropped.
+// otherRoom reports whether a wake word should be ignored as said in another room: the gate is on and
+// the word reached the microphones, before leveling, quieter than the floor (config.Gate).
 //
-// From the three Dots on 25 and 26 September 2026, in a bungalow where talking carries: a word said
-// in the Dot's own room reached it at -18 to -31 dBFS, the same words through the walls at -36 to
-// -45. This sits between the two.
-const QuietWord = -33.5
+// No measurement is no reason to ignore anything. A device that has only just started holds no
+// history to measure, and a word it cannot measure is answered as it always was.
+func otherRoom(on bool, floor float64, loud mic.Loudness) bool {
+	measured := loud.Raw > silentDB
+	return on && measured && loud.Raw < floor
+}
+
+// silentDB is what mic.Loudness reports with nothing to measure.
+const silentDB = -120.0
 
 // TraceFrames is how many of a slot's most recent scores are kept, one per microphone frame, so a
 // crossing can say how the score got there. It spans ShadowClip exactly: the last score in a trace
@@ -108,6 +111,11 @@ type Engine struct {
 	// in that audio was.
 	OnShadow func(slot int, id string, score float64, history []int16, trace []float64, loud mic.Loudness)
 
+	// Gate says, for a slot, whether the other-room floor is on and where it sits in dBFS (config.Gate).
+	// Asked at every crossing, like Threshold, so a change in Home Assistant takes effect at once. Nil
+	// is no gate: every crossing is answered.
+	Gate func(slot int) (on bool, floor float64)
+
 	// OnNearMiss runs when an utterance peaked over NearMiss and fell away without firing, with the peak
 	// it reached, off the audio path. A near miss is the only sign the device gets that somebody tried
 	// and was not heard, which is the one moment when getting out of their way is worth something.
@@ -149,6 +157,10 @@ type slot struct {
 	// shadow is whether the detection being held was watched rather than acted on, so the peak is
 	// reported as such when the hold ends.
 	shadow bool
+
+	// ignored is whether the detection being held was dropped as said in another room (Gate), so the
+	// peak is reported as such when the hold ends.
+	ignored bool
 
 	// trace is the slot's last TraceFrames scores, a ring written at every judged frame, refractory
 	// or not, so it stays in step with the audio the microphone holds. next is where the next score
@@ -509,12 +521,15 @@ func (e *Engine) judge(n int, s *slot, score float64, now time.Time, source *mic
 		}
 
 		what := "wake detected"
-		if s.shadow {
+		switch {
+		case s.shadow:
 			what = "wake shadowed: would have fired"
+		case s.ignored:
+			what = "wake ignored: said in another room"
 		}
 		slog.Info(what, "slot", n+1, "id", s.model.ID, "peak", s.peak,
 			"crossing", s.crossing, "cutoff", cutoff, "dropped", source.Dropped())
-		s.holding, s.shadow, s.peak = false, false, 0
+		s.holding, s.shadow, s.ignored, s.peak = false, false, false, 0
 		s.quiet = now.Add(Refractory)
 		return
 	}
@@ -548,19 +563,31 @@ func (e *Engine) judge(n int, s *slot, score float64, now time.Time, source *mic
 	slog.Info("wake trace", "slot", n+1, "id", s.model.ID, "frames", len(trace),
 		"step_ms", TraceStep.Milliseconds(), "scores", compact(trace))
 
-	// How loud the word was, for every crossing, live or shadowed. Nothing is decided on it yet: a
-	// word quieter than QuietWord is logged as one that would have been ignored, and that is all.
+	// How loud the word was, for every crossing, live or shadowed, and whether the other-room floor
+	// keeps it from being answered. With the gate off, a word under the floor is only logged as one that
+	// would have been ignored. A shadowed slot is never gated: it acts on nothing anyway.
 	shadow := e.shadowed(n)
 	var loud mic.Loudness
+	ignore := false
 	if source != nil {
 		loud = source.Loudness(ShadowClip)
+		on, floor := false, silentDB
+		if e.Gate != nil {
+			on, floor = e.Gate(n)
+		}
+		quiet := otherRoom(true, floor, loud)
+		ignore = quiet && on && !shadow
 		what := "wake loudness"
-		if loud.Heard < QuietWord {
+		switch {
+		case ignore:
+			what = "wake too quiet: ignored, said in another room"
+		case quiet:
 			what = "wake too quiet: would have been ignored"
 		}
 		slog.Info(what, "slot", n+1, "id", s.model.ID, "shadow", shadow,
 			"heard_db", round1(loud.Heard), "raw_db", round1(loud.Raw),
-			"gain_db", round1(loud.Heard-loud.Raw), "floor_db", round1(loud.Floor), "quiet_db", QuietWord)
+			"gain_db", round1(loud.Heard-loud.Raw), "floor_db", round1(loud.Floor),
+			"gate", on, "gate_db", floor)
 	}
 
 	// A shadowed slot keeps the audio instead of opening a turn. The history is taken here, under the
@@ -575,6 +602,12 @@ func (e *Engine) judge(n int, s *slot, score float64, now time.Time, source *mic
 			id := s.model.ID
 			safe.Go("wake shadowed", func() { e.OnShadow(n, id, score, history, trace, loud) })
 		}
+		return
+	}
+
+	// A word from another room is held like any other, so the peak is logged and the refractory period
+	// follows, but nothing chimes and no turn opens.
+	if s.ignored = ignore; s.ignored {
 		return
 	}
 

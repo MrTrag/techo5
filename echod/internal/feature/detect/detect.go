@@ -37,6 +37,10 @@ type Detect struct {
 	busy   *wakeBusy
 	stop   *esphome.Number
 
+	// gate and gateDB are the other-room floor: see config.Gate and gate.go.
+	gate   *esphome.Switch
+	gateDB *esphome.Number
+
 	// ducker gets the music out of the way after an utterance that nearly fired; see nearmiss.go.
 	ducker *ducker
 }
@@ -130,10 +134,21 @@ func newDetect() *Detect {
 		recording.Get().Shadow(slot, id, score, history, trace, loud)
 	}
 
+	// The other-room floor (config.Gate) for Home Assistant's slots. The stop word is never gated:
+	// shouting stop from the next room should still stop it, and a floor it can never be under says so.
+	e.Gate = func(slot int) (bool, float64) {
+		if slot == StopSlot {
+			return false, silentDB
+		}
+		g := config.Get().Wake.Gate
+		return g.On, g.Level()
+	}
+
 	d := &Detect{engine: e, busy: newWakeBusy(led.Get().Busy(), e.Ready)}
 	d.ducker = newDucker()
 	d.ducker.watch(e)
 	d.stop = newStopEntity(d)
+	d.gate, d.gateDB = newGateEntities()
 
 	// A cut microphone hands on silence, and running the models over it is work that cannot find
 	// anything. The engines go down with the microphones and come back with them.

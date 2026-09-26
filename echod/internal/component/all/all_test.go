@@ -83,6 +83,8 @@ var registered = []string{
 	"next_alarm",
 	"noise_layer_1",
 	"noise_layer_2",
+	"other_room_floor",
+	"other_room_gate",
 	"phone",
 	"phone_answer",
 	"phone_hangup",

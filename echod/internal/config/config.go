@@ -99,6 +99,9 @@ func (w Writer) Wake(slot int) WakeWriter { return WakeWriter{st: w.st, slot: sl
 // Stop is the stop word, which is not a slot.
 func (w Writer) Stop() StopWriter { return StopWriter(w) }
 
+// Gate is the other-room floor, which is not a slot either.
+func (w Writer) Gate() GateWriter { return GateWriter(w) }
+
 func errSlot(n int) error { return fmt.Errorf("config: wake slot %d", n) }
 
 // Labelled is a setting whose values name themselves. The entity layer binds any of these to a
