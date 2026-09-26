@@ -54,9 +54,10 @@ func Tones(slot int, followUp bool) bool {
 	return toneFor(slot, followUp) != config.ToneNone && !config.Quiet()
 }
 
-// ChimeLength is how long that sound lasts.
+// ChimeLength is how long that sound is loud: what a turn waits out before it sends the microphone.
+// Without the echo canceller it waits out more of the fade (speaker.Audible).
 func ChimeLength(slot int, followUp bool) time.Duration {
-	return speaker.Length(speaker.WakeTone(toneFor(slot, followUp)))
+	return speaker.Audible(speaker.WakeTone(toneFor(slot, followUp)), !config.Get().Microphone.Cancel)
 }
 
 // Delivery is how a slot's reply should reach the device.

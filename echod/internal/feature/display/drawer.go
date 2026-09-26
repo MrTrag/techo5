@@ -22,14 +22,23 @@ func (d *Display) openDrawer(tab int) {
 	if tab == drawerCameras {
 		go home.Get().Prewarm()
 	}
+	if tab == drawerRadio {
+		// Whether this room is in a house is what the Stop row says, and the drawer is opened the moment
+		// before it is pressed. See home.PokeGroup.
+		go home.Get().PokeGroup()
+	}
 	slog.Info("drawer", "open", drawerTabs[tab])
 	d.wake()
 }
 
+// closeDrawer puts it away. It says so, the way openDrawer does: whether a pick closed the drawer or left
+// it over what it had opened is the whole of one of the things the hardware testing found, and a screen
+// nobody can see is no place to check it.
 func (d *Display) closeDrawer() {
 	d.mu.Lock()
 	d.drawer, d.drawerPick = false, ""
 	d.mu.Unlock()
+	slog.Info("drawer closed")
 	d.wake()
 }
 
@@ -69,6 +78,9 @@ func (d *Display) drawerGesture(g touch.Gesture) {
 			d.mu.Unlock()
 			if z.opt == drawerCameras {
 				go home.Get().Prewarm()
+			}
+			if z.opt == drawerRadio {
+				go home.Get().PokeGroup()
 			}
 		case zoneDismiss:
 			d.mu.Lock()
@@ -131,6 +143,11 @@ func (d *Display) drawerRowTap(id string) {
 		if i >= len(rows) {
 			return
 		}
+		// The pick is the last thing the drawer is for: what it leaves you looking at is the page
+		// for it, so the drawer goes, the way it does for a camera. A station picked here used to
+		// leave the list sitting over the station somebody had just chosen, and Stop the radio left
+		// it over the clock, though either pick is as finished with the list as a camera is.
+		d.closeDrawer()
 		if rows[i] == "■ Stop" {
 			home.Get().Stop()
 			return

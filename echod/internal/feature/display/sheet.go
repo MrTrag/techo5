@@ -78,6 +78,7 @@ func categoryRows(sv sheetView) (rows []settingRow, note string) {
 		rows = append(rows,
 			settingRow{id: "clock", label: "Clock format", kind: ctlChoice, value: clockOptions[clockIndex()]},
 			settingRow{id: "callbutton", label: "Call button", sub: "On the home screen: devices and contacts", kind: ctlToggle, on: callButton.Load()},
+			settingRow{id: "weatherfx", label: "Weather animation", sub: "Rain, snow and storms move on the forecast", kind: ctlToggle, on: weatherAnimation.Load()},
 			settingRow{id: "musicstrip", label: "Now playing", sub: "Full page, or a strip over the clock", kind: ctlChoice, value: stripOptionText()},
 			settingRow{id: "slideshow", label: "Slideshow", sub: "Photos from Home Assistant", kind: ctlChoice, value: slideshowOptions[slideshowIndex()]},
 		)
@@ -99,6 +100,7 @@ func categoryRows(sv sheetView) (rows []settingRow, note string) {
 			{id: "waketone", label: "Wake sound", kind: ctlChoice, value: config.Get().Wake.Slot(0).Tone.Label()},
 			{id: "sleep", label: "Sleep timer", sub: sleepSub(), kind: ctlChoice, value: sleepValue()},
 			{id: "quiet", label: "Quiet hours", sub: quietSub(), kind: ctlChoice, value: quietValue()},
+			{id: "hasounds", label: "Home Assistant sounds", sub: "For muting and timers", kind: ctlToggle, on: !config.Get().Speaker.ClassicSounds},
 			{id: "dnd", label: "Do not disturb", sub: "Intercom calls from other rooms are turned away", kind: ctlToggle, on: config.Get().Home.DoNotDisturb},
 			{id: "bass", label: "Bass", sub: toneSub(), kind: ctlStepper, value: toneValue(config.Get().Speaker.Bass)},
 			{id: "treble", label: "Treble", kind: ctlStepper, value: toneValue(config.Get().Speaker.Treble)},
@@ -175,7 +177,7 @@ func generalRows(sv sheetView) []settingRow {
 		restart.sub, restart.button = "Tap again to restart now", "Confirm"
 	}
 	return []settingRow{
-		{label: "Name", sub: "Set in Home Assistant", kind: ctlValue, value: st.name},
+		{label: "Name", sub: "Change it on the setup page", kind: ctlValue, value: st.name},
 		{id: "weather", label: "Weather", sub: "Shown with the clock", kind: ctlChoice, value: st.weather, button: "Show"},
 		{id: "timezone", label: "Time zone", sub: zoneSub(), kind: ctlChoice, value: zoneValue()},
 		{id: "screenlang", label: "Screen language", sub: "What this screen listens for, not what the assistant speaks",
@@ -549,8 +551,12 @@ func (d *Display) rowTap(id string, p part, opt int) {
 		d.setAuto(!on, true)
 	case "callbutton":
 		setCallButtonSaved(d.callBtn, !callButton.Load())
+	case "weatherfx":
+		setWeatherAnimationSaved(d.weatherFx, !weatherAnimation.Load())
 	case "dnd":
 		go phone.Get().SetDoNotDisturb(!config.Get().Home.DoNotDisturb)
+	case "hasounds":
+		media.Get().SetHASounds(config.Get().Speaker.ClassicSounds)
 	case "dropin":
 		go phone.Get().SetDropIn(!config.Get().Home.DropIn)
 	case "volume":

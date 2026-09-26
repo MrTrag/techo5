@@ -110,7 +110,9 @@ type Display struct {
 	clock *esphome.Select
 	// callBtn is the home screen's Call button, on or off (callbutton.go).
 	callBtn *esphome.Switch
-	lang  *esphome.Select
+	// weatherFx is the weather page's sky moving, on or off (weatherfx.go).
+	weatherFx *esphome.Switch
+	lang      *esphome.Select
 
 	mu      sync.Mutex
 	on      bool
@@ -132,17 +134,17 @@ type Display struct {
 	dashMoved     bool
 	dashHoldAt    time.Time
 	dashHoldPt    image.Point
-	autoOn  bool
-	level   float64
-	view    voice.State
-	viewAt  time.Time
-	volume  int
-	volAt   time.Time
+	autoOn        bool
+	level         float64
+	view          voice.State
+	viewAt        time.Time
+	volume        int
+	volAt         time.Time
 
 	// menuOpen is the ring menu on the screen, menuMode what it shows; menuSel the item at (or turning
 	// to) the top; menuRot the dial's rotation now and menuRest where it is heading; menuAt the last
 	// touch; spinning a finger turning it, spinAngle its last direction from the center; jogTurn how
-	// far a jog wheel has turned towards its next step; restartArm the first tap on Restart and
+	// far a jog wheel has turned toward its next step; restartArm the first tap on Restart and
 	// forgetArm on Forget, on the settings screen.
 	menuOpen   bool
 	menuMode   menuMode
@@ -245,6 +247,7 @@ func build() *Display {
 	d.auto.OnCommand = func(on bool) { d.setAuto(on, true) }
 	d.clock = clockSelect(d.wake)
 	d.callBtn = callButtonSwitch(d.wake)
+	d.weatherFx = weatherAnimationSwitch(d.wake)
 	d.lang = langSelect()
 	voice.Changed.Listen(d.changed)
 	media.Get().OnVolume.Listen(d.volumeMoved)
@@ -283,13 +286,14 @@ func build() *Display {
 func (d *Display) Name() string { return "screen" }
 
 func (d *Display) Entities() []esphome.Entity {
-	return []esphome.Entity{d.light, d.auto, d.clock, d.callBtn, d.lang}
+	return []esphome.Entity{d.light, d.auto, d.clock, d.callBtn, d.weatherFx, d.lang}
 }
 
 // Restore lights the panel the way it was left.
 func (d *Display) Restore(c config.Config) {
 	setClock24(d.clock, c.Screen.Clock24)
 	setCallButton(d.callBtn, c.Screen.CallButton)
+	setWeatherAnimation(d.weatherFx, !c.Screen.WeatherStill)
 	d.setAuto(c.Screen.Auto, false)
 	d.apply(c.Screen.On, c.Screen.Brightness, false)
 }
@@ -841,6 +845,8 @@ func (d *Display) act(id itemID) {
 				sel = i
 			}
 		}
+		// Whether this room is in a house is what the Stop row says. See home.PokeGroup.
+		go home.Get().PokeGroup()
 		d.locked(func() {
 			d.openMenu(modeRadio, "")
 			d.radioSel = sel
@@ -1094,8 +1100,11 @@ func (d *Display) frame() time.Duration {
 	s.btPairing = bt.Pairing
 	if s.menuOpen && s.menuMode == modeWeather {
 		s.forecast = home.Get().Forecast()
-		if s.radarOn {
-			s.radar = home.Get().Radar()
+		// Asked for while the weather is up, so the rain map is ready when it is turned to.
+		if v := home.Get().Radar(); s.radarOn {
+			s.radar = v
+		} else {
+			s.sky = skyNow(weatherNow(s.weather, s.forecast))
 		}
 	}
 	s.nowPlaying = s.phase == "idle" && d.showsNowPlaying()
@@ -1188,6 +1197,8 @@ func (d *Display) frame() time.Duration {
 		return activeFrame
 	case s.menuOpen && s.menuMode == modeWeather && s.radarOn:
 		return radarStep
+	case s.menuOpen && s.menuMode == modeWeather && s.sky != fxNone:
+		return fxFrame
 	case s.sheetOpen:
 		return dialFrame // a finger dragging the page is followed smoothly
 	case s.showDash && !s.menuOpen:

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/HuskerMinion/techo5/echod/internal/layout"
 )
@@ -45,6 +46,11 @@ func Get() *Client {
 		shared = &Client{http: &http.Client{Timeout: 15 * time.Second}}
 		if b, err := os.ReadFile(Path); err == nil {
 			_ = json.Unmarshal(b, &shared.acc)
+			// Kept before the cleaning below existed, an address can carry a character nobody can see.
+			shared.acc.URL, shared.acc.Token = cleanURL(shared.acc.URL), clean(shared.acc.Token)
+			if u, err := neturl.Parse(shared.acc.URL); err == nil && u.Host != "" {
+				shared.acc.URL = normalURL(u) // an upper-case scheme saved before Set wrote it lower
+			}
 		}
 	})
 	return shared
@@ -52,11 +58,17 @@ func Get() *Client {
 
 // Set stores the URL (like http://192.168.1.20:8123) and token.
 func (c *Client) Set(url, token string) error {
-	url = strings.TrimRight(strings.TrimSpace(url), "/")
-	token = strings.TrimSpace(token)
+	url, token = cleanURL(url), clean(token)
 	if url == "" || token == "" {
 		return errors.New("hass: url and token are both needed")
 	}
+	u, err := neturl.Parse(url)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("hass: %q is not an address like http://homeassistant.local:8123", url)
+	}
+	// As it was parsed: "HTTP://ha:8123" is a working address, and the websocket, which swaps the
+	// scheme's "http" for "ws", needs it written the way url.Parse writes it.
+	url = normalURL(u)
 	c.mu.Lock()
 	c.acc = access{URL: url, Token: token}
 	c.mu.Unlock()
@@ -66,6 +78,28 @@ func (c *Client) Set(url, token string) error {
 	}
 	return os.WriteFile(Path, b, 0o600)
 }
+
+// clean takes out what a copy and paste carries along without anyone seeing it: spaces and line ends,
+// and the invisible ones - a zero-width space, a byte order mark - that no trim removes. Neither an
+// address nor a token has any of them, and one in front of "http" made every request fail with
+// "first path segment in URL cannot contain colon", which says nothing about why (techo5#24).
+func clean(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) || unicode.Is(unicode.Cf, r) || !unicode.IsPrint(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// normalURL is an address as url.Parse wrote it: the scheme lower case, which the websocket needs
+// ("http" swapped for "ws"), and the path as it was escaped. Nothing else belongs in it.
+func normalURL(u *neturl.URL) string {
+	return strings.TrimRight(u.Scheme+"://"+u.Host+u.EscapedPath(), "/")
+}
+
+// cleanURL is an address cleaned, without the trailing slash the paths are joined to.
+func cleanURL(s string) string { return strings.TrimRight(clean(s), "/") }
 
 // Ready reports whether there is an access to use.
 func (c *Client) Ready() bool {
@@ -309,9 +343,16 @@ func (c *Client) Entities(domain string) ([]Entity, error) {
 	return list, nil
 }
 
-// MusicAssistantFor finds Music Assistant's own media player for a device's media player: the one
-// whose active queue is it. Empty when there is none.
-func (c *Client) MusicAssistantFor(own string) (string, error) {
+// MusicAssistantFor finds Music Assistant's own player for this device: the one it plays through the
+// media player it owns here. own is this device's media player entity, and name is what this device calls
+// itself - which is what it announces to Music Assistant over Sendspin, and so what Music Assistant names
+// its player. Empty when there is none.
+//
+// Two ways, because what Music Assistant puts in active_queue changed: it used to be the entity id of this
+// device's own player, and it is now the queue's own id (up<id>, which is the entity's unique_id as
+// well) - so that test alone finds nothing, on every device running it. The name is what holds, and
+// mass_player_type tells a player from a queue when both are named for the device.
+func (c *Client) MusicAssistantFor(own, name string) (string, error) {
 	out, err := c.do("GET", "/api/states", nil)
 	if err != nil {
 		return "", err
@@ -323,17 +364,34 @@ func (c *Client) MusicAssistantFor(own string) (string, error) {
 	if err := json.Unmarshal(out, &states); err != nil {
 		return "", err
 	}
+	named := ""
 	for _, s := range states {
 		if !strings.HasPrefix(s.EntityID, "media_player.") || s.EntityID == own {
 			continue
 		}
-		app, _ := s.Attributes["app_id"].(string)
-		queue, _ := s.Attributes["active_queue"].(string)
-		if app == "music_assistant" && queue == own {
+		if app, _ := s.Attributes["app_id"].(string); app != "music_assistant" {
+			continue
+		}
+		if queue, _ := s.Attributes["active_queue"].(string); queue == own {
 			return s.EntityID, nil
 		}
+		if name == "" {
+			continue
+		}
+		friendly, _ := s.Attributes["friendly_name"].(string)
+		if !strings.EqualFold(strings.TrimSpace(friendly), strings.TrimSpace(name)) {
+			continue
+		}
+		// A queue named for the device as well is not the thing to resume or unjoin, so it is not the
+		// answer of last resort either: only a player is, whatever the server calls it.
+		if kind, _ := s.Attributes["mass_player_type"].(string); kind == "player" {
+			return s.EntityID, nil
+		} else if kind == "queue" {
+			continue
+		}
+		named = s.EntityID
 	}
-	return "", nil
+	return named, nil
 }
 
 // Render has Home Assistant render a template and returns the text.

@@ -84,6 +84,7 @@ func Load(path string) (*Store, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			st.c.Speaker.SoundsMoved = true // a new device starts on the new default: nothing to move
 			st.readable = true
 			return st, nil
 		}
@@ -92,6 +93,7 @@ func Load(path string) (*Store, error) {
 	if err := json.Unmarshal(b, &st.c); err != nil {
 		return st, fmt.Errorf("config: %s: %w", path, err)
 	}
+	st.c.moveSounds()
 
 	st.readable = true
 	return st, nil

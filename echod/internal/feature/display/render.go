@@ -120,6 +120,9 @@ type scene struct {
 	callees    []phone.Callee
 	callButton bool
 
+	// sky is the forecast page's weather moving (weatherfx.go), fxNone for a still one.
+	sky skyFx
+
 	// slideshow is Background mode's current photo, drawn under the idle clock in place of the
 	// flat background; nil off that mode or before a first photo arrives.
 	slideshow *image.RGBA
@@ -171,7 +174,13 @@ type scene struct {
 // renderer draws scenes onto one canvas. Faces are made once: parsing a font is cheap, but
 // building a face at each size is not something to do per frame.
 type renderer struct {
-	paint            // the canvas, its size, and the settings screen's tap zones
+	paint // the canvas, its size, and the settings screen's tap zones
+
+	// weatherKept is the forecast page as last drawn, and weatherKey what it showed: while the sky
+	// moves the page is drawn twelve times a second, and the page itself changes once a minute.
+	weatherKept []byte
+	weatherKey  string
+
 	clock  font.Face // the big time
 	big    font.Face // a large reading, like today's temperature
 	ampm   font.Face
@@ -341,7 +350,9 @@ func (r *renderer) draw(s scene) {
 		return
 	}
 	if s.showWeather {
-		r.weatherPage(s)
+		r.weatherPageKept(s)
+		// The bolt strikes in the gap between today's reading and the five days.
+		r.sky(s.sky, s.now, r.dst.Rect, image.Rect(r.w/2-r.s(80), r.s(70), r.w/2-r.s(10), r.s(400)))
 		r.footer(s)
 		if s.showVolume {
 			r.volumeBar(s)
@@ -620,13 +631,13 @@ func playingWord(s scene) string {
 	return ""
 }
 
-// playingButton is where the footer's word for the music sits: the right end of the bottom edge. The
-// whole of it is the target, because the word moves when a connected device is named beside it.
-// callButtonRect is the clock's Call button: a round one in the bottom-left corner, above the footer's
-// line and clear of the time and date.
+// callButtonRect is the clock's Call button: a round one in the bottom-left corner, in the gap between
+// the date and the footer's line. At 76 it reached up into the date on a Show 5, where a long date
+// line starts near the left edge and a tap on its first letters opened a call; 56 fits under it, and
+// the tap target is still wider than the button (display.go takes touches 12 around it).
 func (r *renderer) callButtonRect() image.Rectangle {
-	side := r.s(76)
-	return image.Rect(r.margin, r.h-r.s(52)-side, r.margin+side, r.h-r.s(52))
+	side := r.s(56)
+	return image.Rect(r.margin, r.h-r.s(44)-side, r.margin+side, r.h-r.s(44))
 }
 
 // callButtonDraw draws it: the call green, with a handset, raised off whatever is behind it.
@@ -637,10 +648,12 @@ func (r *renderer) callButtonDraw() {
 	r.roundShadow(b, rad, r.sf(10), r.s(3), shadowAlpha())
 	r.roundFill(b, rad, shift(green, 16), shift(green, -12))
 	r.roundHighlight(b, rad)
-	icon := r.s(44)
-	r.mdiIcon("phone", b.Min.X+(b.Dx()-icon)/2, b.Min.Y+(b.Dy()-icon)/2, 44, cream)
+	icon := r.s(32)
+	r.mdiIcon("phone", b.Min.X+(b.Dx()-icon)/2, b.Min.Y+(b.Dy()-icon)/2, 32, cream)
 }
 
+// playingButton is where the footer's word for the music sits: the right end of the bottom edge. The
+// whole of it is the target, because the word moves when a connected device is named beside it.
 func (r *renderer) playingButton() image.Rectangle {
 	return image.Rect(r.w-r.s(280), r.h-r.s(42), r.w, r.h-r.s(4))
 }

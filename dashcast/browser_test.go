@@ -4,17 +4,32 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/chromedp/chromedp"
 )
 
 // A tab opens in the browser started for it. The first device's connection panicked in chromedp
 // ("WithBrowserOption can only be used when allocating a new browser") because open handed the tab a
-// browser option (techo5#26); nothing ran a real browser, so no test saw it. This one does, when a
-// Chrome is there to run.
+// browser option (techo5#26); nothing ran a real browser, so no test saw it. This one does.
+//
+// Where there is no browser - a PC without Chrome - it is skipped, unless DASHCAST_REQUIRE_BROWSER
+// is set: the image build runs it inside the image with that set, so the browser dashcast ships
+// failing to start is a failure there, never a skip.
 func TestOpenATabInTheRunningBrowser(t *testing.T) {
+	required := os.Getenv("DASHCAST_REQUIRE_BROWSER") != ""
+	noBrowser := func(why string, args ...any) {
+		t.Helper()
+		if required {
+			t.Fatalf(why, args...)
+		}
+		t.Skipf(why, args...)
+	}
 	if chromePath("") == "" {
-		t.Skip("no Chrome or headless-shell to run")
+		noBrowser("no Chrome or headless-shell to run")
 	}
 	ha := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
@@ -26,20 +41,39 @@ func TestOpenATabInTheRunningBrowser(t *testing.T) {
 	defer cancel()
 	b, err := newBrowser(ctx, config{ha: ha.URL})
 	if err != nil {
-		// A browser that will not start here - a CI machine's Chrome can time out - says nothing
-		// about open, which is what this is for.
-		t.Skipf("no browser started here: %v", err)
+		noBrowser("the browser did not start: %v", err)
 	}
 	defer b.close()
 
-	for i := range 2 { // a second tab too: every device gets one
-		tab, closeTab, err := b.open(ctx, "/lovelace/0", 480, 480, map[string]bool{"lovelace": true})
+	for i, kiosk := range []bool{false, true} { // a second tab too: every device gets one
+		tab, closeTab, err := b.open(ctx, "/lovelace/0", 480, 480, map[string]bool{"lovelace": true}, kiosk)
 		if err != nil {
 			t.Fatalf("tab %d: %v", i+1, err)
 		}
 		if tab == nil {
 			t.Fatalf("tab %d: no tab", i+1)
 		}
+		// The script put in before the page ran, whole: a mistake anywhere in it, the kiosk part
+		// included, stops all of it, and the history guard is its last word before kiosk's.
+		var guarded bool
+		if err := chromedp.Run(tab, chromedp.Evaluate(`history.pushState.toString().includes("ok(url)")`, &guarded)); err != nil {
+			t.Fatalf("tab %d: %v", i+1, err)
+		}
+		if !guarded {
+			t.Errorf("tab %d (kiosk %v): the script put in before the page did not run", i+1, kiosk)
+		}
 		closeTab()
+	}
+}
+
+// The top bar is hidden only for a screen that asks, and asking changes nothing else.
+func TestKioskIsOnlyWhereAsked(t *testing.T) {
+	plain := initScript([]byte(`"http://ha"`), []byte(`"{}"`), []byte(`["lovelace"]`), false)
+	kiosk := initScript([]byte(`"http://ha"`), []byte(`"{}"`), []byte(`["lovelace"]`), true)
+	if strings.Contains(plain, "techo5-kiosk") {
+		t.Error("a screen that did not ask has its header hidden")
+	}
+	if !strings.Contains(kiosk, "techo5-kiosk") || strings.Replace(kiosk, kioskScript, "", 1) != plain {
+		t.Error("kiosk is not the plain script with the header hidden after it")
 	}
 }

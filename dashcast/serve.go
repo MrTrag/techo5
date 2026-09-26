@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/draw"
@@ -53,6 +54,9 @@ type hello struct {
 	W    int    `json:"w"`
 	H    int    `json:"h"`
 	Path string `json:"path"` // the dashboard, as in Home Assistant's own address bar: /lovelace/0
+
+	// Kiosk is the page without Home Assistant's top bar (browser.go, kioskScript).
+	Kiosk bool `json:"kiosk,omitempty"`
 }
 
 type touchMsg struct {
@@ -74,13 +78,43 @@ const (
 // sessions is how many screens are being served.
 var sessions atomic.Int32
 
+// unproven is how many connections may be in their handshake at once. Before the key has been shown
+// a connection is anybody on the network, each holding memory and time for up to ten seconds, so a
+// few at a time is plenty and the rest are closed at once rather than let pile up.
+var unproven = make(chan struct{}, maxSessions)
+
+// failures keeps the log from filling with one line per failed handshake when something keeps trying.
+var failures struct {
+	sync.Mutex
+	last  time.Time
+	count int
+}
+
+func failedHandshake(from net.Addr, err error) {
+	failures.Lock()
+	defer failures.Unlock()
+	failures.count++
+	if time.Since(failures.last) < time.Minute {
+		return
+	}
+	slog.Warn("a device failed the handshake: a wrong key, or not a TECHO5 device", "from", from, "err", err, "failed", failures.count)
+	failures.last, failures.count = time.Now(), 0
+}
+
 func serve(ctx context.Context, b *browser, g *guard, cfg config, raw net.Conn) {
 	defer raw.Close()
+	select {
+	case unproven <- struct{}{}:
+	default:
+		failedHandshake(raw.RemoteAddr(), errors.New("too many connections in their handshake"))
+		return
+	}
 	_ = raw.SetReadDeadline(time.Now().Add(10 * time.Second))
 	// The key is proved by the handshake, so a device that gets past it has the key.
 	c, err := serverHandshake(raw, cfg.key)
+	<-unproven
 	if err != nil {
-		slog.Warn("a device failed the handshake: a wrong key, or not a TECHO5 device", "from", raw.RemoteAddr(), "err", err)
+		failedHandshake(raw.RemoteAddr(), err)
 		return
 	}
 	// Lines are small - a hello, a touch - and are read with a small limit, so a device cannot send
@@ -131,11 +165,11 @@ func serve(ctx context.Context, b *browser, g *guard, cfg config, raw net.Conn) 
 
 	// The tab: this screen's parked one if it left a moment ago (warm.go), or a new one. It outlives
 	// the session, so it is opened against the server's context, not this connection's.
-	key := fmt.Sprintf("%s|%dx%d|%s", h.Name, h.W, h.H, h.Path)
+	key := fmt.Sprintf("%s|%dx%d|%s|%t", h.Name, h.W, h.H, h.Path, h.Kiosk)
 	w := warm.take(key)
 	reused := w != nil
 	if !reused {
-		tab, closeTab, err := b.open(ctx, h.Path, h.W, h.H, allowed)
+		tab, closeTab, err := b.open(ctx, h.Path, h.W, h.H, allowed, h.Kiosk)
 		if err != nil {
 			slog.Warn("opening the dashboard failed", "name", h.Name, "err", err)
 			out.problem("The dashboard would not open: " + err.Error())

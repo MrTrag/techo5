@@ -63,6 +63,10 @@ type Player struct {
 	// next try is heard; see feature/detect/nearmiss.go.
 	nearMiss *esphome.Switch
 
+	// haSounds is the Home Assistant satellites' recorded sounds for muting and a finished timer, or
+	// TECHO5's own notes (hardware/speaker/clips.go).
+	haSounds *esphome.Switch
+
 	// sleep stops what is playing after a while, the way a clock radio does.
 	sleep *sleeper
 
@@ -126,6 +130,13 @@ type Player struct {
 	// has since been let go. The remote has to be asked some other way than over its own connection -
 	// Music Assistant ignores a play from the player it ended - and what knows how lives elsewhere.
 	OnResumeRemote hook.Hook[struct{}]
+
+	// OnTakeOver fires when this player starts a track of its own while a remote still holds the
+	// speaker: the room is going its own way, and the remote's stream to it has to end rather than wait
+	// behind the new one. What that means is not this player's to decide - a room playing along with a
+	// house has to leave the group before anything is stopped, or the stop takes the house with it - so
+	// it is a hook, like OnResumeRemote.
+	OnTakeOver hook.Hook[struct{}]
 
 	// OnTransport fires when a track's own controls are asked for — the screen's buttons, or Home
 	// Assistant — so that whoever is playing the track hears. It is not an instruction to this player:
@@ -228,6 +239,14 @@ func build() *Player {
 			Min: -asp.ToneRange, Max: asp.ToneRange, Step: 1, Unit: "dB",
 			Mode: esphome.NumberBox,
 		},
+		haSounds: &esphome.Switch{
+			Base: esphome.Base{
+				ObjectID: "home_assistant_sounds",
+				Name:     "Home Assistant sounds for muting and timers",
+				Icon:     "mdi:home-sound-in",
+				Category: esphome.CategoryConfig,
+			},
+		},
 		nearMiss: &esphome.Switch{
 			Base: esphome.Base{
 				ObjectID: "duck_on_near_miss",
@@ -250,7 +269,7 @@ func build() *Player {
 
 	// The player itself stays on the device: it is what people reach for. These are how it behaves.
 	bases := []*esphome.Base{&p.resampling.Base, &p.onTurn.Base, &p.duck.Base, &p.jack.Base, &p.asp.Base,
-		&p.bass.Base, &p.treble.Base, &p.quiet.Base, &p.nearMiss.Base, &p.standby.Base}
+		&p.bass.Base, &p.treble.Base, &p.quiet.Base, &p.nearMiss.Base, &p.haSounds.Base, &p.standby.Base}
 	for _, sel := range p.layers {
 		bases = append(bases, &sel.Base)
 	}
@@ -303,6 +322,8 @@ func build() *Player {
 			p.sound()
 		}
 	}
+
+	p.haSounds.OnCommand = p.SetHASounds
 
 	p.nearMiss.OnCommand = func(v bool) {
 		p.nearMiss.Set(v)
@@ -376,9 +397,19 @@ func build() *Player {
 
 func (p *Player) Name() string { return "media player" }
 
+// SetHASounds chooses the Home Assistant satellites' sounds for muting and timers, or TECHO5's own.
+func (p *Player) SetHASounds(on bool) {
+	if err := config.Set().Speaker().ClassicSounds(!on); err != nil {
+		slog.Error("saving a setting failed", "setting", p.haSounds.ObjectID, "err", err)
+		return
+	}
+	p.haSounds.Set(on)
+	slog.Info("setting changed", "setting", p.haSounds.ObjectID, "using", on)
+}
+
 func (p *Player) Entities() []esphome.Entity {
 	out := []esphome.Entity{p.mp, p.jack, p.resampling, p.onTurn, p.duck, p.asp, p.bass, p.treble,
-		p.quiet, p.nearMiss, p.sleep.sel, p.standby}
+		p.quiet, p.nearMiss, p.haSounds, p.sleep.sel, p.standby}
 	for _, sel := range p.layers {
 		out = append(out, sel)
 	}
@@ -397,6 +428,8 @@ func (p *Player) Restore(c config.Config) {
 
 	p.nearMiss.Set(c.Media.DuckOnNearMiss)
 	slog.Info("restored", "what", p.nearMiss.ObjectID, "using", c.Media.DuckOnNearMiss)
+	p.haSounds.Set(!c.Speaker.ClassicSounds)
+	slog.Info("restored", "what", p.haSounds.ObjectID, "using", !c.Speaker.ClassicSounds)
 
 	p.duck.Set(float32(c.Media.DuckDB))
 	slog.Info("restored", "what", p.duck.ObjectID, "using", c.Media.DuckDB)
@@ -667,7 +700,20 @@ func (p *Player) Transport(t Transport) {
 			p.OnResumeRemote.Emit(struct{}{})
 			return
 		case TransportStop:
+			// A stop is the music, not only this player's hold on it: while there is still a remote to
+			// ask — one that played recently, or one still holding the speaker — it is asked as well, so
+			// its queue ends rather than waiting to be started again. The hold goes either way - the
+			// track is over.
+			//
+			// Dropped before the ask rather than after it, because the ask can put it back: a server
+			// that will only take a pause answers a stop by holding the track again for the screen, and
+			// dropping this player's hold afterwards threw that away. Play on the page then had nowhere
+			// to go, and the track somebody had just stopped could not be picked up from Home Assistant
+			// either.
 			p.held.Store(heldTrack{})
+			if p.remoteLast.Load() || p.remote.playing() {
+				p.OnTransport.Emit(TransportStop)
+			}
 			p.refresh()
 			return
 		}
@@ -806,9 +852,15 @@ func (c *claim) playing() bool {
 // it. Music Assistant ends one stream and starts the next in either order, and a session on its way out
 // used to clear the mark that the session taking over had just set - which is why the first track after
 // a connection looked right and every later one was named as nothing.
+//
+// And this player's own track ends with it. Two pieces of music take turns rather than waiting behind one
+// another: a station stood down by a remote carried on underneath and came back when the remote stopped,
+// so whichever of the two was stopped the other resurfaced, and in the room that looked like a speaker
+// that could not be turned off. The remote's track is what the room hears now; this device's is over.
 func (p *Player) External() uint64 {
 	p.remoteLast.Store(true)
 	n := p.remote.take()
+	p.stream.Stop()
 	p.refresh()
 	return n
 }
@@ -975,8 +1027,15 @@ func (p *Player) PlayURL(url string) {
 // rather than to a remote that has let go. Every path that starts local audio has to say so: remoteLast
 // is what decides where a transport command goes, and one left set sends the pause to a session that is
 // gone, which is a dead pause button on a phone over Bluetooth.
+//
+// A remote still holding the speaker is the other half of it. Two tracks take turns here, and the remote
+// one does not come back when this one ends - but it is still holding the room, and a room playing along
+// with the house has to leave the group before anything of its own starts, or the house goes with it.
 func (p *Player) ours() {
 	p.remoteLast.Store(false)
+	if p.remote.playing() {
+		p.OnTakeOver.Emit(struct{}{})
+	}
 }
 
 // PlayReceived plays audio a remote is sending (a phone using the device as a Bluetooth speaker) as a

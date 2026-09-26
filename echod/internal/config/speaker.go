@@ -27,6 +27,14 @@ type Speaker struct {
 	// the LED ring's bleed into the amplifier while the device thinks, but the amplifier coming off
 	// is an audible pop, and Steve chose no ring during a turn over the pop (24 Sep 2026).
 	AmpStandby bool `json:"amp_standby,omitempty"`
+
+	// ClassicSounds is TECHO5's own notes for muting and a finished timer, where the default is the
+	// Home Assistant satellites' recorded ones.
+	ClassicSounds bool `json:"classic_sounds,omitempty"`
+
+	// SoundsMoved is whether the wake sounds have been moved to Home Assistant's: once, for a device
+	// saved when Chirp was the default, and only for a word still on it (config.Load).
+	SoundsMoved bool `json:"sounds_moved,omitempty"`
 }
 
 const (
@@ -45,6 +53,26 @@ const (
 
 func defaultSpeaker() Speaker {
 	return Speaker{Volume: DefaultVolume, Resampling: DefaultResampling, ASP: DefaultASP}
+}
+
+// moveSounds gives a device saved when Chirp was the default wake sound Home Assistant's instead,
+// which is the default now: once, and only for a word (or its follow-up) still on Chirp, which is
+// what nearly everyone had without choosing it. Anyone can choose Chirp again, and it then stays.
+// SoundsMoved defaults to false so that a file saved before it existed, which does not mention it,
+// reads as not moved; a new device, which has no file, starts moved (Load).
+func (c *Config) moveSounds() {
+	if c.Speaker.SoundsMoved {
+		return
+	}
+	for i := range c.Wake.Words {
+		if c.Wake.Words[i].Tone == ToneChirp {
+			c.Wake.Words[i].Tone = ToneHA
+		}
+		if c.Wake.Words[i].FollowUpTone == ToneChirp {
+			c.Wake.Words[i].FollowUpTone = ToneHA
+		}
+	}
+	c.Speaker.SoundsMoved = true
 }
 
 type SpeakerWriter struct{ st *Store }
@@ -67,6 +95,10 @@ func (w SpeakerWriter) Bass(v float64) error {
 
 func (w SpeakerWriter) Treble(v float64) error {
 	return w.st.Update(func(c *Config) { c.Speaker.Treble = v })
+}
+
+func (w SpeakerWriter) ClassicSounds(v bool) error {
+	return w.st.Update(func(c *Config) { c.Speaker.ClassicSounds = v })
 }
 
 // ASPWanted is what the tuning should be set to: what somebody chose, or the default until somebody

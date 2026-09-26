@@ -340,7 +340,8 @@ func (r *roundRenderer) menu(s roundScene) {
 	case s.menuMode == modeWeather && s.radarOn:
 		r.radarFace(s)
 	case s.menuMode == modeWeather:
-		r.weatherFace(s)
+		bolt := r.weatherFace(s)
+		r.sky(s.sky, s.now, r.dst.Rect, bolt)
 	case s.menuMode == modeRadio:
 		r.radioList(s)
 	case s.menuMode == modeContacts:

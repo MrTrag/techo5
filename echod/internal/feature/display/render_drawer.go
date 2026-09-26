@@ -27,7 +27,7 @@ const (
 	drawerEdgeBase = 240
 
 	// drawerSegBase is the width of the Cameras/Radio/Announce/Call strip.
-	drawerSegBase = 500
+	drawerSegBase = 520 // wide enough for "Announce" when it is the chosen one
 
 	drawerCameras  = 0
 	drawerRadio    = 1
@@ -162,7 +162,13 @@ func drawerRows(s scene) ([]settingRow, string) {
 	for i, name := range stations {
 		id := "st:" + strconv.Itoa(i)
 		if name == "■ Stop" {
-			rows = append(rows, settingRow{id: id, label: "Stop the radio", kind: ctlButton, button: "Stop", rowTap: true})
+			// A stop in a grouped room stops the group, so the row says so rather than doing something
+			// bigger than its words. The label stays what it is: what changes is who else it reaches.
+			row := settingRow{id: id, label: "Stop the radio", kind: ctlButton, button: "Stop", rowTap: true}
+			if rd.Grouped {
+				row.sub = "all rooms in the group"
+			}
+			rows = append(rows, row)
 			continue
 		}
 		label := stationLabel(name)

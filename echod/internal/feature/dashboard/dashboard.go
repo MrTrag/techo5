@@ -34,6 +34,15 @@ const automatic = "Automatic"
 // just made is there to pick without a restart. An unchanged list, the usual answer, costs nothing.
 const boardsEvery = 5 * time.Minute
 
+// wantsList is whether Home Assistant is asked what dashboards there are. While a dashboard is on the
+// list is kept current, so one just made is there to pick without a restart; while it is off it is asked
+// once, and only while there is nothing cached. The picker is built from that list, and it is reached
+// for before a dashboard is on - the only state a device that has never shown one is in - so a cache
+// nobody has filled has to be asked for, or the picker has nothing to offer and never will.
+func wantsList(mode config.DashboardMode, known []config.DashboardChoice) bool {
+	return mode != config.DashboardOff || len(known) == 0
+}
+
 func init() {
 	component.Register(component.Device, Get(), component.Order(37))
 }
@@ -45,6 +54,7 @@ type Feature struct {
 
 	mode  *esphome.Select
 	idle  *esphome.Switch
+	kiosk *esphome.Switch
 	board *esphome.Select
 
 	mu        sync.Mutex
@@ -91,6 +101,14 @@ func Get() *Feature {
 					Category: esphome.CategoryConfig,
 				},
 			},
+			kiosk: &esphome.Switch{
+				Base: esphome.Base{
+					ObjectID: "screen_dashboard_kiosk",
+					Name:     "Dashboard without its header",
+					Icon:     "mdi:fullscreen",
+					Category: esphome.CategoryConfig,
+				},
+			},
 			board: &esphome.Select{
 				Base: esphome.Base{
 					ObjectID: "screen_dashboard_view",
@@ -109,6 +127,15 @@ func Get() *Feature {
 			}
 			f.Changed.Emit(struct{}{})
 		}
+		// Kiosk is asked for when the screen connects to dashcast, so a change reconnects.
+		f.kiosk.OnCommand = func(on bool) {
+			f.kiosk.Set(on)
+			if err := config.Set().Dashboard().Kiosk(on); err != nil {
+				slog.Error("saving the dashboard kiosk setting failed", "err", err)
+			}
+			slog.Info("dashboard: header", "hidden", on)
+			f.setMode(f.Mode())
+		}
 		shared = f
 	})
 	return shared
@@ -116,12 +143,15 @@ func Get() *Feature {
 
 func (f *Feature) Name() string { return "dashboard" }
 
-func (f *Feature) Entities() []esphome.Entity { return []esphome.Entity{f.mode, f.idle, f.board} }
+func (f *Feature) Entities() []esphome.Entity {
+	return []esphome.Entity{f.mode, f.idle, f.kiosk, f.board}
+}
 
 func (f *Feature) Restore(c config.Config) {
 	component.Restore(f.mode, c.Dashboard.Mode, f.setMode)
 	f.idle.Set(c.Dashboard.Idle)
 	slog.Info("restored", "what", f.idle.ObjectID, "using", c.Dashboard.Idle)
+	f.kiosk.Set(c.Dashboard.Kiosk)
 	f.listBoards(c.Dashboard)
 }
 
@@ -171,15 +201,16 @@ func (f *Feature) chooseBoard(label string) {
 }
 
 // Run keeps two things: sessions nobody is using are closed, and the list of Home Assistant's
-// dashboards is kept current while the dashboard is on at all. Home Assistant reads a list's choices
-// once per connection, so a changed list is a reconnect, which drops the link to Home Assistant for a
-// moment - so it waits for a moment when the device is not in a turn. An unchanged list, the usual
-// answer, costs nothing.
+// dashboards is kept current, while the dashboard is on, and asked for once while it is off and there
+// is nothing cached (wantsList). Home Assistant reads a list's choices once per connection, so a
+// changed list is a reconnect, which drops the link to Home Assistant for a moment - so it waits for a
+// moment when the device is not in a turn. An unchanged list, the usual answer, costs nothing.
 func (f *Feature) Run(ctx context.Context) error {
 	lists := time.NewTimer(20 * time.Second) // Home Assistant is usually not reachable the moment this starts
 	defer lists.Stop()
 	tick := time.NewTicker(15 * time.Second)
 	defer tick.Stop()
+	waiting := false // for Home Assistant, said in the log
 	for {
 		select {
 		case <-ctx.Done():
@@ -200,13 +231,19 @@ func (f *Feature) Run(ctx context.Context) error {
 		case <-lists.C:
 		}
 		lists.Reset(boardsEvery)
-		if f.Mode() == config.DashboardOff {
+		if !wantsList(f.Mode(), config.Get().Dashboard.Known) {
 			continue
 		}
 		if !hass.Get().Ready() {
+			// Said once, not every minute: a device that is never given a token would say it forever.
+			if !waiting {
+				slog.Info("dashboard: waiting for Home Assistant before listing its dashboards")
+				waiting = true
+			}
 			lists.Reset(time.Minute) // soon, rather than at the next regular look
 			continue
 		}
+		waiting = false
 		f.listOnce(ctx)
 	}
 }

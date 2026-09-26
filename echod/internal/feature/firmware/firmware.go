@@ -94,7 +94,15 @@ func build() *Firmware {
 	}
 	component.Bind(u.channel, update.Channels(),
 		func(c update.Channel) update.Channel { return c },
-		func(c update.Channel) error { return config.Set().Update().Channel(c.Label()) })
+		func(c update.Channel) error {
+			if err := config.Set().Update().Channel(c.Label()); err != nil {
+				return err
+			}
+			// The card still shows what the channel we just left was serving: nothing fetches the new
+			// one on a selection change, so ask as soon as the choice is saved.
+			safe.Go("update check", func() { u.Check(context.Background()) })
+			return nil
+		})
 
 	// Published now, or Home Assistant shows a select with no value until somebody changes it — and a
 	// device that has never been asked is on the stable channel, not on nothing.
@@ -134,8 +142,14 @@ func build() *Firmware {
 	// the property.
 	u.rolledBack = update.RolledBack()
 
-	// Off the hook's goroutine, which is the connection's read loop.
-	component.Subscribed.Listen(func(struct{}) { safe.Go("update announce", u.announce) })
+	// Off the hook's goroutine, which is the connection's read loop. The check goes out with the
+	// announce: Home Assistant reads the versions the moment it connects, and nothing else refreshes
+	// them while the device is alone, so a unit that has not been asked keeps offering whatever it
+	// last heard rather than what the channel is serving now.
+	component.Subscribed.Listen(func(struct{}) {
+		safe.Go("update announce", u.announce)
+		safe.Go("update check", func() { u.Check(context.Background()) })
+	})
 	return u
 }
 
@@ -179,7 +193,8 @@ func (u *Firmware) Settled(event, status string) {
 func (u *Firmware) Offered() string {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if u.found.Version == "" || u.found.Version == layout.Version || !u.found.Serves() {
+	if u.found.Version == "" || u.found.Version == layout.Version || !u.found.Serves() ||
+		!update.Newer(u.found.Version, layout.Version) {
 		return ""
 	}
 	return u.found.Version
@@ -207,10 +222,21 @@ func (u *Firmware) Check(ctx context.Context) {
 
 	found, err := update.Fetch(ctx, channel)
 	if err != nil {
+		// Checking before the clock is set is ordinary just after boot, and the next check follows.
+		if errors.Is(err, update.ErrClock) {
+			slog.Info("update check waits for the clock", "channel", channel.Label())
+			return
+		}
 		slog.Error("checking for an update failed", "channel", channel.Label(), "err", err)
 		return
 	}
 
+	// Checks can overlap - on connect, on a channel change, on the schedule - and a slow one for the
+	// channel just left must not replace the answer for the one chosen since.
+	if u.Channel() != channel {
+		slog.Info("update check for a channel no longer followed; dropped", "channel", channel.Label())
+		return
+	}
 	u.mu.Lock()
 	u.found = found
 	u.mu.Unlock()
@@ -250,7 +276,7 @@ func (u *Firmware) Install(ctx context.Context) {
 		u.mu.Unlock()
 	}
 
-	if found.Version == "" || found.Version == layout.Version || !found.Serves() {
+	if found.Version == "" || found.Version == layout.Version || !found.Serves() || !update.Newer(found.Version, layout.Version) {
 		slog.Warn("an install was asked for with nothing to install", "running", layout.Version, "offered", found.Version)
 		return
 	}

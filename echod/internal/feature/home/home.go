@@ -46,8 +46,10 @@ type Radio struct {
 	Problem    string // why the list is empty, when fetching it failed
 	Stations   []string
 	Now        string // the station Home Assistant says is playing, empty for none
-	Playing    bool   // the device's own player is running
+	Playing    bool   // something is playing: the device's own stream, or one it carries
+	Paused     bool   // something is paused and still on the page: a held remote track counts
 	Chosen     string // the station tapped last, until Now catches up
+	Grouped    bool   // this room is playing along with a group, so a stop here stops the group
 
 	// What the station is playing, when its service says: the song, and a picture for the
 	// background — the cover when there is one, else the station's logo (Logo true).
@@ -64,6 +66,12 @@ type Feature struct {
 
 	mu     sync.Mutex
 	chosen string
+
+	// grouped is whether Music Assistant has this room playing along with any other, as last asked, and
+	// groupedAt when it was asked. See PokeGroup: the row that says what a Stop will do is drawn every
+	// frame, and the answer is a request to Home Assistant.
+	grouped   bool
+	groupedAt time.Time
 
 	// listed is the Radio Browser station tapped last, at listedAt, to name the stream that follows.
 	listed   string
@@ -185,6 +193,7 @@ func Get() *Feature {
 		media.Get().OnPlay.Listen(shared.played)
 		media.Get().OnEnd.Listen(shared.ended)
 		media.Get().OnResumeRemote.Listen(func(struct{}) { safe.Go("resume music assistant", resumeMusicAssistant) })
+		media.Get().OnTakeOver.Listen(func(struct{}) { safe.Go("leave the group", leaveGroup) })
 	})
 	return shared
 }
@@ -471,7 +480,13 @@ func (f *Feature) Radio() Radio {
 		r.Loading, r.Problem = l.busy && len(l.stations) == 0, l.err
 		f.mu.Unlock()
 	}
-	r.Playing, _ = media.Get().Playing()
+	// Both from the music's own state, which is what the page is drawn from: a remote's track paused from
+	// here is held with play offered rather than playing, and the list needs to know that as the page does.
+	r.Playing, r.Paused = media.Get().ScreenState()
+	// Only while there is something of Music Assistant's being carried: the row warns that a stop reaches
+	// the group, and a Stop only reaches Music Assistant's player while this device is carrying its
+	// stream. A grouped Music Assistant player with a station of this device's playing is not reached.
+	r.Grouped = f.Grouped() && media.Get().Carried()
 	f.mu.Lock()
 	r.Chosen = f.chosen
 	r.Now = f.urlName
@@ -510,6 +525,10 @@ func carried(r Radio) Radio {
 		return r
 	}
 	trackTitle, trackArtist, trackAlbum := media.Get().Track()
+	// Nothing of this device's is starting while a remote is what the room hears. A station tapped just
+	// before Music Assistant took the speaker never plays - the remote ends it - and the list went on
+	// reading "Starting…" for it for as long as the remote carried on.
+	r.Chosen = ""
 	r.Playing, r.Now = true, "Music Assistant"
 	r.Title, r.Artist, r.Album = trackTitle, trackArtist, trackAlbum
 	// Music Assistant's own picture for the track when it sent one. Without one the page draws a
@@ -577,7 +596,7 @@ func (f *Feature) Play(station string) {
 	f.mu.Lock()
 	f.chosen = station
 	f.mu.Unlock()
-	callFavorite(h, station)
+	f.callFavorite(h, station)
 	f.Changed.Emit(struct{}{})
 	f.pokeMeta()
 }
@@ -594,19 +613,26 @@ func askFor(label string) string {
 	return l
 }
 
-// Stop ends whatever the player is doing, whoever is playing it.
+// Stop ends whatever is playing, whoever is playing it.
 //
-// Every caller is a person asking - the Stop row on either panel, the action button, "go home" by voice -
-// so a stream this device did not start is asked to stop. The rule is who is asking, not what the stream
-// is: without this the row reaches a player that has nothing to pause, and the music plays on. Home
-// Assistant's own stop is a different path and stays a pause (see media's command), because that arrives
-// from an automation with nobody necessarily in the room.
+// Every caller is a person asking - the Stop row on either panel, the Done button, "go home" by voice -
+// so a stream this device did not start is asked to stop, and any stream of this player's own is ended
+// rather than paused: the row means the music, so the station goes and the page goes back to the clock
+// with it. The rule is who is asking, not what the stream is. Home Assistant's own stop is a different
+// path and stays the pause (see media's command), because that arrives from an automation with nobody
+// necessarily in the room, and a track it paused is still the page's with play on it. A server that will
+// take only a pause gets a pause, because that is the strongest thing it offers, which is what the row
+// did before anything was carried and what it should go on doing.
 func (f *Feature) Stop() {
-	if media.Get().Carried() {
-		media.Get().Transport(media.TransportStop)
-	} else {
-		media.Get().Pause()
-	}
+	// The same request a transport button makes, so that what a stop reaches is media's to decide: a
+	// stream this device did not start is asked to stop, a track it is holding for somebody else is let
+	// go, and its own stream is ended. Working any of it out here as well is how the hold came to be
+	// dropped after the ask that had just made it.
+	media.Get().Transport(media.TransportStop)
+	// This player's own stream goes with it, whoever is being heard: a station can be sitting under a
+	// carried stream while the two hand the speaker over, and a person asking for silence means all of
+	// it. With nothing of its own playing this does nothing.
+	media.Get().Stop()
 	f.mu.Lock()
 	f.chosen = ""
 	f.mu.Unlock()
