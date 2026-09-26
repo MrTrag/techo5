@@ -335,6 +335,9 @@ func (s *Source) SetLeveling(on bool) {
 	slog.Info("microphone leveling", "on", on)
 }
 
+// Leveling reports whether leveling is switched on: when it is off, Gain is not being applied.
+func (s *Source) Leveling() bool { return s.leveling.Load() }
+
 // SetDenoising turns the noise estimator on or off. It takes effect on the next frame.
 func (s *Source) SetDenoising(on bool) {
 	s.denoising.Store(on)

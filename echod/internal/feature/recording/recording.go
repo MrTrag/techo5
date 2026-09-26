@@ -97,6 +97,14 @@ type meta struct {
 	// clip alike: what tells a word said in this room from one heard through a wall. Absent on
 	// recordings made before it was kept.
 	Loudness *loudness `json:"loudness,omitempty"`
+
+	// A training session (training.go) is minutes of the room recorded on purpose: Training is who it
+	// was for, Started when the recording began (At is when it was written), and Gain the leveler's
+	// gain in dB every GainMS through it. Absent on everything else.
+	Training string    `json:"training,omitempty"`
+	Started  int64     `json:"started,omitempty"`
+	Gain     []float64 `json:"gain_db,omitempty"`
+	GainMS   int       `json:"gain_ms,omitempty"`
 }
 
 // loudness is mic.Loudness as the sidecar stores it, in dBFS to a tenth.
@@ -201,6 +209,22 @@ func (s *Store) Actions() []*esphome.Action {
 			Answers: true,
 			Run: func(c esphome.Call) (any, error) {
 				return s.page(c.String("id"), c.Int("page"))
+			},
+		},
+		// A training session (training.go): who it is for, and how long in seconds, 0 for the default.
+		{
+			Name: "training_start",
+			Args: []esphome.Arg{{Name: "who", Type: esphome.ArgString}, {Name: "seconds", Type: esphome.ArgInt}},
+			Run: func(c esphome.Call) (any, error) {
+				s.StartTraining(c.String("who"), c.Int("seconds"))
+				return nil, nil
+			},
+		},
+		{
+			Name: "training_stop",
+			Run: func(esphome.Call) (any, error) {
+				s.StopTraining()
+				return nil, nil
 			},
 		},
 	}
@@ -438,6 +462,7 @@ func (s *Store) prune() {
 		at int64
 	}
 	bySlot := map[int][]rec{}
+	var sessions []rec
 	complete := map[string]bool{}
 	wavs := []string{}
 
@@ -450,18 +475,33 @@ func (s *Store) prune() {
 				continue
 			}
 			complete[id] = true
+			// A training session belongs to no assistant, so it is kept by its own count rather than
+			// counted against slot 1's turns and pruned with them.
+			if m.Training != "" {
+				sessions = append(sessions, rec{id, m.At})
+				continue
+			}
 			bySlot[m.Slot] = append(bySlot[m.Slot], rec{id, m.At})
 		case strings.HasSuffix(name, wavExt):
 			wavs = append(wavs, strings.TrimSuffix(name, wavExt))
 		}
 	}
 
-	for slot, recs := range bySlot {
+	newestFirst := func(recs []rec) {
 		sort.Slice(recs, func(i, j int) bool { return recs[i].at > recs[j].at })
+	}
+	for slot, recs := range bySlot {
+		newestFirst(recs)
 		for i, r := range recs {
 			if i >= keeps(slot) {
 				remove(r.id)
 			}
+		}
+	}
+	newestFirst(sessions)
+	for i, r := range sessions {
+		if i >= KeepTraining {
+			remove(r.id)
 		}
 	}
 

@@ -90,6 +90,13 @@ func newDetect() *Detect {
 	}
 
 	e.OnDetect = func(slot int) {
+		// A training session is somebody saying the word over and over on purpose, to be recorded; a
+		// turn on each one would talk over them. The detection is still logged, with its loudness and
+		// trace, by the engine. The stop word still works.
+		if slot != StopSlot && recording.Get().Training() {
+			slog.Info("wake ignored: a training session is recording", "slot", slot+1)
+			return
+		}
 		// A call has the microphones and the speaker. The far end talking through the speaker is not
 		// someone in the room, and a turn would take the call's audio away mid-sentence.
 		if phone.Get().Busy() {
