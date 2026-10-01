@@ -25,7 +25,6 @@ package display
 
 import (
 	"context"
-	"fmt"
 	"image"
 	"log/slog"
 	"math"
@@ -42,6 +41,7 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/config"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/alarm"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/announce"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/assistant"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/btaudio"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/hastate"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/home"
@@ -65,10 +65,14 @@ func init() {
 		component.Supervise(service.Restart(time.Second, 30*time.Second)))
 }
 
-const (
-	// linger is how long the last turn's words stay on the screen after it ends.
-	linger = 10 * time.Second
+// hasEqualizer is whether this screen offers the Wave and Bars turn screens (render_turn_spot.go).
+const hasEqualizer = true
 
+// hasNightSwitch is whether Home Assistant can turn the night on and off here: not on the Spot, whose
+// night hours are its own.
+const hasNightSwitch = false
+
+const (
 	// volumeShow is how long the level stays up after it last moved.
 	volumeShow = 2 * time.Second
 
@@ -108,6 +112,13 @@ type Display struct {
 	light *esphome.Light
 	auto  *esphome.Switch
 	clock *esphome.Select
+	// clockStyleSel is Clock style, how the clock looks all day (clock_style.go).
+	clockStyleSel *esphome.Select
+	// camTime is how long a camera opened from the screen stays up, and answerTime how long a turn's
+	// words do once it is over.
+	camTime    *esphome.Select
+	answerTime *esphome.Select
+	turnStyle  *esphome.Select // Turn screen: Classic, Wave or Bars
 	// callBtn is the home screen's Call button, on or off (callbutton.go).
 	callBtn *esphome.Switch
 	// weatherFx is the weather page's sky moving, on or off (weatherfx.go).
@@ -123,6 +134,7 @@ type Display struct {
 	// dashboard, a finger moving on it, a level being slid, the idle one put away until, and a finger
 	// held still on it.
 	dash          bool
+	dashHeld      bool // put up by Home Assistant: stays until it is taken down, not spotDashForget
 	dashTouched   time.Time
 	dashShowing   bool
 	dashFollow    bool
@@ -165,6 +177,12 @@ type Display struct {
 	sheetAt   time.Time // the last touch on it, for closing it when left alone
 	sheetCtl
 
+	// The alert face (alerts_spot.go): up until alertUntil, on alertIdx of the alerts at home,
+	// scrolled alertScroll lines.
+	alertUntil  time.Time
+	alertIdx    int
+	alertScroll int
+
 	// reminderID is the reminder on the face, so a new one starts at the top; reminderScroll how far
 	// its words are dragged up, and the drag's own start while a finger is on it.
 	reminderID         string
@@ -183,6 +201,7 @@ type Display struct {
 	// weatherArmed is a weather question in progress; weatherUntil when the weather face comes down.
 	weatherArmed bool
 	weatherUntil time.Time
+	calUntil     time.Time // the calendar face's, the same way
 
 	// quiet is a turn that was a screen command ("go home", "show the deck"): its words and reply are
 	// not shown, so the screen moves at once, as on the Show. radioCue is when Home Assistant last
@@ -246,6 +265,11 @@ func build() *Display {
 	d.light.OnCommand = d.command
 	d.auto.OnCommand = func(on bool) { d.setAuto(on, true) }
 	d.clock = clockSelect(d.wake)
+	d.clockStyleSel = clockStyleSelect(d)
+	setup.SetScreen(&setup.ScreenChoices{Styles: clockStyleOptions(), Current: clockStyleIndex, Choose: d.setClockStyle})
+	d.camTime = cameraTimeSelect()
+	d.answerTime = answerTimeSelect()
+	d.turnStyle = turnStyleSelect(d.wake)
 	d.callBtn = callButtonSwitch(d.wake)
 	d.weatherFx = weatherAnimationSwitch(d.wake)
 	d.lang = langSelect()
@@ -272,6 +296,8 @@ func build() *Display {
 		d.wake()
 	})
 	btaudio.Get().Changed.Listen(func(btaudio.State) { d.wake() })
+	d.listenDashboard()
+	assistant.SetScreen(d.showPageSpot)
 	phone.Get().Changed.Listen(d.callLights)
 	// The mute button toggles the mute on the buttons' goroutine; redraw once it has.
 	buttons.Get().Events.Listen(func(buttons.Event) {
@@ -285,13 +311,20 @@ func build() *Display {
 
 func (d *Display) Name() string { return "screen" }
 
+// turnStyleSel is the Turn screen setting in Home Assistant.
+func (d *Display) turnStyleSel() *esphome.Select { return d.turnStyle }
+
 func (d *Display) Entities() []esphome.Entity {
-	return []esphome.Entity{d.light, d.auto, d.clock, d.callBtn, d.weatherFx, d.lang}
+	return []esphome.Entity{d.light, d.auto, d.clock, d.clockStyleSel, d.camTime, d.answerTime, d.turnStyle, d.callBtn, d.weatherFx, d.lang}
 }
 
 // Restore lights the panel the way it was left.
 func (d *Display) Restore(c config.Config) {
 	setClock24(d.clock, c.Screen.Clock24)
+	d.clockStyleSel.Set(clockStyles[clockStyleIndex()].label)
+	d.camTime.Set(cameraTimes[cameraTimeIndex()].label)
+	d.answerTime.Set(answerTimes[answerTimeIndex()].label)
+	d.turnStyle.Set(turnStyles[turnStyleIndex()].label)
 	setCallButton(d.callBtn, c.Screen.CallButton)
 	setWeatherAnimation(d.weatherFx, !c.Screen.WeatherStill)
 	d.setAuto(c.Screen.Auto, false)
@@ -379,21 +412,13 @@ func (d *Display) relight(jump bool) {
 	}
 }
 
-// inNight says whether now is within the night hours, "from-to" in whole hours, wrapping midnight.
+// inNight says whether now is within the night hours, which may cross midnight.
 func inNight(now time.Time) bool {
 	v := config.Get().Screen.Night
 	if v == "" {
 		v = defaultNight
 	}
-	var from, to int
-	if _, err := fmt.Sscanf(v, "%d-%d", &from, &to); err != nil || from == to {
-		return false
-	}
-	h := now.Hour()
-	if from < to {
-		return h >= from && h < to
-	}
-	return h >= from || h < to
+	return config.InWindow(v, now)
 }
 
 func allowed(lux float64) float64 {
@@ -418,8 +443,10 @@ func (d *Display) changed(s voice.State) {
 	}
 	d.view = s
 	d.viewAt = time.Now()
-	// A question about the weather brings the weather face up once the answer is done.
-	if newHeard && aboutWeather(s.Heard) {
+	// A question about the weather brings the weather face up once the answer is done. Not when the
+	// device answers directly: its assistant knows where a question was about and puts the face up
+	// itself (showPageSpot).
+	if newHeard && aboutWeather(s.Heard) && !config.Get().Brain.Direct() {
 		d.weatherArmed = true
 		d.radar = aboutRadar(s.Heard)
 	}
@@ -427,6 +454,7 @@ func (d *Display) changed(s voice.State) {
 	if newHeard {
 		if entity := home.Get().MatchCamera(s.Heard); entity != "" {
 			d.weatherArmed, d.quiet = false, true
+			d.closeAlert()
 			if d.menuOpen {
 				d.closeMenu()
 			}
@@ -437,6 +465,7 @@ func (d *Display) changed(s voice.State) {
 			// now-playing face.
 			d.weatherArmed, d.quiet, d.radar, d.radioCue = false, true, false, time.Time{}
 			d.dash = false
+			d.closeAlert()
 			if d.menuOpen {
 				d.closeMenu()
 			}
@@ -450,6 +479,7 @@ func (d *Display) changed(s voice.State) {
 		if !d.menuOpen || d.menuMode == modeWeather {
 			d.openMenu(modeWeather, "")
 			d.weatherUntil = time.Now().Add(weatherShow)
+			d.closeAlert() // the forecast or the rain map asked for comes up over an alert
 		}
 	}
 	d.mu.Unlock()
@@ -525,6 +555,11 @@ func (d *Display) gesture(g touch.Gesture) {
 		d.wake()
 		return
 	}
+	// The alert face takes every gesture while it is up.
+	if d.alertUpSpot() {
+		d.alertGestureSpot(g)
+		return
+	}
 	d.mu.Lock()
 	sheet := d.sheetOpen
 	d.mu.Unlock()
@@ -547,6 +582,13 @@ func (d *Display) gesture(g touch.Gesture) {
 	if v, up := home.Get().Camera(); up {
 		switch g.Kind {
 		case touch.Tap:
+			// The sound's control silences the sound and leaves the view up, which is the whole use of
+			// it at a doorbell; anywhere else on the face takes the view down as it always has.
+			if d.r != nil && d.r.cameraSoundTapped(g.X, g.Y) {
+				// Silence it, or ask for it again: the control is a toggle, and the view stays either way.
+				go home.Get().ToggleCameraSound()
+				return
+			}
 			go home.Get().HideCamera()
 			return
 		case touch.SwipeLeft:
@@ -585,6 +627,11 @@ func (d *Display) gesture(g touch.Gesture) {
 	}
 	switch g.Kind {
 	case touch.Tap:
+		// A finished turn's words: a tap puts them away rather than starting another turn.
+		if d.answerUp(time.Now()) {
+			d.clearAnswer()
+			return
+		}
 		d.mu.Lock()
 		call := d.callShown && onCallButton(g.X, g.Y)
 		if call {
@@ -593,6 +640,14 @@ func (d *Display) gesture(g touch.Gesture) {
 		}
 		d.mu.Unlock()
 		if call {
+			d.wake()
+			return
+		}
+		// The clock's alert pill opens the alert rather than starting a turn.
+		if d.r != nil && d.r.alertPillTapped(g.X, g.Y) && len(home.Get().Alerts().Here) > 0 {
+			d.mu.Lock()
+			d.openAlertSpot(0)
+			d.mu.Unlock()
 			d.wake()
 			return
 		}
@@ -620,7 +675,7 @@ func (d *Display) openMenu(mode menuMode, id itemID) {
 	}
 	// The finger follows (every move a turn of the ring) wherever there is a ring to turn. The weather
 	// face and the lists have none, and need their swipes and taps as they are.
-	touch.Get().SetFollow(mode != modeWeather && mode != modeContacts)
+	touch.Get().SetFollow(mode != modeWeather && mode != modeContacts && mode != modeCalendar)
 }
 
 // followFingers has the touch screen follow every moving finger (Hold, Drag, Release) rather than
@@ -671,10 +726,22 @@ func (d *Display) menuGesture(g touch.Gesture) {
 			d.finishJog(mode)
 		}
 
+	case mode == modeCalendar:
+		if g.Kind == touch.Tap {
+			d.closeMenu()
+		} else {
+			d.calUntil = time.Now().Add(calendarIdle)
+		}
+
 	case mode == modeWeather:
 		switch g.Kind {
 		case touch.Tap:
-			d.closeMenu()
+			// The alert pill over the rain map opens the alert; anywhere else closes the face.
+			if d.radar && d.r != nil && d.r.alertPillTapped(g.X, g.Y) && len(home.Get().Alerts().Here) > 0 {
+				d.openAlertSpot(0)
+			} else {
+				d.closeMenu()
+			}
 		case touch.SwipeLeft, touch.SwipeRight:
 			d.radar = !d.radar
 			d.weatherUntil = time.Now().Add(weatherIdle)
@@ -855,11 +922,16 @@ func (d *Display) act(id itemID) {
 		d.locked(func() { d.openMenu(modeVolume, "") })
 	case itemCamera:
 		d.locked(d.closeMenu)
-		go home.Get().ShowCamera(home.LocalCamera, cameraStep)
+		go home.Get().ShowCamera(home.LocalCamera, cameraScreenTime())
 	case itemWeather:
 		d.locked(func() {
 			d.openMenu(modeWeather, "")
 			d.weatherUntil = time.Now().Add(weatherIdle)
+		})
+	case itemCalendar:
+		d.locked(func() {
+			d.openMenu(modeCalendar, "")
+			d.calUntil = time.Now().Add(calendarIdle)
 		})
 	case itemDashboard:
 		d.toggleDashboard()
@@ -997,6 +1069,10 @@ func (d *Display) frame() time.Duration {
 				d.closeMenu()
 				d.radar = false
 			}
+		case d.menuMode == modeCalendar:
+			if now.After(d.calUntil) {
+				d.closeMenu()
+			}
 		case d.menuMode == modeRadio:
 			if now.Sub(d.menuAt) > radioIdle {
 				d.closeMenu()
@@ -1048,12 +1124,16 @@ func (d *Display) frame() time.Duration {
 	if !on {
 		return time.Hour
 	}
-	if view.Phase == "idle" && (view.Heard != "" || view.Reply != "") && now.Sub(at) < linger {
+	if view.Phase == "idle" && (view.Heard != "" || view.Reply != "") && now.Sub(at) < linger() {
 		s.phase = "lingering"
 	}
 	if quiet && (s.phase == "thinking" || s.phase == "replying" || s.phase == "lingering") {
 		// A screen command: the screen it asked for is the answer, not the words.
 		s.phase, s.heard, s.reply = "idle", "", ""
+	}
+	if equalizerOn() && (s.phase == "listening" || s.phase == "thinking" || s.phase == "replying" || s.phase == "lingering") {
+		s.eq = eqFor(s.phase, inNight(now), now)
+		s.eq.wave = waveOn()
 	}
 	s.muted, _ = mute.Get().Muted()
 	// A stream this player is carrying is the room's when it is what is being heard: the face names it,
@@ -1094,10 +1174,19 @@ func (d *Display) frame() time.Duration {
 	}
 	s.call = phone.Get().State()
 	s.weather = home.Get().Weather()
+	s.style = styleFactsFor(clockStyle(), now)
 	s.camera, s.showCamera = home.Get().Camera()
+	s.cameraSound, s.cameraSoundLive = home.Get().CameraSoundOn(), home.Get().CameraSoundLive()
 	s.cameraLive = camera.Get().Running()
 	bt := btaudio.Get().State()
 	s.btPairing = bt.Pairing
+	if s.menuOpen {
+		// The dial's line under the calendar, and the calendar face itself.
+		if src := home.Get().CalendarSources(); len(src) > 0 {
+			s.calToday, s.calNext = comingUp(now, 2)
+			s.calOrder = src
+		}
+	}
 	if s.menuOpen && s.menuMode == modeWeather {
 		s.forecast = home.Get().Forecast()
 		// Asked for while the weather is up, so the rain map is ready when it is turned to.
@@ -1139,14 +1228,23 @@ func (d *Display) frame() time.Duration {
 	d.mu.Lock()
 	s.reminderScroll = d.reminderScroll
 	d.mu.Unlock()
+	d.alertSceneSpot(&s, now)
 	s.missed = missedNote(now, true)
 
 	if boring {
+		s.sunrise, s.sunriseFace = sunriseProgress(now), config.Get().Alarms.SunriseFace
+		// The weather art only where it will be seen: not under the night clock or the light before an
+		// alarm, which take the whole screen, where composing it each second is work for nothing.
+		artSeen := s.sunrise == 0
 		s.slideshow = home.Get().SlideshowBackground()
+		if home.Get().SlideshowMode() == config.SlideshowBackground && artSeen {
+			if art, fx := sceneArt(now, side, side); art != nil {
+				s.slideshow, s.artFx = art, fx
+			}
+		}
 		if s.slideshow == nil {
 			s.slideshowTrouble = home.Get().SlideshowTrouble()
 		}
-		s.sunrise, s.sunriseFace = sunriseProgress(now), config.Get().Alarms.SunriseFace
 	}
 	d.mu.Lock()
 	if !boring {
@@ -1158,6 +1256,11 @@ func (d *Display) frame() time.Duration {
 	d.mu.Unlock()
 	if boring && !idleSince.IsZero() && now.Sub(idleSince) >= home.Get().SlideshowIdleTimeout() {
 		s.slideshowScreensaver = home.Get().SlideshowScreensaverPhoto()
+		if home.Get().SlideshowMode() == config.SlideshowScreensaver && s.sunrise == 0 {
+			if art, fx := sceneArt(now, side, side); art != nil {
+				s.slideshowScreensaver, s.artFx = art, fx
+			}
+		}
 		s.slideshowOverlay = home.Get().SlideshowOverlay()
 	}
 
@@ -1203,6 +1306,15 @@ func (d *Display) frame() time.Duration {
 		return dialFrame // a finger dragging the page is followed smoothly
 	case s.showDash && !s.menuOpen:
 		return time.Second // what arrives for it wakes the loop itself
+	case d.r.artDrawn:
+		return artFxFrame // rain or snow is falling over the weather art on the screen
+	case s.eq != nil && !s.showVolume && !s.menuOpen && !s.sheetOpen && !s.showCamera && s.call.Phase == phone.Idle &&
+		!s.ringing.any() && !s.setupAsking && !s.announceRecording && !s.showReminder && !s.showAnnouncement &&
+		!s.showAlert && !(s.phase == "lingering" && s.eq.quiet):
+		if s.eq.wave {
+			return waveFrame
+		}
+		return eqFrame // the bars are moving
 	case s.phase == "listening" || s.phase == "thinking" || s.phase == "replying" || s.showVolume || s.menuOpen || s.btPairing || s.call.Phase != phone.Idle || s.ringing.any():
 		return activeFrame
 	default:
@@ -1235,3 +1347,40 @@ func (d *Display) Screenshot() *image.RGBA {
 // Spot's night only dims, and its hours are not in Home Assistant.
 func (d *Display) setAtNight(int)     {}
 func (d *Display) nightHoursChanged() {}
+
+// The clock's position and the date's color are the Show's (clock_layout.go): the Spot's round face
+// has neither.
+func clockLayoutRows() []settingRow                        { return nil }
+func clockLayoutPicker(string) (pickerView, bool)          { return pickerView{}, false }
+func (d *Display) chooseClockLayout(id string, i int) bool { return false }
+
+// nightLeftToHA does nothing on the Spot, which has no Night mode switch (hasNightSwitch).
+func (d *Display) nightLeftToHA()    {}
+func (d *Display) setNightStyle(int) {}
+
+// popupSettingsChanged: the Spot has no event pop-ups yet.
+func (d *Display) popupSettingsChanged() {}
+
+// showPageSpot is the voice assistant putting a face up (feature/assistant): the forecast or the rain
+// map once the answer has been said, as a question about the weather does, or the calendar.
+func (d *Display) showPageSpot(page string) bool {
+	switch page {
+	case "weather", "radar":
+		d.mu.Lock()
+		d.weatherArmed, d.radar = true, page == "radar"
+		d.mu.Unlock()
+		d.wake()
+		return true
+	case "calendar":
+		if len(home.Get().CalendarSources()) == 0 {
+			return false
+		}
+		d.locked(func() {
+			d.openMenu(modeCalendar, "")
+			d.calUntil = time.Now().Add(calendarIdle)
+		})
+		d.wake()
+		return true
+	}
+	return false
+}

@@ -9,6 +9,7 @@ import (
 	"image/draw"
 	"log/slog"
 	"math"
+	"sync"
 	"time"
 
 	"golang.org/x/image/font"
@@ -27,6 +28,7 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/feature/remind"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/security"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/timer"
+	"github.com/HuskerMinion/techo5/echod/internal/lib/hass"
 )
 
 // The palette (walnut ground, amber accent, cream text, dim text, ember rules) is in sheet_widgets.go,
@@ -38,13 +40,17 @@ var shade = color.RGBA{0x00, 0x00, 0x00, 0x90}
 // scene is one frame's worth of facts.
 type scene struct {
 	now     time.Time
-	phase   string // idle, listening, thinking, replying, lingering
+	phase   string  // idle, listening, thinking, replying, lingering
+	eq      *eqView // a turn's bars, when turns are drawn as the equalizer
 	heard   string
 	reply   string
 	since   time.Time
 	playing bool
 	paused  bool
 	muted   bool
+
+	// glance is the glance strip's chips (feature/home/glance.go), drawn at the foot of the clock page.
+	glance []home.Chip
 
 	// volume is shown while it moves: the step out of media.VolumeSteps.
 	volume     int
@@ -108,13 +114,38 @@ type scene struct {
 	drawerPick   string
 	pickScroll   int
 
+	// popup is an event popped up over the screen (calendar_popup.go).
+	popup *hass.Event
+
+	// showCalendar is the calendar page, cal what it shows (render_calendar.go).
+	showCalendar bool
+
+	// alerts are the weather alerts at home and nearby (the clock's badge, the rain map's pills and
+	// outlines); showAlert is the alert page, on alertIdx of them, scrolled alertScroll lines (alerts.go).
+	alerts      home.AlertView
+	showAlert   bool
+	alertIdx    int
+	alertScroll int
+	cal         calendarView
+
+	// redClock is the night light as the red clock alone, in redStyle (render_night.go).
+	redClock bool
+	redStyle string
+
 	// demo puts placeholders in for the owner's details, for screenshots that will be published.
 	demo bool
 
 	// showCamera is a live camera view, over everything but the sheet; cameras feeds the drawer.
 	showCamera bool
 	camera     home.CameraView
-	cameras    []config.Camera
+
+	// cameraSound is whether that view has a sound of its own at all, which is when its control is drawn;
+	// cameraSoundLive is whether that sound is playing or on its way, which is what the control says: Mute
+	// while it is, and Unmute when it is not. Drawn for both, because a sound that is not playing has to
+	// be askable-for from the screen — muting it must not be a door that only closes.
+	cameraSound     bool
+	cameraSoundLive bool
+	cameras         []config.Camera
 
 	// callees are who the drawer's Call tab offers; callButton is the clock's Call button showing.
 	callees    []phone.Callee
@@ -169,12 +200,60 @@ type scene struct {
 	// is drawn with a face on it.
 	sunrise     float64
 	sunriseFace bool
+
+	// style is what the clock style in force shows beyond the time (clock_style.go).
+	style styleFacts
+
+	// artFx is the weather moving over the weather art, when the slideshow shows it (weather_art.go).
+	artFx skyFx
 }
 
 // renderer draws scenes onto one canvas. Faces are made once: parsing a font is cheap, but
 // building a face at each size is not something to do per frame.
 type renderer struct {
 	paint // the canvas, its size, and the settings screen's tap zones
+
+	// flip is the flip clock's cards, at night or as a day style: what they show, and a flip under
+	// way; ink is what the LED and flip clocks are drawn in for the frame in hand.
+	flip flipState
+	ink  clockInk
+
+	// styleFaces are the clock styles' faces, made as they are first needed (render_styles.go).
+	styleFaces map[styleFaceKey]font.Face
+
+	// washed is the weather art with its wash on, kept for the frames drawn in the same second;
+	// artDrawn is weather moving over the art in the frame last drawn, which wants the next one soon.
+	washed   washedArt
+	artDrawn bool
+
+	// wb is the wave turn screen's working memory, made the first time it is drawn.
+	wb *waveBuf
+
+	// weatherAt is where the home screen's weather was drawn in the frame last drawn, for a tap there
+	// to open the forecast; empty when it was not drawn. Written while drawing, read by the touch
+	// goroutine, so under its own lock.
+	weatherMu sync.Mutex
+	weatherAt image.Rectangle
+
+	// cameraSoundAt is where the camera page's sound control was drawn in the frame last drawn, for a
+	// tap there to silence the sound rather than take the view down; empty when there was no control to
+	// draw. Under the same lock and for the same reason as weatherAt.
+	cameraSoundAt image.Rectangle
+
+	// badgeAt, pillsAt and pillsIdx are where the alert badge and the rain map's alert pills were drawn
+	// in the frame last drawn, and the alert each pill opens, for a tap there.
+	alertMu  sync.Mutex
+	badgeAt  image.Rectangle
+	pillsAt  []image.Rectangle
+	pillsIdx []int
+	alertMax int             // how far the alert page could scroll in the frame last drawn
+	shapes   alertOverlay    // the alert shapes drawn over the rain map, kept while they stay the same
+	dateAt   image.Rectangle // the date under the clock, the same way: a tap there opens the calendar
+	popupAt  image.Rectangle // an event's pop-up, the same way: a tap on it takes it down
+
+	// calHits are the calendar page's buttons, days and events as last drawn (render_calendar.go).
+	calMu   sync.Mutex
+	calHits []calHit
 
 	// weatherKept is the forecast page as last drawn, and weatherKey what it showed: while the sky
 	// moves the page is drawn twelve times a second, and the page itself changes once a minute.
@@ -188,6 +267,7 @@ type renderer struct {
 	body   font.Face // transcript and reply
 	small  font.Face // date, corner clock, footer
 	tiny   font.Face
+	micro  font.Face // an event's words on a day of the month
 	margin int
 
 	// base keeps the settings screen's unchanging part.
@@ -267,6 +347,7 @@ func newRenderer(dst *image.RGBA) *renderer {
 	r.body = face(regular, 42)
 	r.small = face(regular, 34)
 	r.tiny = face(regular, 26)
+	r.micro = face(regular, 18)
 	if r.scaled() {
 		fc := sheetFacesAt(r.s)
 		r.fc = &fc
@@ -277,6 +358,23 @@ func newRenderer(dst *image.RGBA) *renderer {
 // draw composes a whole frame. Everything is repainted: the canvas is small and a full paint is
 // simpler than tracking what changed.
 func (r *renderer) draw(s scene) {
+	if !s.showRadar {
+		r.shapes = alertOverlay{} // the alert shapes' picture is the page's size: kept only while the rain map is up
+	}
+	r.artDrawn = false
+	r.setWeatherAt(image.Rectangle{})
+	r.setDateAt(image.Rectangle{})
+	r.setPopupAt(image.Rectangle{})
+	r.clearAlertTaps()
+	// The red night clock is the whole screen: nothing else, not even the header, is drawn over it,
+	// and it stays up while an alarm or a timer rings (a tap on it stops the ring). A call has lifted
+	// the night light and takes the screen; a turn, a camera, an announcement or a reminder is shown in
+	// its place at the night light's level.
+	if s.redClock && s.phase == "idle" && s.call.Phase == phone.Idle && !s.setupAsking &&
+		!s.showWifi && !s.bt.Pairing && !s.showCamera && !s.showAnnouncement && !s.showReminder {
+		r.redClockPage(s)
+		return
+	}
 	draw.Draw(r.dst, r.dst.Rect, image.NewUniform(walnut), image.Point{}, draw.Src)
 
 	// Registered first so it runs last: the header goes over every page, including the ones below
@@ -325,6 +423,8 @@ func (r *renderer) draw(s scene) {
 		// announcement can both be up at once.
 		if s.showReminder {
 			r.reminderCard(s)
+		} else if s.popup != nil {
+			r.popupCard(s, *s.popup)
 		}
 	}()
 
@@ -337,6 +437,20 @@ func (r *renderer) draw(s scene) {
 	}
 	if s.showCamera {
 		r.cameraView(s, s.camera)
+		if s.showVolume {
+			r.volumeBar(s)
+		}
+		return
+	}
+	if s.showAlert {
+		r.alertPage(s)
+		if s.showVolume {
+			r.volumeBar(s)
+		}
+		return
+	}
+	if s.showCalendar {
+		r.calendarPage(s)
 		if s.showVolume {
 			r.volumeBar(s)
 		}
@@ -367,6 +481,18 @@ func (r *renderer) draw(s scene) {
 		return
 	}
 
+	if s.eq != nil {
+		if s.eq.wave {
+			r.wave(s)
+		} else {
+			r.equalizer(s)
+		}
+		if s.showVolume {
+			r.volumeBar(s)
+		}
+		return
+	}
+
 	var behind *image.RGBA // the photo behind the idle page, when it has one
 	switch s.phase {
 	case "listening":
@@ -389,6 +515,7 @@ func (r *renderer) draw(s scene) {
 		} else {
 			if s.slideshow != nil {
 				r.slideshowBackground(s.slideshow)
+				r.artWeather(s)
 				behind = s.slideshow
 			}
 			r.readableOver(behind, walnut, slideshowWash, func() { r.bigClock(s) })
@@ -428,38 +555,85 @@ func (r *renderer) volumeBar(s scene) {
 // timeAndDate draws the hour, AM/PM and date centered, with the hour's baseline at base and an
 // optional suffix appended to the date line (an alarm note, on the ordinary idle page). Shared by
 // bigClock and the screensaver's normal-size overlay, which wants the clock alone.
-func (r *renderer) timeAndDate(now time.Time, base int, dateSuffix string) {
+func (r *renderer) timeAndDate(now time.Time, base int, dateSuffix string) image.Rectangle {
+	return r.timeAndDateAt(now, base, dateSuffix, 0, 0)
+}
+
+// timeAndDateAt is timeAndDate lined up across as align says: -1 against left (a left edge), 0
+// centered, 1 against the right margin. Off center it is the compact clock, for a corner: the time at
+// the size of the weather's reading, the date close under it.
+func (r *renderer) timeAndDateAt(now time.Time, base int, dateSuffix string, align, left int) image.Rectangle {
+	clock, ampmFace, dateGap := r.clock, r.ampm, r.s(70)
+	if align != 0 {
+		clock, ampmFace, dateGap = r.big, r.small, r.s(48)
+	}
 	hour := clockHM(now)
 	ampm := clockSuffix(now)
-	hw := r.width(r.clock, hour)
-	aw := r.width(r.ampm, ampm)
+	hw := r.width(clock, hour)
+	aw := r.width(ampmFace, ampm)
 	gap := r.s(18)
+	if align != 0 {
+		gap = r.s(10)
+	}
 	if ampm == "" {
 		gap = 0
 	}
-	x := (r.w - hw - gap - aw) / 2
-	r.text(r.clock, hour, x, base, cream)
-	r.text(r.ampm, ampm, x+hw+gap, base, amber)
+	across := func(w int) int {
+		switch {
+		case align < 0:
+			return left
+		case align > 0:
+			return r.w - r.margin - w
+		}
+		return (r.w - w) / 2
+	}
+	x := across(hw + gap + aw)
+	r.text(clock, hour, x, base, cream)
+	r.text(ampmFace, ampm, x+hw+gap, base, dateColor(amber)) // a chosen date color takes the AM/PM with it
 
 	date := now.Format("Monday, January 2") + dateSuffix
-	r.text(r.small, date, (r.w-r.width(r.small, date))/2, base+r.s(70), dim)
+	x = across(r.width(r.small, date))
+	r.text(r.small, date, x, base+dateGap, dateColor(dim))
+	return image.Rect(x, base+dateGap-r.s(30), x+r.width(r.small, date), base+dateGap+r.s(10))
 }
 
 // bigClock is the idle screen: the time across the middle, the date beneath, and under that the running
 // timers. With timers the clock moves up to make room. The next alarm, when it is within a day, follows
 // the date.
 func (r *renderer) bigClock(s scene) {
-	base := r.h/2 + r.s(60)
+	// The Sun without sunrise and sunset yet is the classic face, drawn as the classic face is.
+	if style := s.style.style(); style != styleClassic && !(style == styleSun && !s.style.sunOK) {
+		r.styledClock(s, style)
+		return
+	}
+	align, foot := clockAlign()
+	base, timersAt := r.h/2+r.s(60), r.s(128)
+	if foot {
+		// The compact clock in a corner at the foot, the date clear of the footer's line.
+		base, timersAt = r.h-r.s(106), r.s(96)
+	}
 	timers := false
 	for _, t := range s.timers {
 		timers = timers || t.Active
 	}
 	if timers {
 		base -= r.s(36)
+		if foot {
+			base -= r.s(20) // the timers' line goes under the date, and has to stay on the screen
+		}
 	}
 	if s.strip {
 		// The music strip takes the foot of the panel; the clock and date move up out of its way.
 		base -= r.s(30)
+	}
+	// The glance strip takes the foot too, when there is news and nothing else is using it: a running
+	// timer is news enough on its own, and the music strip is where the hand already is.
+	glance := len(s.glance) > 0 && !timers && !s.strip
+	if glance {
+		base -= r.s(30)
+		if foot {
+			base -= r.s(26) // at the foot the date sits where the strip goes: it moves up clear of it
+		}
 	}
 
 	suffix := ""
@@ -470,12 +644,22 @@ func (r *renderer) bigClock(s scene) {
 		}
 		suffix = "  ·  " + what + " " + clockText(next.At)
 	}
-	r.timeAndDate(s.now, base, suffix)
+	// A tap on the date opens the calendar, with a finger's room around it.
+	// Bottom left keeps clear of the Call button, when it is on the clock.
+	left := r.margin
+	if s.callButton && foot && align < 0 {
+		left = r.callButtonRect().Max.X + r.s(24)
+	}
+	r.setDateAt(r.timeAndDateAt(s.now, base, suffix, align, left).Inset(-r.s(16)))
 	if timers {
-		r.timersLine(s, base+r.s(128))
+		r.timersLine(s, base+timersAt)
+	}
+	if glance {
+		r.glanceStrip(s.glance, s.callButton)
 	}
 
 	r.weatherCorner(s)
+	r.alertBadge(s)
 }
 
 // weatherCorner is the weather where it has always been, top left, with the drawing of it that the
@@ -500,6 +684,47 @@ func (r *renderer) weatherCorner(s scene) {
 		x += weatherMark + 14
 	}
 	r.text(r.small, line, x, r.margin+26, dim)
+	// A tap on it opens the forecast: the icon and the words, with a finger's room around them.
+	r.setWeatherAt(image.Rect(r.margin, r.margin+15-weatherMark/2, x+r.width(r.small, line), r.margin+15+weatherMark/2).Inset(-r.s(14)))
+}
+
+func (r *renderer) setDateAt(b image.Rectangle) {
+	r.weatherMu.Lock()
+	r.dateAt = b
+	r.weatherMu.Unlock()
+}
+
+// dateTapped is whether a tap at p landed on the date under the home screen's clock, as last drawn.
+func (r *renderer) dateTapped(p image.Point) bool {
+	r.weatherMu.Lock()
+	defer r.weatherMu.Unlock()
+	return !r.dateAt.Empty() && p.In(r.dateAt)
+}
+
+func (r *renderer) setWeatherAt(b image.Rectangle) {
+	r.weatherMu.Lock()
+	r.weatherAt = b
+	r.weatherMu.Unlock()
+}
+
+// weatherTapped is whether a tap at p landed on the home screen's weather, as last drawn.
+func (r *renderer) weatherTapped(p image.Point) bool {
+	r.weatherMu.Lock()
+	defer r.weatherMu.Unlock()
+	return !r.weatherAt.Empty() && p.In(r.weatherAt)
+}
+
+func (r *renderer) setCameraSoundAt(b image.Rectangle) {
+	r.weatherMu.Lock()
+	r.cameraSoundAt = b
+	r.weatherMu.Unlock()
+}
+
+// cameraSoundTapped is whether a tap at p landed on the camera page's sound control, as last drawn.
+func (r *renderer) cameraSoundTapped(p image.Point) bool {
+	r.weatherMu.Lock()
+	defer r.weatherMu.Unlock()
+	return !r.cameraSoundAt.Empty() && p.In(r.cameraSoundAt)
 }
 
 // weatherMark is how big the corner's icon is: the height of the line it sits beside, so it reads as

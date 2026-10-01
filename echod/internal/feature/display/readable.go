@@ -62,6 +62,12 @@ const (
 // and still sits with the cream time and the amber AM/PM.
 var photoGold = color.RGBA{0xE8, 0xC0, 0x4E, 0xff}
 
+// chosenColor is a color somebody picked, like the date's: text over a photo keeps it rather than turning
+// photoGold, since the choice was made knowing what is behind it.
+type chosenColor color.RGBA
+
+func (c chosenColor) RGBA() (r, g, b, a uint32) { return color.RGBA(c).RGBA() }
+
 // overPhoto is the state of drawing over a photo, kept on the paint between frames.
 type overPhoto struct {
 	photo  *image.RGBA // the picture behind the words being drawn, or nil
@@ -75,8 +81,9 @@ type overPhoto struct {
 	// shapes are the patches worked out for this picture, by where the words were: the clock redraws
 	// every second and its words move once a minute, so working a patch out is rare and laying one
 	// down is one blend. A new picture starts them over.
-	shapes map[string]*patchShape
-	shaped *image.RGBA
+	shapes    map[string]*patchShape
+	shaped    *image.RGBA
+	shapedGen uint64 // which weather art frame the shapes were measured on
 
 	// halos and falloffs are the parts that do not depend on the picture at all: each line's edge,
 	// and how each patch fades. A fade between two pictures, a new picture every frame, reuses them.
@@ -199,8 +206,11 @@ func (p *paint) shape(wash uint8) *patchShape {
 	groups := merged(o.boxes)
 	var key strings.Builder
 	fmt.Fprint(&key, wash, o.ground, p.dst.Rect, groups)
-	if o.shaped != o.photo || len(o.shapes) >= shapesKept {
-		o.shapes, o.shaped = map[string]*patchShape{}, o.photo
+	// The weather art is one picture whose clouds move each second: a frame composed since the shapes
+	// were measured is a different picture under the words, though it is the same image.
+	gen, _ := artVersion(o.photo)
+	if o.shaped != o.photo || o.shapedGen != gen || len(o.shapes) >= shapesKept {
+		o.shapes, o.shaped, o.shapedGen = map[string]*patchShape{}, o.photo, gen
 	}
 	if sh, ok := o.shapes[key.String()]; ok {
 		return sh

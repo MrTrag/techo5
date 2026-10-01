@@ -14,7 +14,8 @@ Android, with one Go daemon, `echod`, doing everything the device does:
   sounds for a wake word, muting and a finished timer are the defaults, and TECHO5's own notes are a
   choice (the Wake sound setting, and Home Assistant sounds under Sound & Voice).
 - **Screen**: clock and weather, the conversation as it happens, a now-playing page with song and
-  artwork, a forecast page and a rain radar map, live views of Home Assistant cameras and of the Show's own camera, and
+  artwork, a forecast page and a rain radar map, live views of Home Assistant cameras — the camera's own sound plays over the music, with a Mute
+  control on the view — and of the Show's own camera, and
   a swipe-down settings screen with its categories down the left (Display, Sound, Alarms,
   Connections, Privacy, General) and each one's settings on a card beside them, a drawer in from the
   right edge with Cameras and Radio, and Wi-Fi setup with an on-screen keyboard. A first-run card
@@ -29,8 +30,18 @@ Android, with one Go daemon, `echod`, doing everything the device does:
   Home Assistant has none, the first weather entity it lists; any other
   weather entity is chosen on the settings screen (General, Weather), with the "Weather source"
   select, or with the `home_weather` action, and stays chosen. The forecast page (after a weather
-  question, or Show beside Weather) has a Radar button: RainViewer's radar over an OpenStreetMap map centered on
-  Home Assistant's home zone, the last hour as a loop. "Show the radar" asks for it directly.
+  question, or Show beside Weather) has a Radar button: the rain map centered on Home Assistant's home
+  zone, the last hour as a loop, over NASA's Blue Marble with a GOES satellite's clouds and the towns
+  named. The radar comes from the National Weather Service in the lower 48 and RainViewer anywhere
+  else; the "Radar source" setting (settings screen, or the `radar_source` select) can pick either
+  always. "Show the radar" asks for it directly.
+- **Weather alerts** (U.S.): the National Weather Service's alerts in force at home put a badge on the
+  clock (a pill on the Spot) and pills over the rain map, with the alerts' storm polygons and counties
+  outlined on it; a tap opens the alert's whole text, swiped sideways to the next. On unless turned off
+  ("Weather alerts" on the settings screen, or the `weather_alerts` switch). They are a convenience,
+  not an alert device: they are checked every few minutes while the screen is drawing, make no sound,
+  and a device that is off, offline or dark at night can miss one. For warnings that must wake you,
+  keep a NOAA Weather Radio or your phone's emergency alerts.
 - **Radio**: the drawer's Radio side lists the stations, with a choice of list at the top. Favorites are the stations wired with
   `home_radio` (Home Assistant `input_select` lists played through a script). With a Home Assistant
   token, Local stations (within 100 km of home) and Popular worldwide come from Home Assistant's

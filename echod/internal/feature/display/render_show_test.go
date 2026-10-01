@@ -143,6 +143,33 @@ func TestShowScenesDraw(t *testing.T) {
 				alarm: config.Alarm{ID: "a", Hour: 6, Minute: 45, Days: config.DaysWeekdays, Label: "Wake up", Sunrise: 10, On: true}}},
 	}
 
+	// Weather alerts: the clock's badge, the page, a long one scrolled, and the pills over the rain map.
+	wind := home.Alert{ID: "a", Event: "Wind Advisory", Severity: "Moderate", Sender: "NWS Omaha/Valley NE",
+		Area: "Douglas; Sarpy; Cass", Ends: at.Add(20 * time.Hour), Color: home.AlertColor("Wind Advisory", ""), Here: true,
+		Description: "What: North winds 15 to 25 mph with gusts up to 45 mph.\nWhere: Douglas, Sarpy and Cass counties.\nWhen: Until 6 AM Sunday.\nImpacts: Gusty winds will blow around unsecured objects.",
+		Instruction: "Winds this strong can make driving difficult. Secure outdoor objects."}
+	storm := home.Alert{ID: "b", Event: "Severe Thunderstorm Warning", Severity: "Severe", Sender: "NWS Omaha/Valley NE",
+		Area: "Douglas", Ends: at.Add(40 * time.Minute), Color: home.AlertColor("Severe Thunderstorm Warning", ""), Here: true, Storm: true,
+		Description: "At 2:05 PM, a severe thunderstorm was located near Elkhorn, moving east at 30 mph.", Instruction: "Move to an interior room."}
+	alerts := home.AlertView{Here: []home.Alert{storm, wind}, Near: []home.Alert{storm, wind}}
+	scenes["clock-alert"] = scene{now: at, phase: "idle", weather: sky, alerts: alerts}
+	scenes["clock-alert-muted"] = scene{now: at, phase: "idle", weather: sky, alerts: alerts, muted: true}
+	later := wind
+	later.ID, later.Onset, later.Ends = "c", at.Add(26*time.Hour), at.Add(40*time.Hour)
+	scenes["alert-page-later"] = scene{now: at, phase: "idle", showAlert: true, alerts: home.AlertView{Here: []home.Alert{later}}}
+	many := home.AlertView{Here: []home.Alert{storm, wind,
+		{ID: "d", Event: "Flood Watch", Color: home.AlertColor("Flood Watch", ""), Here: true},
+		{ID: "e", Event: "Heat Advisory", Color: home.AlertColor("Heat Advisory", ""), Here: true},
+		{ID: "f", Event: "Air Quality Alert", Color: home.AlertColor("Air Quality Alert", ""), Here: true}}}
+	scenes["radar-alerts-many"] = scene{now: at, phase: "idle", showWeather: true, showRadar: true, alerts: many,
+		radar: home.RadarView{Frames: []home.RadarFrame{{Image: image.NewRGBA(image.Rect(0, 0, showWide, showHigh)), At: at}},
+			Home: image.Pt(showWide/2, showHigh/2)}}
+	scenes["alert-page"] = scene{now: at, phase: "idle", showAlert: true, alerts: alerts}
+	scenes["alert-page-2"] = scene{now: at, phase: "idle", showAlert: true, alertIdx: 1, alertScroll: 3, alerts: alerts}
+	scenes["radar-alerts"] = scene{now: at, phase: "idle", showWeather: true, showRadar: true, alerts: alerts,
+		radar: home.RadarView{Frames: []home.RadarFrame{{Image: image.NewRGBA(image.Rect(0, 0, showWide, showHigh)), At: at}},
+			Home: image.Pt(showWide/2, showHigh/2), Places: []home.RadarPlace{{Name: "Omaha", At: image.Pt(470, 250), Pop: 480000}}}}
+
 	// The light before an alarm, frame by frame: the same curve the panel follows, with the sun's
 	// face on, for looking at away from a device at six in the morning.
 	wake := at.Add(20 * time.Minute)
@@ -204,6 +231,68 @@ func TestFixedSizesScaleToTheShow8(t *testing.T) {
 		}
 		if got := show8.s(c.in); got != c.want {
 			t.Errorf("a Show 8 scaled %d to %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
+// The sound control is drawn and found in the same frame: what is drawn is what is tappable, and a
+// frame that does not draw it leaves nothing tappable behind. A control that moved while its tap
+// stayed where it was would silence nothing, or take the view down when somebody reached for the
+// sound.
+func TestTheCameraSoundControlIsWhereItIsDrawn(t *testing.T) {
+	at := time.Date(2026, 9, 16, 14, 7, 0, 0, time.Local)
+	img := image.NewRGBA(image.Rect(0, 0, 1280, 800))
+	r := newRenderer(img)
+	cam := scene{now: at, phase: "idle", showCamera: true,
+		camera: home.CameraView{Entity: "camera.deck", Name: "Deck"}}
+
+	r.draw(cam)
+	if r.cameraSoundTapped(image.Pt(r.w/2, r.h/2)) {
+		t.Fatal("a tap found a sound control where the page draws none")
+	}
+
+	// The widest the control ever says, so this is inside the box whatever it is carrying.
+	box := r.cameraSoundBox("Unmute")
+	centre := box.Min.Add(image.Pt(box.Dx()/2, box.Dy()/2))
+
+	cam.cameraSound, cam.cameraSoundLive = true, true
+	r.draw(cam)
+	if !r.cameraSoundTapped(centre) {
+		t.Fatalf("a tap on the sound control, at %v, was missed", centre)
+	}
+	if r.cameraSoundTapped(image.Pt(r.margin, r.h-11)) {
+		t.Fatal("a tap on the hint was taken for the sound control")
+	}
+
+	// Silenced, taken by an announcement, or never arrived: the control is still there, offering to ask
+	// for the sound again. Drawn only while it is playing, muting would be a door that only closes.
+	cam.cameraSoundLive = false
+	r.draw(cam)
+	if !r.cameraSoundTapped(centre) {
+		t.Fatal("a sound that is not playing lost its control, so it could not be asked for again")
+	}
+
+	cam.cameraSound = false
+	r.draw(cam)
+	if r.cameraSoundTapped(centre) {
+		t.Fatal("the control was left tappable for a view with no sound")
+	}
+}
+
+// The control is measured from the words it carries and the face they are drawn in rather than being a
+// fixed size: it has to hold "Unmute" on the panel the page is drawn for and on a wider one, and both to
+// be on the page at all.
+func TestTheCameraSoundControlFitsWhatItSays(t *testing.T) {
+	for _, size := range []image.Rectangle{image.Rect(0, 0, drawnFor, 600), image.Rect(0, 0, 1280, 800)} {
+		r := newRenderer(image.NewRGBA(size))
+		for _, label := range []string{"Mute", "Unmute"} {
+			b := r.cameraSoundBox(label)
+			if b.Dx() < r.width(r.tiny, label) {
+				t.Errorf("%dx%d: %q is %d wide in a box of %d", size.Dx(), size.Dy(), label, r.width(r.tiny, label), b.Dx())
+			}
+			if b.Max.X > r.w-r.margin || b.Min.Y < 0 || b.Max.Y > r.h {
+				t.Errorf("%dx%d: %q is drawn off the page at %v", size.Dx(), size.Dy(), label, b)
+			}
 		}
 	}
 }

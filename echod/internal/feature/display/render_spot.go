@@ -23,6 +23,7 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/feature/phone"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/remind"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/timer"
+	"github.com/HuskerMinion/techo5/echod/internal/lib/hass"
 )
 
 // The round panel: everything is laid out from its center, and nothing may sit where the circle
@@ -74,6 +75,7 @@ type roundScene struct {
 	now          time.Time
 	phase        string // idle, listening, thinking, replying, lingering
 	heard, reply string
+	eq           *eqView // a turn's picture, when turns are drawn as the wave or the bars
 	muted        bool
 	playing      bool
 	paused       bool
@@ -91,6 +93,11 @@ type roundScene struct {
 	weather  home.Weather
 	forecast forecastDays
 
+	// calToday and calNext are the calendar face's events (calendar_spot.go), calOrder the calendars
+	// shown, which gives each its color.
+	calToday, calNext []hass.Event
+	calOrder          []string
+
 	// nowPlaying is the idle face given to music; radio what it and the station list show;
 	// radioSel the list's row in the middle; radar the rain map, radarOn the weather face turned to it.
 	nowPlaying bool
@@ -102,6 +109,13 @@ type roundScene struct {
 	camera     home.CameraView
 	showCamera bool
 	cameraLive bool // the sensor is running
+
+	// cameraSound is whether that view has a sound of its own at all, which is when its control is drawn;
+	// cameraSoundLive is whether that sound is playing or on its way, which is what the control says: Mute
+	// while it is, and Unmute when it is not. Drawn for both, because a sound that is not playing has to
+	// be askable-for from the screen — muting it must not be a door that only closes.
+	cameraSound     bool
+	cameraSoundLive bool
 
 	btPairing bool
 
@@ -155,6 +169,13 @@ type roundScene struct {
 	reminderFrom   string
 	reminderScroll int
 
+	// alerts are the weather alerts at home and nearby (the clock's pill, the rain map's pill and
+	// shapes); showAlert is the alert face, on alertIdx of them, scrolled alertScroll lines.
+	alerts      home.AlertView
+	showAlert   bool
+	alertIdx    int
+	alertScroll int
+
 	// setupAsking is a browser waiting to be let into the setup page, said on the face so that a
 	// request for a press is never something only the browser knows about.
 	setupAsking bool
@@ -163,6 +184,12 @@ type roundScene struct {
 	// is drawn with a face on it.
 	sunrise     float64
 	sunriseFace bool
+
+	// style is what the clock style in force shows beyond the time (clock_style.go).
+	style styleFacts
+
+	// artFx is the weather moving over the weather art, when the slideshow shows it (weather_art.go).
+	artFx skyFx
 
 	// sheetOpen is the settings screen up, sheetGrid its six categories rather than one; sheet what
 	// it shows.
@@ -178,6 +205,25 @@ type roundRenderer struct {
 
 	// reminderMax is how far a reminder's words could scroll in the frame last drawn; under zmu.
 	reminderMax int
+	// alertPillAt is where an alert pill was drawn in the frame last drawn, for a tap, and alertMax how
+	// far the alert face could scroll; under zmu. shapes are the alert shapes over the rain map.
+	alertPillAt image.Rectangle
+	alertMax    int
+	shapes      alertOverlay
+
+	wb *waveBuf // the wave turn screen's working memory, kept between frames
+
+	// cameraSoundAt is where the camera page's sound control was drawn in the frame last drawn, for a
+	// tap, under zmu; empty when there was no control to draw.
+	cameraSoundAt image.Rectangle
+
+	// styleFaces are the clock styles' faces, made as they are first needed (render_styles_spot.go).
+	styleFaces map[spotFaceKey]font.Face
+
+	// washed is the weather art with its wash on, kept for the frames drawn in the same second;
+	// artDrawn is weather moving over the art in the frame last drawn, which wants the next one soon.
+	washed   washedArt
+	artDrawn bool
 }
 
 func newRoundRenderer(dst *image.RGBA) *roundRenderer {
@@ -208,8 +254,13 @@ func newRoundRenderer(dst *image.RGBA) *roundRenderer {
 }
 
 func (r *roundRenderer) draw(s roundScene) {
+	if !(s.menuOpen && s.menuMode == modeWeather && s.radarOn) {
+		r.shapes = alertOverlay{} // kept only while the rain map is up
+	}
 	draw.Draw(r.dst, r.dst.Rect, image.NewUniform(colBackground), image.Point{}, draw.Src)
-	r.callDrawn = false
+	r.callDrawn, r.artDrawn = false, false
+	r.clearAlertTaps()
+	r.clearCameraSoundTap()
 
 	// Muted is drawn last, over whatever the face turns out to be: see mutedRim.
 	defer func() {
@@ -248,6 +299,11 @@ func (r *roundRenderer) draw(s roundScene) {
 		r.announceFace(s)
 		return
 	}
+	// Under a camera: one shown by Home Assistant (a doorbell) comes up over an alert already up.
+	if s.showAlert && !s.showCamera {
+		r.alertFace(s)
+		return
+	}
 	if s.sheetOpen {
 		r.sheetFace(s)
 		return
@@ -259,6 +315,8 @@ func (r *roundRenderer) draw(s roundScene) {
 		r.rim(s) // the view clears the panel; the rim still says muted or listening
 	case s.showVolume:
 		r.volume(s)
+	case s.eq != nil:
+		r.turnFace(s)
 	case s.phase == "listening" || s.phase == "thinking" || s.phase == "replying" || s.phase == "lingering":
 		r.conversation(s)
 	case s.showDash:
@@ -276,6 +334,7 @@ func (r *roundRenderer) draw(s roundScene) {
 		}
 		if s.slideshow != nil {
 			r.slideshowBackground(s.slideshow)
+			r.artWeather(s)
 		}
 		r.readableOver(s.slideshow, colBackground, slideshowWash, func() { r.clockFace(s) })
 		if s.callButton && !s.menuOpen && s.phase == "idle" {
@@ -326,13 +385,25 @@ func (r *roundRenderer) rim(s roundScene) {
 		left := float64(t.Left) / float64(t.Total)
 		r.arc(rimIn, rimOut, 0, 2*math.Pi, colTrack)
 		r.arc(rimIn, rimOut, 0, 2*math.Pi*math.Min(math.Max(left, 0), 1), colTimer)
+	case s.style.style() == styleSun && s.style.sunOK && s.phase == "idle" && !s.nowPlaying && !s.showCamera && !s.showDash:
+		r.sunRim(s)
 	default:
 		r.arc(rimIn, rimOut, 0, 2*math.Pi, colTrack)
 	}
 }
 
 func (r *roundRenderer) clockFace(s roundScene) {
+	if style := s.style.style(); style != styleClassic {
+		r.styledClockFace(s, style)
+		return
+	}
+	r.classicClockFace(s)
+}
+
+// classicClockFace is the clock face as it has always been: the time, the date and the weather.
+func (r *roundRenderer) classicClockFace(s roundScene) {
 	now := s.now
+	r.alertPill(s.alerts.Here, clockPillY)
 	r.timeLine(now, 240)
 	r.centered(r.small, now.Format("Monday, January 2"), 290, colDim)
 

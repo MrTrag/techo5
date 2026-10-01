@@ -87,7 +87,7 @@ func (r *renderer) weatherPage(s scene) {
 			}
 		}
 	} else if len(days) == 0 {
-		msg := "No forecast yet: call the home_assistant action with a token"
+		msg := "No forecast yet: give the device a Home Assistant token, or set where it is on its setup page"
 		r.text(r.tiny, msg, r.w/2-r.s(20), r.s(200), dim)
 	}
 	r.weatherToggle("Radar")
@@ -142,11 +142,31 @@ func (r *renderer) radarPage(s scene) {
 	f := v.Frames[i]
 	draw.Draw(r.dst, r.dst.Bounds(), f.Image, image.Point{}, draw.Src)
 
+	// The weather alerts' shapes, under everything written over the map.
+	alertShapes(r.dst, v, s.alerts.Near, image.Point{}, 1, nil, &r.shapes)
+	pillY := r.margin + r.s(42) + r.s(10)
+	pills, _, _ := r.alertPills(s.alerts.Here, r.margin, pillY)
+
 	// Home: a ring in the accent with a dark edge, readable over rain and map alike.
 	h := v.Home
 	r.ring(h, r.s(9), walnut)
 	r.ring(h, r.s(7), amber)
 	r.ring(h, r.s(5), amber)
+
+	// The towns, where there is room: clear of the bands, the Forecast button and the home marker.
+	keep := []image.Rectangle{
+		image.Rect(0, 0, r.w, r.margin+r.s(42)),
+		image.Rect(0, r.h-r.s(34), r.w, r.h),
+		image.Rect(r.w-r.s(200), r.h-r.s(110), r.w, r.h),
+		image.Rect(h.X-r.s(12), h.Y-r.s(12), h.X+r.s(12), h.Y+r.s(12)),
+	}
+	keep = append(keep, pills...)
+	if v.Note != "" {
+		// The note's line over the credits, as wide as the note draws.
+		room := r.weatherButton().Min.X - r.s(12) - r.margin
+		keep = append(keep, image.Rect(0, r.h-r.s(62), r.margin+r.width(r.tiny, clipText(r, r.tiny, v.Note, room))+r.s(10), r.h-r.s(34)))
+	}
+	drawPlaces(r.dst, r.tiny, v.Places, keep, func(b image.Rectangle) bool { return b.In(r.dst.Bounds()) }, 14)
 
 	// The time of the frame, and the clock, on dark bands so they read over the map.
 	shade := func(rect image.Rectangle) {
@@ -159,10 +179,18 @@ func (r *renderer) radarPage(s scene) {
 	shade(image.Rect(0, 0, r.w, r.margin+r.s(42)))
 	r.text(r.small, label, r.margin, r.margin+r.s(26), amber)
 	r.cornerClock(s)
+	r.drawAlertPills(s.alerts.Here, r.margin, pillY)
 
-	credit := "Radar RainViewer  ·  Map © OpenStreetMap contributors"
+	credit := clipText(r, r.tiny, v.Credit, r.w-2*r.margin)
 	shade(image.Rect(0, r.h-r.s(34), r.w, r.h))
 	r.text(r.tiny, credit, r.margin, r.h-r.s(10), dim)
+	if v.Note != "" {
+		// Why the source is not the one chosen: a line of its own over the credits, clear of the button.
+		room := r.weatherButton().Min.X - r.s(12) - r.margin
+		note := clipText(r, r.tiny, v.Note, room)
+		shade(image.Rect(0, r.h-r.s(62), r.margin+r.width(r.tiny, note)+r.s(10), r.h-r.s(34)))
+		r.text(r.tiny, note, r.margin, r.h-r.s(40), amber)
+	}
 	r.weatherToggle("Forecast")
 }
 

@@ -162,6 +162,15 @@ func (f *Feature) buildSlideshowSelect() {
 		},
 		OnCommand: func(on bool) { f.SetSlideshowShuffle(on) },
 	}
+	f.slideshowArtSw = &esphome.Switch{
+		Base: esphome.Base{
+			ObjectID: "slideshow_weather_art",
+			Name:     "Weather art",
+			Icon:     "mdi:image-filter-hdr",
+			Category: esphome.CategoryConfig,
+		},
+		OnCommand: func(on bool) { f.SetSlideshowArt(on) },
+	}
 	f.slideshowSubfoldersSw = &esphome.Switch{
 		Base: esphome.Base{
 			ObjectID: "slideshow_subfolders",
@@ -284,6 +293,22 @@ func (f *Feature) SetSlideshowShuffle(on bool) {
 	f.slideshowShuffleSw.Set(on)
 }
 
+// SetSlideshowArt shows weather art in place of the photos, or the photos again. Turned on with the
+// slideshow off, it comes on as the background, since weather art that is never shown is no answer.
+func (f *Feature) SetSlideshowArt(on bool) {
+	f.changeSlideshow(func(s *config.Slideshow) {
+		s.Art = on
+		if on && s.Mode != config.SlideshowBackground && s.Mode != config.SlideshowScreensaver {
+			s.Mode = config.SlideshowBackground
+		}
+	})
+	f.slideshowArtSw.Set(on)
+	f.slideshowSel.Set(slideshowLabelFor(config.Get().Home.Slideshow.Mode)) // it may have come on with it
+}
+
+// SlideshowArt is whether the slideshow shows weather art rather than photos.
+func (f *Feature) SlideshowArt() bool { return config.Get().Home.Slideshow.Art }
+
 // SetSlideshowSubfolders includes the photos in the source's subfolders, or only its own.
 func (f *Feature) SetSlideshowSubfolders(on bool) {
 	f.changeSlideshow(func(s *config.Slideshow) { s.TopOnly = !on })
@@ -357,7 +382,8 @@ func (f *Feature) slideshowLoop(ctx context.Context) {
 // access is set.
 func (f *Feature) advanceSlideshow() {
 	h := config.Get().Home.Slideshow
-	if (h.Mode != config.SlideshowBackground && h.Mode != config.SlideshowScreensaver) || h.Source == "" || !hass.Get().Ready() {
+	if (h.Mode != config.SlideshowBackground && h.Mode != config.SlideshowScreensaver) || h.Source == "" || h.Art ||
+		(h.Source != LocalPhotos && !hass.Get().Ready()) {
 		return
 	}
 	f.mu.Lock()
@@ -455,7 +481,7 @@ func (f *Feature) slideshowNothing(why string) {
 // is no photo. Empty while the slideshow is off, working, or still trying.
 func (f *Feature) SlideshowTrouble() string {
 	mode := config.Get().Home.Slideshow.Mode
-	if mode != config.SlideshowBackground && mode != config.SlideshowScreensaver {
+	if mode != config.SlideshowBackground && mode != config.SlideshowScreensaver || config.Get().Home.Slideshow.Art {
 		return ""
 	}
 	f.mu.Lock()
@@ -468,6 +494,9 @@ func (f *Feature) SlideshowTrouble() string {
 func slideshowFolderName(id string) string {
 	if id == "" {
 		return "None chosen"
+	}
+	if id == LocalPhotos {
+		return "On this device"
 	}
 	rest := strings.TrimRight(strings.TrimPrefix(id, "media-source://"), "/")
 	name := rest[strings.LastIndex(rest, "/")+1:]
@@ -483,6 +512,9 @@ func slideshowFolderName(id string) string {
 // gatherSlideshow lists the photos a slideshow shows: the source's own and, unless TopOnly, those of
 // every folder under it, over one connection and within slideshowMaxFolders and slideshowMaxPhotos.
 func gatherSlideshow(h config.Slideshow) ([]hass.Media, error) {
+	if h.Source == LocalPhotos {
+		return localPhotos(), nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	folders := slideshowMaxFolders
@@ -525,11 +557,17 @@ func isPhoto(m hass.Media) bool {
 
 // fetchSlideshowImage resolves, fetches and crops one photo to the panel, full-bleed.
 func fetchSlideshowImage(id string) (*image.RGBA, error) {
-	r, err := hass.Get().ResolveMedia(context.Background(), id)
-	if err != nil {
-		return nil, err
+	var b []byte
+	var err error
+	if strings.HasPrefix(id, localPhotoPrefix) {
+		b, err = localPhoto(id)
+	} else {
+		var r hass.Resolved
+		r, err = hass.Get().ResolveMedia(context.Background(), id)
+		if err == nil {
+			b, err = hass.Get().FetchURL(r.URL)
+		}
 	}
-	b, err := hass.Get().FetchURL(r.URL)
 	if err != nil {
 		return nil, err
 	}
@@ -576,7 +614,7 @@ func (f *Feature) SlideshowIdleTimeout() time.Duration {
 
 // SlideshowBackground is the current photo for Background mode, nil off that mode.
 func (f *Feature) SlideshowBackground() *image.RGBA {
-	if config.Get().Home.Slideshow.Mode != config.SlideshowBackground {
+	if config.Get().Home.Slideshow.Mode != config.SlideshowBackground || config.Get().Home.Slideshow.Art {
 		return nil
 	}
 	return f.currentSlideshowPhoto()
@@ -584,7 +622,7 @@ func (f *Feature) SlideshowBackground() *image.RGBA {
 
 // SlideshowScreensaverPhoto is the current photo for Screensaver mode, nil off that mode.
 func (f *Feature) SlideshowScreensaverPhoto() *image.RGBA {
-	if config.Get().Home.Slideshow.Mode != config.SlideshowScreensaver {
+	if config.Get().Home.Slideshow.Mode != config.SlideshowScreensaver || config.Get().Home.Slideshow.Art {
 		return nil
 	}
 	return f.currentSlideshowPhoto()

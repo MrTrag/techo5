@@ -15,6 +15,14 @@ type Screen struct {
 	// a touch brings it up to its brightness for a while.
 	NightLight bool `json:"night_light,omitempty"`
 
+	// NightRed makes the night light a clock alone, in dim red on black, rather than the screen as it
+	// is. Only with NightLight.
+	NightRed bool `json:"night_red,omitempty"`
+
+	// NightClockStyle is how the red clock looks: empty for the ordinary clock face, "led" for an LED
+	// clock's seven segments, "flip" for a flip clock's cards.
+	NightClockStyle string `json:"night_clock_style,omitempty"`
+
 	// NightLightLevel is how bright the night light is, 1 to 10; none is the panel's own default.
 	NightLightLevel int `json:"night_light_level,omitempty"`
 
@@ -27,6 +35,38 @@ type Screen struct {
 
 	// Clock24 shows times on the screen as 15:04 instead of 3:04 PM.
 	Clock24 bool `json:"clock_24,omitempty"`
+
+	// CameraMinutes is how long a camera opened from the screen stays up: 0 for the default minute,
+	// -1 until it is tapped closed.
+	CameraMinutes int `json:"camera_minutes,omitempty"`
+
+	// AnswerSeconds is how long a voice turn's words stay on the screen after it ends: 0 for the
+	// default five seconds, -1 until they are tapped away.
+	AnswerSeconds int `json:"answer_seconds,omitempty"`
+
+	// ClockPosition is where the home screen's clock sits: empty for the center, "bottom-left" or
+	// "bottom-right"; DateColor the date's color, empty for the theme's (display/clock_layout.go).
+	ClockPosition string `json:"clock_position,omitempty"`
+	DateColor     string `json:"date_color,omitempty"`
+
+	// ClockStyle is how the home screen's clock looks all day: empty for the classic face, or "big",
+	// "flip", "led", "analog", "words", "sun" or "dashboard" (display/clock_style.go). The night clock
+	// keeps its own look.
+	ClockStyle string `json:"clock_style,omitempty"`
+
+	// NightByHA leaves the night to Home Assistant: the hours are not followed, and it is night only
+	// while the Night mode switch is on. Night keeps the hours, for choosing them again.
+	NightByHA bool `json:"night_by_ha,omitempty"`
+
+	// NightOverride is the Night mode switch turned "on" or "off" at NightOverrideAt (Unix seconds).
+	// With hours set it holds until they next start or end the night; with NightByHA it holds until
+	// the switch is turned again.
+	NightOverride   string `json:"night_override,omitempty"`
+	NightOverrideAt int64  `json:"night_override_at,omitempty"`
+
+	// TurnStyle is how a voice turn is drawn: empty for the classic title and words, "equalizer" for
+	// bars moving with the voice.
+	TurnStyle string `json:"turn_style,omitempty"`
 
 	// CallButton puts a Call button on the home screen, which opens the list of devices in the house
 	// and phone contacts to call. Off until somebody wants it, so an update changes nobody's screen.
@@ -91,6 +131,15 @@ func (w ScreenWriter) NightLight(v bool) error {
 	return w.st.Update(func(c *Config) { c.Screen.NightLight = v })
 }
 
+func (w ScreenWriter) NightClockStyle(v string) error {
+	return w.st.Update(func(c *Config) { c.Screen.NightClockStyle = v })
+}
+
+// AtNight sets both at once: the night light, and whether it is the red clock.
+func (w ScreenWriter) AtNight(light, red bool) error {
+	return w.st.Update(func(c *Config) { c.Screen.NightLight, c.Screen.NightRed = light, light && red })
+}
+
 func (w ScreenWriter) Night(v string) error {
 	return w.st.Update(func(c *Config) { c.Screen.Night = v })
 }
@@ -101,6 +150,39 @@ func (w ScreenWriter) Welcomed(v bool) error {
 
 func (w ScreenWriter) Clock24(v bool) error {
 	return w.st.Update(func(c *Config) { c.Screen.Clock24 = v })
+}
+
+func (w ScreenWriter) CameraMinutes(v int) error {
+	return w.st.Update(func(c *Config) { c.Screen.CameraMinutes = v })
+}
+
+func (w ScreenWriter) NightByHA(v bool) error {
+	return w.st.Update(func(c *Config) { c.Screen.NightByHA = v })
+}
+
+// NightOverride saves the Night mode switch: "on", "off", or "" to follow the hours again.
+func (w ScreenWriter) NightOverride(v string, at int64) error {
+	return w.st.Update(func(c *Config) { c.Screen.NightOverride, c.Screen.NightOverrideAt = v, at })
+}
+
+func (w ScreenWriter) ClockPosition(v string) error {
+	return w.st.Update(func(c *Config) { c.Screen.ClockPosition = v })
+}
+
+func (w ScreenWriter) ClockStyle(v string) error {
+	return w.st.Update(func(c *Config) { c.Screen.ClockStyle = v })
+}
+
+func (w ScreenWriter) DateColor(v string) error {
+	return w.st.Update(func(c *Config) { c.Screen.DateColor = v })
+}
+
+func (w ScreenWriter) AnswerSeconds(v int) error {
+	return w.st.Update(func(c *Config) { c.Screen.AnswerSeconds = v })
+}
+
+func (w ScreenWriter) TurnStyle(v string) error {
+	return w.st.Update(func(c *Config) { c.Screen.TurnStyle = v })
 }
 
 func (w ScreenWriter) WeatherStill(v bool) error {

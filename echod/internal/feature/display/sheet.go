@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/HuskerMinion/techo5/echod/internal/config"
@@ -68,17 +69,34 @@ func categoryRows(sv sheetView) (rows []settingRow, note string) {
 		rows := []settingRow{
 			{id: "brightness", label: "Brightness", kind: ctlStepper, value: fmt.Sprintf("%d%%", st.brightness)},
 			{id: "auto", label: "Auto-brightness", sub: "Follows the room's light", kind: ctlToggle, on: st.auto},
-			{id: "night", label: nightRowLabel, kind: ctlChoice, value: nightText(st.night)},
+			{id: "night", label: nightRowLabel, kind: ctlChoice, value: nightRowValue(st.night)},
 		}
 		if hasNightLight && st.night != "" {
-			rows = append(rows, settingRow{id: "atnight", label: "At night", sub: "Dark, or a faint glow until touched",
+			rows = append(rows, settingRow{id: "atnight", label: "At night", sub: "Dark, a faint glow, or a clock alone until touched",
 				kind: ctlChoice, value: atNightOptions[atNightIndex()]})
+			if atNightIndex() == 2 {
+				rows = append(rows, settingRow{id: "nightstyle", label: "Night clock", sub: "How the night clock looks",
+					kind: ctlChoice, value: nightStyleLabel()})
+			}
 		}
 		rows = append(rows, themeRows()...)
 		rows = append(rows,
+			clockStyleRow(),
 			settingRow{id: "clock", label: "Clock format", kind: ctlChoice, value: clockOptions[clockIndex()]},
+		)
+		rows = append(rows, clockLayoutRows()...)
+		rows = append(rows,
+			settingRow{id: "camtime", label: "Camera time", sub: "How long a camera opened here stays up", kind: ctlChoice, value: cameraTimes[cameraTimeIndex()].label},
+			settingRow{id: "answertime", label: "Answer time", sub: "How long an answer stays up; a tap clears it", kind: ctlChoice, value: answerTimes[answerTimeIndex()].label},
+		)
+		if hasEqualizer {
+			rows = append(rows, settingRow{id: "turnstyle", label: "Turn screen", sub: "Classic, or a wave or bars that move with the voice", kind: ctlChoice, value: turnStyles[turnStyleIndex()].label})
+		}
+		rows = append(rows,
 			settingRow{id: "callbutton", label: "Call button", sub: "On the home screen: devices and contacts", kind: ctlToggle, on: callButton.Load()},
 			settingRow{id: "weatherfx", label: "Weather animation", sub: "Rain, snow and storms move on the forecast", kind: ctlToggle, on: weatherAnimation.Load()},
+			settingRow{id: "radarsrc", label: "Radar source", sub: "Automatic uses the NWS in the lower 48", kind: ctlChoice, value: home.RadarSourceOptions()[home.RadarSourceIndex()]},
+			settingRow{id: "alerts", label: "Weather alerts", sub: "The NWS's alerts for home, in the U.S.", kind: ctlToggle, on: home.AlertsOn()},
 			settingRow{id: "musicstrip", label: "Now playing", sub: "Full page, or a strip over the clock", kind: ctlChoice, value: stripOptionText()},
 			settingRow{id: "slideshow", label: "Slideshow", sub: "Photos from Home Assistant", kind: ctlChoice, value: slideshowOptions[slideshowIndex()]},
 		)
@@ -101,6 +119,7 @@ func categoryRows(sv sheetView) (rows []settingRow, note string) {
 			{id: "sleep", label: "Sleep timer", sub: sleepSub(), kind: ctlChoice, value: sleepValue()},
 			{id: "quiet", label: "Quiet hours", sub: quietSub(), kind: ctlChoice, value: quietValue()},
 			{id: "hasounds", label: "Home Assistant sounds", sub: "For muting and timers", kind: ctlToggle, on: !config.Get().Speaker.ClassicSounds},
+			{id: "camerasound", label: "Camera sound", sub: "A camera's own audio, while its view is up", kind: ctlToggle, on: home.CameraSound()},
 			{id: "dnd", label: "Do not disturb", sub: "Intercom calls from other rooms are turned away", kind: ctlToggle, on: config.Get().Home.DoNotDisturb},
 			{id: "bass", label: "Bass", sub: toneSub(), kind: ctlStepper, value: toneValue(config.Get().Speaker.Bass)},
 			{id: "treble", label: "Treble", kind: ctlStepper, value: toneValue(config.Get().Speaker.Treble)},
@@ -176,16 +195,17 @@ func generalRows(sv sheetView) []settingRow {
 	if !st.restartArm.IsZero() && st.now.Sub(st.restartArm) < restartWindow {
 		restart.sub, restart.button = "Tap again to restart now", "Confirm"
 	}
-	return []settingRow{
-		{label: "Name", sub: "Change it on the setup page", kind: ctlValue, value: st.name},
-		{id: "weather", label: "Weather", sub: "Shown with the clock", kind: ctlChoice, value: st.weather, button: "Show"},
-		{id: "timezone", label: "Time zone", sub: zoneSub(), kind: ctlChoice, value: zoneValue()},
-		{id: "screenlang", label: "Screen language", sub: "What this screen listens for, not what the assistant speaks",
+	rows := []settingRow{{label: "Name", sub: "Change it on the setup page", kind: ctlValue, value: st.name}}
+	rows = append(rows, calendarRows()...)
+	return append(rows,
+		settingRow{id: "weather", label: "Weather", sub: "Shown with the clock", kind: ctlChoice, value: st.weather, button: "Show"},
+		settingRow{id: "timezone", label: "Time zone", sub: zoneSub(), kind: ctlChoice, value: zoneValue()},
+		settingRow{id: "screenlang", label: "Screen language", sub: "What this screen listens for, not what the assistant speaks",
 			kind: ctlChoice, value: langOptions[langIndex()]},
 		updates,
-		{label: "About", kind: ctlValue, value: deviceModel + " · slot " + st.slot},
+		settingRow{label: "About", kind: ctlValue, value: deviceModel + " · slot " + st.slot},
 		restart,
-	}
+	)
 }
 
 // connectionRows are the Connections card's: Wi-Fi, Bluetooth audio, and the Bluetooth proxy.
@@ -263,14 +283,45 @@ func slideshowIndex() int {
 	return 0
 }
 
-// nightText is a night window as the clock would say it: "10 PM – 6 AM", or "Never".
+// nightText is a night window as the clock would say it: "10 PM – 6 AM", "7 PM – 9:30 AM", or "Never".
+// nightByHARow is the night row's choice that leaves the night to Home Assistant's Night mode switch.
+const nightByHARow = "Controlled by Home Assistant"
+
+// nightRowValue is what the night row says: the hours, or that Home Assistant has the night.
+func nightRowValue(v string) string {
+	if hasNightSwitch && config.Get().Screen.NightByHA {
+		return nightByHARow
+	}
+	return nightText(v)
+}
+
 func nightText(v string) string {
 	from, to, ok := nightWindow(v)
 	if !ok {
 		return "Never"
 	}
-	return hourText(from) + " – " + hourText(to)
+	return minuteText(from) + " – " + minuteText(to)
 }
+
+// minuteText is minutes since midnight as the clock would say it: "10 PM" on the hour, "9:30 AM" off it.
+func minuteText(m int) string {
+	if m%60 == 0 {
+		return hourText(m / 60)
+	}
+	return clockTime(m/60, m%60)
+}
+
+// nightCustomRow is the night list's last choice: any start and end, picked hour then minutes.
+const nightCustomRow = "Custom…"
+
+// nightDraft holds the custom night's start while its end is being picked.
+var nightDraft struct {
+	sync.Mutex
+	fromHour, from, toHour int
+}
+
+// nightMinutes are the minutes a custom night can start or end on.
+var nightMinutes = []int{0, 15, 30, 45}
 
 func hourText(h int) string {
 	t := time.Date(2000, 1, 1, h, 0, 0, 0, time.UTC)
@@ -313,6 +364,8 @@ func pickerFor(id string, sv sheetView) (pickerView, bool) {
 		return p, true
 	case "atnight":
 		return pickerView{title: "At night", opts: atNightOptions, cur: atNightIndex()}, true
+	case "nightstyle":
+		return nightStylePicker()
 	case "night":
 		p := pickerView{title: nightRowLabel, cur: -1}
 		cur := sv.st.night
@@ -321,6 +374,38 @@ func pickerFor(id string, sv sheetView) (pickerView, bool) {
 			if n == cur {
 				p.cur = i
 			}
+		}
+		p.opts = append(p.opts, nightCustomRow)
+		if _, _, ok := nightWindow(cur); ok && p.cur < 0 {
+			p.cur = len(p.opts) - 1
+		}
+		if hasNightSwitch {
+			p.opts = append(p.opts, nightByHARow)
+			if config.Get().Screen.NightByHA {
+				p.cur = len(p.opts) - 1
+			}
+		}
+		return p, true
+	case "nightfromh", "nighttoh":
+		title := "Night starts"
+		if id == "nighttoh" {
+			title = "Night ends"
+		}
+		p := pickerView{title: title, cur: -1}
+		for h := 0; h < 24; h++ {
+			p.opts = append(p.opts, hourText(h))
+		}
+		return p, true
+	case "nightfromm", "nighttom":
+		nightDraft.Lock()
+		h, title := nightDraft.fromHour, "Night starts at"
+		if id == "nighttom" {
+			h, title = nightDraft.toHour, "Night ends at"
+		}
+		nightDraft.Unlock()
+		p := pickerView{title: title, cur: -1}
+		for _, m := range nightMinutes {
+			p.opts = append(p.opts, clockTime(h, m))
 		}
 		return p, true
 	case "wakeword":
@@ -370,6 +455,26 @@ func pickerFor(id string, sv sheetView) (pickerView, bool) {
 		return folderPicker(sv.st.folder, sv.st.demo), true
 	case "clock":
 		return pickerView{title: "Clock format", opts: clockOptions, cur: clockIndex()}, true
+	case "clockstyle":
+		return clockStylePicker()
+	case "clockpos", "datecolor":
+		return clockLayoutPicker(id)
+	case "camtime":
+		return pickerView{title: "Camera time", opts: cameraTimeOptions(), cur: cameraTimeIndex()}, true
+	case "answertime":
+		return pickerView{title: "Answer time", opts: answerTimeOptions(), cur: answerTimeIndex()}, true
+	case "turnstyle":
+		return pickerView{title: "Turn screen", opts: turnStyleOptions(), cur: turnStyleIndex()}, true
+	case "radarsrc":
+		return pickerView{title: "Radar source", opts: home.RadarSourceOptions(), cur: home.RadarSourceIndex()}, true
+	case "calendars":
+		return calendarsPicker(), true
+	case "calpopwhen":
+		return pickerView{title: "Pop up", opts: popupLeadLabels, cur: popupLeadIndex()}, true
+	case "calpopallday":
+		return pickerView{title: "All-day events", opts: popupAllDayOpts, cur: popupAllDayIndex()}, true
+	case "calpopcals":
+		return popupCalendarsPicker(), true
 	case "musicstrip":
 		return pickerView{title: "Now playing", opts: stripChoices(), cur: stripIndexShared()}, true
 	case "screenlang":
@@ -405,15 +510,67 @@ func (d *Display) choose(id string, i int) {
 	switch id {
 	case "atnight":
 		d.setAtNight(i)
+	case "nightstyle":
+		d.setNightStyle(i)
 	case "night":
 		if i < len(nightPresets) {
 			if err := config.Set().Screen().Night(nightPresets[i]); err != nil {
 				slog.Warn("saving the night setting failed", "err", err)
 			}
+			if err := config.Set().Screen().NightByHA(false); err != nil {
+				slog.Warn("saving the night setting failed", "err", err)
+			}
 			d.nightHoursChanged()
+		} else if i == len(nightPresets) {
+			if err := config.Set().Screen().NightByHA(false); err != nil {
+				slog.Warn("saving the night setting failed", "err", err)
+			}
+			d.openPicker("nightfromh")
+		} else if i == len(nightPresets)+1 && hasNightSwitch {
+			d.nightLeftToHA()
 		}
+	case "nightfromh", "nighttoh":
+		if i < 0 || i > 23 {
+			return
+		}
+		nightDraft.Lock()
+		next := "nightfromm"
+		if id == "nighttoh" {
+			nightDraft.toHour, next = i, "nighttom"
+		} else {
+			nightDraft.fromHour = i
+		}
+		nightDraft.Unlock()
+		d.openPicker(next)
+	case "nightfromm":
+		if i < 0 || i >= len(nightMinutes) {
+			return
+		}
+		nightDraft.Lock()
+		nightDraft.from = nightDraft.fromHour*60 + nightMinutes[i]
+		nightDraft.Unlock()
+		d.openPicker("nighttoh")
+	case "nighttom":
+		if i < 0 || i >= len(nightMinutes) {
+			return
+		}
+		nightDraft.Lock()
+		from, to := nightDraft.from, nightDraft.toHour*60+nightMinutes[i]
+		nightDraft.Unlock()
+		if from == to {
+			slog.Info("night hours: the start and the end are the same time; not changed")
+			return
+		}
+		if err := config.Set().Screen().Night(config.FormatWindow(from, to)); err != nil {
+			slog.Warn("saving the night setting failed", "err", err)
+		}
+		d.nightHoursChanged()
 	case "musicstrip":
 		d.setMusicStrip(i)
+	case "clockstyle":
+		d.setClockStyle(i)
+	case "clockpos", "datecolor":
+		d.chooseClockLayout(id, i)
 	case "clock":
 		on := i == 1
 		if err := config.Set().Screen().Clock24(on); err != nil {
@@ -421,6 +578,30 @@ func (d *Display) choose(id string, i int) {
 			return
 		}
 		setClock24(d.clock, on)
+	case "camtime":
+		setCameraTime(d.camTime, i)
+	case "answertime":
+		setAnswerTime(d.answerTime, i)
+	case "turnstyle":
+		setTurnStyle(d.turnStyleSel(), i)
+	case "radarsrc":
+		go home.Get().SetRadarSource(i)
+	case "calendars":
+		if toggleCalendar(i) {
+			d.openPicker("calendars") // stays open, for ticking another
+		}
+	case "calpopwhen":
+		if i >= 0 && i < len(popupLeads) {
+			_ = config.Set().Calendar().PopupLead(popupLeads[i])
+			d.popupSettingsChanged()
+		}
+	case "calpopallday":
+		_ = config.Set().Calendar().PopupAllDayNever(i == 1)
+		d.popupSettingsChanged()
+	case "calpopcals":
+		if choosePopupCalendar(i) {
+			d.openPicker("calpopcals")
+		}
 	case "wakeword":
 		if models := wake.Lib().Ours(); i < len(models) {
 			id := models[i].ID
@@ -551,6 +732,16 @@ func (d *Display) rowTap(id string, p part, opt int) {
 		d.setAuto(!on, true)
 	case "callbutton":
 		setCallButtonSaved(d.callBtn, !callButton.Load())
+	case "calpop":
+		_ = config.Set().Calendar().Popups(!config.Get().Calendar.Popups)
+		d.popupSettingsChanged()
+	case "calpopsound":
+		_ = config.Set().Calendar().PopupSilent(!config.Get().Calendar.PopupSilent)
+		d.popupSettingsChanged()
+	case "alerts":
+		home.Get().SetAlertsOn(!home.AlertsOn())
+	case "camerasound":
+		home.Get().SetCameraSound(!home.CameraSound())
 	case "weatherfx":
 		setWeatherAnimationSaved(d.weatherFx, !weatherAnimation.Load())
 	case "dnd":
@@ -672,10 +863,13 @@ func (d *Display) rowTap(id string, p part, opt int) {
 	case "shuffle":
 		_, shuffle, _ := home.Get().SlideshowSettings()
 		home.Get().SetSlideshowShuffle(!shuffle)
+	case "weatherart":
+		home.Get().SetSlideshowArt(!home.Get().SlideshowArt())
+		d.wake()
 	case "subfolders":
 		_, _, subfolders := home.Get().SlideshowSettings()
 		home.Get().SetSlideshowSubfolders(!subfolders)
-	case "night", "atnight", "clock", "musicstrip", "slideshow", "photoevery", "screenlang", "newtimer", "sleep", "sunrise",
+	case "night", "atnight", "nightstyle", "clock", "clockstyle", "clockpos", "datecolor", "camtime", "answertime", "turnstyle", "radarsrc", "calendars", "calpopwhen", "calpopallday", "calpopcals", "musicstrip", "slideshow", "photoevery", "screenlang", "newtimer", "sleep", "sunrise",
 		"timezone", "wakeword", "waketone":
 		d.openPicker(id)
 	}

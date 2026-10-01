@@ -38,9 +38,9 @@ Assistant voice satellite with a touch screen of its own.
 
 | Device | Model | Repository | Status |
 |---|---|---|---|
-| **Echo Show 5, 2nd gen** (2021, `cronos`) | AEOCN | this one | In daily use |
-| **Echo Show 5, 1st gen** (2019, `checkers`) | AEOCH | this one, same binary; hardware notes in [techo5-checkers](https://github.com/HuskerMinion/techo5-checkers) | Working, tested end to end on one unit |
-| **Echo Show 8, 1st gen** (2019, `crown`) | AEOCW | this one, same binary | Working on one unit, the newest port |
+| **Echo Show 5, 2nd gen** (2021, `cronos`) | C76N82 | this one | In daily use |
+| **Echo Show 5, 1st gen** (2019, `checkers`) | H23K37 | this one, same binary; hardware notes in [techo5-checkers](https://github.com/HuskerMinion/techo5-checkers) | Working, tested end to end on one unit |
+| **Echo Show 8, 1st gen** (2019, `crown`) | C7H6N3 | this one, same binary | Working on one unit, the newest port |
 | **Echo Spot, 1st gen** (2017, `rook`) | VN94DQ | [TECHO5 Spot](https://github.com/HuskerMinion/techo5-spot) | In daily use |
 | **Echo Dot, 2nd gen** (2016, `biscuit`) | RS03QR | [TECHO5 Dot](https://github.com/HuskerMinion/techo5-dot) | In daily use |
 
@@ -144,11 +144,11 @@ slot system, phone calls, and a minimal Alpine root filesystem in place of Andro
 |  |  |
 |---|---|
 | 🐧 **Real Linux, no Android** | The Show boots straight into a minimal Alpine Linux root filesystem. No Android framework, no Google services, no app store: one daemon drives the microphones, speaker, screen, camera and radios directly. |
-| 🚫 **No Alexa, no Amazon account, no Amazon cloud** | Your voice goes only to *your* Home Assistant, over its encrypted ESPHome API. The Show reaches the internet just for what you use: update checks against this repo, network time, radio streams with their song and cover lookups, and the rain radar map. Voice and control keep working with the internet down, as long as your Home Assistant pipeline is local. |
+| 🚫 **No Alexa, no Amazon account, no Amazon cloud** | Your voice goes only to *your* Home Assistant, over its encrypted ESPHome API. The Show reaches the internet just for what you use: update checks against this repo, network time, radio streams with their song and cover lookups, the rain radar map, and in the U.S. the National Weather Service's weather alerts. Voice and control keep working with the internet down, as long as your Home Assistant pipeline is local. |
 | 🎙️ **Wake word on the device** | microWakeWord runs locally: twelve wake words, "Alexa", "Okay Nabu", "Hey Jarvis", "Hey Mycroft", "Computer" and more, chosen on the screen or in Home Assistant. Echo cancellation keeps it listening over music. |
 | 🔐 **Secure by default** | SSH is keys-only and off until you turn it on; keys arrive only through Home Assistant. The camera and screen web pages start closed. No password logins, not even in rescue. |
 | 🔄 **Updates that can't brick it** | Releases install over the air from Home Assistant's update card into the spare of two root filesystem slots, boot on trial, and fall back on their own if the new one doesn't settle. |
-| 📺 **A screen that's actually useful** | Clock and weather, the conversation as it happens, now playing with song and cover art, your Home Assistant dashboards, forecasts and a live rain radar, live Home Assistant cameras, timers and alarms, Wi-Fi setup, 13 themes. |
+| 📺 **A screen that's actually useful** | Clock and weather, the conversation as it happens, a glance strip of chips from Home Assistant along the foot of the clock, now playing with song and cover art, your Home Assistant dashboards, forecasts, a live rain radar, the National Weather Service's alerts (in the U.S.), live Home Assistant cameras, timers and alarms, Wi-Fi setup, 13 themes. |
 | 📻 **Weather and radio with no setup** | A new Show uses the forecast every Home Assistant has, and lists the radio stations near home from Home Assistant's Radio Browser. Pick another weather entity (your own station, say) on the screen, and keep your own favorite stations too. |
 | ⏰ **Alarms that ring on their own** | Set on the screen, by Home Assistant, or followed from its helpers; they ring from the Show's own clock even when Home Assistant is down. Snooze included, and the screen can wake you with a sunrise before the sound. |
 | 🎧 **Bluetooth, rebuilt** | Earbuds and speakers over A2DP, plus a Home Assistant Bluetooth proxy, on a kernel rebuilt with Bluetooth from the LineageOS source. |
@@ -167,6 +167,8 @@ Echo Show 8 and the Echo Spot, are in [docs/screenshots](docs/screenshots/README
 | **Clock**, weather and your own photos behind it | **Alarm ringing**, big enough to hit half awake |
 | ![Now playing from Music Assistant, with the album's cover](docs/screenshots/now-playing-cover.png) | ![The mini player strip over the clock](docs/screenshots/now-playing-strip.png) |
 | **Now playing**, with the album's cover | **The mini player**, over the clock |
+| ![The clock with a glance strip of chips from Home Assistant along the foot](docs/screenshots/clock-glance.png) | |
+| **The glance strip**: chips from Home Assistant, only while they have news | |
 | ![Settings: Display](docs/screenshots/settings-display.png) | ![Settings: Sound & Voice](docs/screenshots/settings-sound.png) |
 | **Settings** by category: brightness, night hours, theme, clock | **Sound & Voice**: volume, microphone, wake word and its sound |
 | ![Alarm editor](docs/screenshots/alarm-editor.png) | ![Settings: Privacy & Security](docs/screenshots/settings-privacy.png) |
@@ -208,7 +210,8 @@ Echo Show 8 and the Echo Spot, are in [docs/screenshots](docs/screenshots/README
 
 **New to this? Start with [Getting started](docs/getting-started.md)**: every step from a stock Echo
 Show 5, Dot or Spot, with the unlock guides linked, what to check after each step, and notes for
-Windows, Linux and macOS.
+Windows, Linux and macOS. Once it's in Home Assistant, **[Setting it up](docs/setup.md)** covers
+photos, weather, cameras, music and the night settings, in order.
 
 You need a Show 5 **unlocked and running LineageOS 18.1** — 2nd gen with
 [amonet-cronos](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-show-5-2nd-gen-2021-cronos.4772596/)
@@ -311,8 +314,14 @@ TECHO5 exists because of these projects and the people behind them.
   native API, and the reason to build any of this.
 - [Music Assistant](https://www.music-assistant.io/) and [Sendspin](https://github.com/Sendspin/sendspin-go).
 - [Radio Browser](https://www.radio-browser.info/), through Home Assistant's integration, for stations
-  near home; [RainViewer](https://www.rainviewer.com/api.html) for the radar and
-  [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors for the map under it.
+  near home.
+- The rain map and weather alerts: the U.S. [National Weather Service](https://www.weather.gov/) for
+  the radar and the [alerts](https://www.weather.gov/documentation/services-web-api) (public domain),
+  with the radar's map tiles from the [Iowa Environmental Mesonet](https://mesonet.agron.iastate.edu/)
+  at Iowa State University; [RainViewer](https://www.rainviewer.com/api.html) for the radar outside the
+  U.S.; NASA's [GIBS](https://www.earthdata.nasa.gov/engage/open-data-services-software/earthdata-developer-portal/gibs-api)
+  for the Blue Marble map and NOAA's GOES satellites' clouds; and
+  [GeoNames](https://www.geonames.org/) (CC BY 4.0) for the town names.
 - [Alpine Linux](https://alpinelinux.org/), BusyBox, Dropbear, wpa_supplicant, [BlueZ](https://www.bluez.org/),
   [bluez-alsa](https://github.com/arkq/bluez-alsa) (arkq), and
   [webrtc-audio-processing](https://gitlab.freedesktop.org/pulseaudio/webrtc-audio-processing).
