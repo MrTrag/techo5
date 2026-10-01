@@ -7,6 +7,7 @@ package media
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -364,6 +365,7 @@ func build() *Player {
 		p.applyTone()
 	}
 	p.stream = NewStream(speaker.Sound(), speaker.Get(), p.refresh, p.OnEnd.Emit)
+	p.stream.handOff = handOff
 
 	// Volume acts on every tap and on every repeat, so a held button ramps.
 	buttons.Get().Events.Listen(func(e buttons.Event) {
@@ -529,7 +531,9 @@ func (p *Player) command(c esphome.MediaCommand) {
 			// last-station memory is told is playing.
 		default:
 			p.ours()
-			p.stream.Play(c.MediaURL)
+			// Home Assistant converts what it sends to what the device plays; one it did not is not
+			// handed on to the music library, which would be given Home Assistant's own address.
+			p.stream.PlayOnly(c.MediaURL)
 			p.OnPlay.Emit(c.MediaURL)
 		}
 	}
@@ -1041,7 +1045,14 @@ func (p *Player) PlayURL(url string) {
 // why it did not (Stream.PlayChecked).
 func (p *Player) PlayURLChecked(url string, within time.Duration) error {
 	p.ours()
-	return p.stream.PlayChecked(url, within)
+	err := p.stream.PlayChecked(url, within)
+	if IsUnplayable(err) {
+		// One the music library can still play: it converts it and plays it here.
+		if lerr := viaLibrary(url, nil); !errors.Is(lerr, errNoLibrary) {
+			return lerr
+		}
+	}
+	return err
 }
 
 // ours marks what is about to play as this player's own, so a play or a pause goes to its own stream
