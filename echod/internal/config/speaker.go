@@ -6,10 +6,22 @@ type Speaker struct {
 	Volume     int        `json:"volume"`
 	Resampling Resampling `json:"resampling"`
 	ASP        bool       `json:"asp"`
+	OutputMode OutputMode `json:"output_mode,omitempty"`
 
 	// QuietHours is when the device makes no sound of its own, as "22-7", empty for never. See
 	// quiet.go for what that does and does not cover.
 	QuietHours string `json:"quiet_hours,omitempty"`
+
+	// NightVolume is the most the device plays at through quiet hours, in volume steps, 0 for no limit.
+	// DayVolume is the level it was turned down from, kept so it goes back there when the hours end,
+	// 0 when it was not turned down; NightSet is the level it was turned down to, which is how a level
+	// somebody chose overnight is told from the one night volume set. See media/night.go.
+	NightVolume int `json:"night_volume,omitempty"`
+	DayVolume   int `json:"day_volume,omitempty"`
+	NightSet    int `json:"night_set,omitempty"`
+	// NightOf is the night night volume last looked at as quiet hours started, the date they began
+	// on, so a restart inside the same hours does not turn down a device somebody turned up since.
+	NightOf string `json:"night_of,omitempty"`
 
 	// Bass and Treble are the listener's own shelves in dB, zero for the tuning as the vendor left
 	// it. They apply only while the tuning is on, since they are a stage of it (lib/asp/tone.go).
@@ -81,8 +93,38 @@ func (w SpeakerWriter) Volume(v int) error {
 	return w.st.Update(func(c *Config) { c.Speaker.Volume = v })
 }
 
+func (w SpeakerWriter) NightVolume(v int) error {
+	return w.st.Update(func(c *Config) { c.Speaker.NightVolume = v })
+}
+
+func (w SpeakerWriter) NightOf(v string) error {
+	return w.st.Update(func(c *Config) { c.Speaker.NightOf = v })
+}
+
+// Night saves where night volume turned the device down from and to, together; 0, 0 when it is not
+// turned down.
+func (w SpeakerWriter) Night(day, set int) error {
+	return w.st.Update(func(c *Config) { c.Speaker.DayVolume, c.Speaker.NightSet = day, set })
+}
+
+// Daytime is the volume the device is at outside quiet hours: the level night volume turned it down
+// from while it is turned down, else the volume itself. Anything that starts from the media volume
+// and is not music, like an alarm's first ring volume, starts from this, so a night limit does not
+// carry into it.
+func (s Speaker) Daytime() int {
+	if s.DayVolume > 0 {
+		return s.DayVolume
+	}
+	return s.Volume
+}
+
 func (w SpeakerWriter) Resampling(v Resampling) error {
 	return w.st.Update(func(c *Config) { c.Speaker.Resampling = v })
+}
+
+// OutputMode saves the selected audio output mode.
+func (w SpeakerWriter) OutputMode(v OutputMode) error {
+	return w.st.Update(func(c *Config) { c.Speaker.OutputMode = v })
 }
 
 func (w SpeakerWriter) QuietHours(v string) error {
@@ -121,6 +163,16 @@ func (w SpeakerWriter) ASP(v bool) error {
 func (w SpeakerWriter) Standby(v bool) error {
 	return w.st.Update(func(c *Config) { c.Speaker.AmpStandby = v })
 }
+
+// OutputMode selects automatic routing, the speaker, headphones when plugged in, or both at once.
+type OutputMode string
+
+const (
+	OutputModeAuto      OutputMode = ""
+	OutputModeSpeaker   OutputMode = "speaker"
+	OutputModeHeadphone OutputMode = "headphone"
+	OutputModeBoth      OutputMode = "both"
+)
 
 // Resampling is how the 16 kHz voice a pipeline sends is stretched to the 48 kHz the codec takes.
 type Resampling string

@@ -223,6 +223,10 @@ func (f *Feature) save(w http.ResponseWriter, r *http.Request) {
 		problem = saveBrain(r)
 	case "music":
 		problem = saveMusic(r)
+	case "streaming":
+		problem = saveStreaming(r)
+	case "speaker":
+		problem = saveSpeaker(r)
 	case "screen":
 		problem = saveScreen(r)
 	case "listening":
@@ -317,12 +321,17 @@ func (f *Feature) settingsPage(ctx context.Context, w http.ResponseWriter, token
 	}
 
 	switch tab {
+	// Within a tab, what is changed most comes first; a long tab is split under group headings.
 	case "sound":
-		houseSection(w, token)
+		speakerSection(w, token)
+		fmt.Fprint(w, `<h3>Music</h3>`)
 		stationsSection(w, token)
-		brainSection(w, token)
 		musicSection(ctx, w, token)
+		streamingSection(w, token)
+		fmt.Fprint(w, `<h3>Voice</h3>`)
+		brainSection(w, token)
 		listeningSection(w, token)
+		houseSection(w, token)
 	case "alarms":
 		alarmsSection(w, token)
 	case "connections":
@@ -332,9 +341,9 @@ func (f *Feature) settingsPage(ctx context.Context, w http.ResponseWriter, token
 			fmt.Fprint(w, `<fieldset><legend>Wi-Fi</legend><p class="note" style="margin:0">This device's network
 			 is not one this page can change.</p></fieldset>`)
 		}
-		dashboardSection(w, token)
 		reolinkSection(w, token)
 		talkBackSection(w, token)
+		dashboardSection(w, token)
 	case "photos":
 		screenSection(w, token)
 		photosSection(w, token)
@@ -344,9 +353,9 @@ func (f *Feature) settingsPage(ctx context.Context, w http.ResponseWriter, token
 	case "privacy":
 		privacySection(w)
 	case "general":
-		timezoneSection(w, token)
 		nameSection(w, token)
 		updatesSection(w, token)
+		timezoneSection(w, token)
 		homeAssistantSection(w, token)
 		diagnosticsSection(w)
 	}

@@ -17,6 +17,8 @@ type Output string
 const (
 	OutputSpeaker   Output = "speaker"
 	OutputHeadphone Output = "headphone"
+	// OutputBoth is the speaker and the jack at once, which this board does not do (HasBoth).
+	OutputBoth Output = "both"
 )
 
 // The mixer sequences below come direct from the device.
@@ -150,3 +152,10 @@ const OutputBoost = 1.0
 // DriverTuning applies the vendor driver's volume-dependent EQ and limiter (lib/asp), read from the
 // vendor partition: the files it reads are the Dot's.
 const DriverTuning = true
+
+// HasJack is whether the device has a headphone jack, and so the Audio output choice.
+const HasJack = true
+
+// HasBoth is whether the speaker and the jack can play at once, and so the Both choice. Not here:
+// the routes have not been tried together on this board.
+const HasBoth = false

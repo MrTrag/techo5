@@ -126,6 +126,12 @@ const hasNightLight = false
 // hasCalendarPopups: not on the Spot yet.
 const hasCalendarPopups = false
 
+// hasDimmest: the Spot's auto-brightness keeps its own floor (display_spot.go), with no setting.
+const hasDimmest = false
+
+func dimmestSetting() int          { return 0 }
+func (d *Display) stepDimmest(int) {}
+
 // adaptRows fits the shared rows to the round card, which is narrower than the Show's: shorter
 // labels, a status under a row's name rather than beside its button, no second button beside a
 // choice (Weather's Show: the forecast is on the dial), and Updates as two rows, its channel and
@@ -146,6 +152,8 @@ func adaptRows(rows []settingRow, sv sheetView) []settingRow {
 			continue // the strip is the Show's; the round face has no clock page under it to share
 		case row.id == "wakesens":
 			row.label = "Sensitivity"
+		case row.id == "output":
+			row.sub = "With headphones in"
 		case row.id == "sendspin":
 			row.label = "Music Assistant"
 		case row.id == "screenweb":
