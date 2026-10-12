@@ -51,7 +51,8 @@ type Screen struct {
 	AnswerSeconds int `json:"answer_seconds,omitempty"`
 
 	// ClockPosition is where the home screen's clock sits: empty for the center, "bottom-left" or
-	// "bottom-right"; DateColor the date's color, empty for the theme's (display/clock_layout.go).
+	// "bottom-right" on a Show, "bottom" on the Spot; DateColor the date's color, empty for the
+	// theme's (display/clock_position.go, clock_layout.go).
 	ClockPosition string `json:"clock_position,omitempty"`
 	DateColor     string `json:"date_color,omitempty"`
 
@@ -94,8 +95,8 @@ type Screen struct {
 	// back to its clock with the music in a strip at the foot; none keeps the full page.
 	MusicStrip int `json:"music_strip,omitempty"`
 
-	// Language is which words the screen listens for in a turn — "en", "de", "es", "fr", "it",
-	// "nl" — empty for all of them. It has nothing to do with what the assistant understands or
+	// Language is which words the screen listens for in a turn — "en", "de", "es", "fr", "it", "nl",
+	// "ru" — empty for all of them. It has nothing to do with what the assistant understands or
 	// says, which is Home Assistant's pipeline; it decides only which pages a sentence brings up.
 	Language string `json:"language,omitempty"`
 
@@ -107,6 +108,10 @@ type Screen struct {
 	// NoStyleSwipe stops a swipe left or right across the clock from turning its style (on unless
 	// this is set; display/style_swipe.go).
 	NoStyleSwipe bool `json:"no_style_swipe,omitempty"`
+
+	// Font is the font the screen's words are drawn in: empty for Go, the screen's own, or one of the
+	// others lib/fonts offers ("inter", "comicneue", ...). One this build does not have is Go.
+	Font string `json:"font,omitempty"`
 }
 
 // DefaultTheme is the palette a new device comes up in.
@@ -194,6 +199,10 @@ func (w ScreenWriter) NightOverride(v string, at int64) error {
 
 func (w ScreenWriter) ClockPosition(v string) error {
 	return w.st.Update(func(c *Config) { c.Screen.ClockPosition = v })
+}
+
+func (w ScreenWriter) Font(v string) error {
+	return w.st.Update(func(c *Config) { c.Screen.Font = v })
 }
 
 func (w ScreenWriter) ClockStyle(v string) error {

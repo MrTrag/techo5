@@ -73,7 +73,7 @@ func newStopEntity(d *Detect) *esphome.Number {
 		Base: esphome.Base{
 			ObjectID: "stop_word_sensitivity",
 			DeviceID: component.DeviceMicrophone,
-			Name:     "Stop word sensitivity",
+			Name:     "Stop word threshold",
 			Icon:     "mdi:hand-back-left",
 			Category: esphome.CategoryConfig,
 		},
@@ -95,13 +95,31 @@ func newStopEntity(d *Detect) *esphome.Number {
 	return n
 }
 
-func (d *Detect) Entities() []esphome.Entity { return []esphome.Entity{d.stop, d.gate, d.gateDB} }
+func (d *Detect) Entities() []esphome.Entity {
+	return []esphome.Entity{d.stop, d.score, d.onHA.stream, d.onHA.confirm, d.onHA.threshold, d.gate, d.gateDB}
+}
+
+// newScoreEntity is the highest score the last wake reached. Set beside what was heard, it is how a
+// threshold is set by evidence rather than by guessing: a wake by mistake that scored 0.91 is gone at
+// 0.93, and a real one that scored 0.99 says there is room to go higher still.
+func newScoreEntity() *esphome.Sensor {
+	return &esphome.Sensor{
+		Base: esphome.Base{
+			ObjectID: "last_wake_score",
+			Name:     "Last wake score",
+			Icon:     "mdi:gauge",
+			Category: esphome.CategoryDiagnostic,
+		},
+		Decimals: 2,
+	}
+}
 
 // Restore only publishes the values. Loading the model is Start's, through the engine's Load, so that a
 // restart and a first boot take the same path.
 func (d *Detect) Restore(c config.Config) {
 	d.stop.Set(float32(c.Wake.Stop.Threshold))
 	slog.Info("restored", "what", d.stop.ObjectID, "using", c.Wake.Stop.Threshold)
+	d.onHA.restore(c.Wake.OnHA)
 	d.gate.Set(c.Wake.Gate.On)
 	d.gateDB.Set(float32(c.Wake.Gate.Level()))
 	slog.Info("restored", "what", "other-room floor", "on", c.Wake.Gate.On, "db", c.Wake.Gate.Level())

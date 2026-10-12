@@ -15,6 +15,11 @@ import (
 // matching an intent.
 const History = 250 * time.Millisecond
 
+// Confirming is how much a wake the device was not sure of sends ahead of it when Home Assistant is asked
+// to confirm it: the whole word and what led up to it, which is what a wake word engine needs to hear to
+// score the word at all.
+const Confirming = 2 * time.Second
+
 // The ring holds two seconds, whatever is being sent of it. A turn sends a quarter of that; the rest
 // is for the recording a turn keeps, which wants the wake word whole. Detection fires around half a
 // second after the word has ended, and the word itself is half a second or more, so a ring of one

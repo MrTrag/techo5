@@ -14,11 +14,13 @@ import (
 	"sync/atomic"
 
 	esphome "github.com/ygelfand/go-esphome-device"
+	"github.com/ygelfand/go-esphome-device/api"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/HuskerMinion/techo5/echod/internal/component"
 	"github.com/HuskerMinion/techo5/echod/internal/config"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/media"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/mute"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/phone"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/ring"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/timer"
@@ -105,7 +107,10 @@ func build() *Voice {
 		if !subscribed {
 			timer.Get().Forget()
 		}
+		v.turn.post(event{kind: evWatch})
 	}
+	// A stream to Home Assistant stops the moment the microphones are cut, not at the next look.
+	mute.Get().Changed.Listen(func(bool) { v.turn.post(event{kind: evWatch}) })
 
 	wakeword.Requested.Listen(v.Start)
 
@@ -140,7 +145,13 @@ func build() *Voice {
 func (v *Voice) Name() string { return "conversation" }
 
 // Handle is the satellite's own protocol messages, which have no entity to arrive through.
+//
+// The connection a subscription arrives on is kept: a run at the wake word stage is a request the
+// satellite has no call for, and goes out on it directly (hawake.go).
 func (v *Voice) Handle(ctx context.Context, c *esphome.Conn, msg proto.Message) error {
+	if m, ok := msg.(*api.SubscribeVoiceAssistantRequest); ok && m.GetSubscribe() {
+		v.turn.conn.Store(c)
+	}
 	return v.vs.Handle(ctx, c, msg)
 }
 
@@ -156,6 +167,11 @@ func (v *Voice) Run(ctx context.Context) error {
 // shows on the ring while it comes up.
 func (v *Voice) Ready() bool { return v.vs.Subscribed() || config.Get().Brain.Direct() }
 
+// HomeAssistant reports whether Home Assistant itself has a voice pipeline listening, whatever the
+// brain. Ready is always true with a direct brain, so it says nothing about whether Home Assistant
+// can still reach the device.
+func (v *Voice) HomeAssistant() bool { return v.vs.Subscribed() }
+
 // Start asks for a turn as if that slot's wake word had fired, which is how detection and the
 // buttons both reach a pipeline. What that means from the phase the conversation is already in is
 // the conversation's decision, not the caller's.
@@ -163,13 +179,23 @@ func (v *Voice) Ready() bool { return v.vs.Subscribed() || config.Get().Brain.Di
 // A wake word said over a ringing alarm or timer silences it first, the way a button press does:
 // whoever says it at a ringing alarm wants it quiet, and should not have to know the one word that
 // stops it. The turn goes on, over a quiet room, and "stop" in it ends the ring (see stopsRing).
-func (v *Voice) Start(slot int) {
+func (v *Voice) Start(slot int) { v.open(slot, false) }
+
+// Woke is Start for the wake word itself, which is the one way a turn can be opened by mistake: by a
+// sound that was not the word (see Mistaken).
+func (v *Voice) Woke(slot int) { v.open(slot, true) }
+
+func (v *Voice) open(slot int, woke bool) {
 	if micTaken() {
 		slog.Info("wake word while the microphones are talking through a camera, ignored")
 		return
 	}
 	if ring.IsSounding() && ring.Silence() {
 		slog.Info("wake word over a ring, silencing it")
+	}
+	if woke {
+		v.turn.Woke(slot)
+		return
 	}
 	v.turn.Start(slot)
 }

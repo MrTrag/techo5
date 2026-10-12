@@ -66,6 +66,9 @@ type Home struct {
 	// with nobody answering. Off unless somebody turns it on: it is a way to listen in on a room.
 	DropIn bool `json:"drop_in,omitempty"`
 
+	// RingSound is how a call rings here, one of the phone's ring sounds; empty is the first of them.
+	RingSound string `json:"ring_sound,omitempty"`
+
 	// DoNotDisturb turns intercom calls away: the caller is told, and nothing rings here.
 	DoNotDisturb bool `json:"do_not_disturb,omitempty"`
 
@@ -83,6 +86,11 @@ type Home struct {
 	// outside's noise unasked is a device people turn off — and the home_show_camera_sound action
 	// can ask for it, or refuse it, for one view whatever this says.
 	CameraSound bool `json:"camera_sound,omitempty"`
+
+	// CameraLive shows a camera Home Assistant can stream as live video, decoded on the device, with its
+	// sound from the same stream (feature/home, camera_stream.go). Off: snapshots and camera.play_stream,
+	// as before it existed.
+	CameraLive bool `json:"camera_live,omitempty"`
 }
 
 // Slideshow is how the idle screen's photo slideshow is wired: a Home Assistant media source to
@@ -259,6 +267,10 @@ func (w HomeWriter) DropIn(v bool) error {
 	return w.st.Update(func(c *Config) { c.Home.DropIn = v })
 }
 
+func (w HomeWriter) RingSound(v string) error {
+	return w.st.Update(func(c *Config) { c.Home.RingSound = v })
+}
+
 func (w HomeWriter) DoNotDisturb(v bool) error {
 	return w.st.Update(func(c *Config) { c.Home.DoNotDisturb = v })
 }
@@ -285,6 +297,10 @@ func (w HomeWriter) AlertsOff(v bool) error {
 
 func (w HomeWriter) CameraSound(v bool) error {
 	return w.st.Update(func(c *Config) { c.Home.CameraSound = v })
+}
+
+func (w HomeWriter) CameraLive(v bool) error {
+	return w.st.Update(func(c *Config) { c.Home.CameraLive = v })
 }
 
 func (w HomeWriter) RadarSource(source string) error {

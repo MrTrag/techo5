@@ -24,12 +24,15 @@ import (
 
 // Tile is one thing on the page: an icon, a name, and what it is doing.
 type Tile struct {
-	Name  string
-	Icon  string // an mdi name
-	Value string // what it is doing, in words: "On · 60%", "Closed", "72°"
-	On    bool   // lit, open, playing: drawn in the accent color
-	Gone  bool   // unavailable
-	Tap   *Action
+	// Entity is the entity the tile shows, when it shows one: what a long press on it opens a sheet
+	// for (a light's colors, a media player's music).
+	Entity string
+	Name   string
+	Icon   string // an mdi name
+	Value  string // what it is doing, in words: "On · 60%", "Closed", "72°"
+	On     bool   // lit, open, playing: drawn in the accent color
+	Gone   bool   // unavailable
+	Tap    *Action
 	// Adjust is a level a finger sliding along the tile sets: a light's brightness, a cover's
 	// position, a thermostat's temperature.
 	Adjust *Adjust
@@ -67,7 +70,7 @@ func (a Adjust) Snap(v float64) float64 {
 type Action struct {
 	Entity  string         // the entity a toggle or service is about
 	Service string         // "light.toggle"; empty for none
-	Data    map[string]any // the service's data, with entity_id added when it has none
+	Data    map[string]any // the service's data, with entity_id added when it has none (serviceData)
 	View    string         // a dashboard view to go to instead, as a path: "home-refresh/climate"
 }
 
@@ -83,6 +86,10 @@ type Block struct {
 	Graph   *Graph
 	Gauge   *Gauge
 	Picture *Picture
+	// Pictures is a gallery: a grid of nothing but pictures, laid out abreast as Columns asks, each
+	// picture a tap of its own.
+	Pictures []Picture
+	Columns  int
 }
 
 // Section is blocks that stay together, one column wide: a room, a section of a sections view, a card
@@ -109,6 +116,7 @@ type Picture struct {
 	Name     string
 	Image    image.Image // nil until it has arrived
 	TooLarge bool        // it arrived, larger than the device will decode
+	Tap      *Action     // the card's own tap_action; nil when a tap does nothing
 }
 
 // Drawn is the page as it stands.
@@ -199,6 +207,8 @@ type pending struct {
 	flip  bool   // toggled: shown the other way
 	value string // set to a level: shown as this
 	on    bool
+	// keepOn leaves whether the tile is lit alone: a level that is not the thing being on.
+	keepOn bool
 }
 
 // Drawn is the drawn dashboard for a screen width wide, connecting to Home Assistant if it is not
@@ -266,18 +276,43 @@ func (f *Feature) Tap(a Action) {
 	if !ok {
 		return
 	}
-	data := map[string]any{}
-	for k, v := range a.Data {
-		data[k] = v
+	data := serviceData(a)
+	// A media player's play or pause, next and back reach the whole group when Music Assistant plays
+	// there (transportTo). Which player that is takes a look at Home Assistant, so it is worked out with
+	// the call, off the goroutine the finger is on. Only the tile's own player is routed: a card that
+	// names a target of its own ("pause everywhere") keeps it.
+	var route func() string
+	own, _ := data["entity_id"].(string)
+	other := false // a target of the card's own besides entities
+	for _, k := range []string{"area_id", "device_id", "floor_id", "label_id"} {
+		if _, has := data[k]; has {
+			other = true
+		}
 	}
-	if _, has := data["entity_id"]; !has && a.Entity != "" {
-		data["entity_id"] = a.Entity
+	if domain == "media_player" && a.Entity != "" && own == a.Entity && !other &&
+		(service == "media_play_pause" || service == "media_next_track" || service == "media_previous_track") {
+		route = func() string { return routeTransport(a.Entity) }
 	}
 	var p *pending
 	if strings.HasSuffix(service, "toggle") || service == "media_play_pause" {
 		p = &pending{flip: true}
 	}
-	s.call(a.Entity, domain, service, data, p)
+	s.callVia(a.Entity, domain, service, data, p, route)
+}
+
+// serviceData is what a tap's service is called with: the card's data and target, and the card's
+// entity as the target when it names none. Not for an ESPHome device's own action
+// (esphome.<node>_home_show_camera, say): it takes no entity, refuses any argument it does not have,
+// and a picture of a camera whose tap showed that camera on a device failed with entity_id added.
+func serviceData(a Action) map[string]any {
+	data := map[string]any{}
+	for k, v := range a.Data {
+		data[k] = v
+	}
+	if _, has := data["entity_id"]; !has && a.Entity != "" && !strings.HasPrefix(a.Service, "esphome.") {
+		data["entity_id"] = a.Entity
+	}
+	return data
 }
 
 // SetLevel sets a tile's level to v: a light's brightness, a cover's position, a thermostat's
@@ -306,14 +341,30 @@ func (f *Feature) SetLevel(a Adjust, v float64) {
 	case "temperature":
 		domain, service = "climate", "set_temperature"
 		data["temperature"] = v
+	case "volume":
+		domain, service = "media_player", "volume_set"
+		data["volume_level"] = float64(int(v+0.5)) / 100
 	default:
 		return
 	}
-	s.call(a.Entity, domain, service, data, &pending{value: a.Label(v), on: v > a.Min})
+	// A player's volume says nothing about whether it is playing: the tile keeps that.
+	s.call(a.Entity, domain, service, data, &pending{value: a.Label(v), on: v > a.Min, keepOn: a.Kind == "volume"})
 }
 
 // call runs a service for a tile, showing what it asked for until Home Assistant says otherwise.
 func (s *session) call(entity, domain, service string, data map[string]any, p *pending) {
+	s.callVia(entity, domain, service, data, p, nil)
+}
+
+// callService runs a service on Home Assistant; a variable so that a test can see what a tap asks for,
+// and when, without a Home Assistant.
+var callService = func(live *hass.Live, ctx context.Context, domain, service string, data map[string]any) error {
+	return live.CallService(ctx, domain, service, data)
+}
+
+// callVia is call with the entity the service goes to worked out by route, when there is one, on the
+// way: with the service, never on the caller's goroutine, which is the finger's.
+func (s *session) callVia(entity, domain, service string, data map[string]any, p *pending, route func() string) {
 	s.mu.Lock()
 	live := s.live
 	if p != nil && entity != "" {
@@ -326,9 +377,14 @@ func (s *session) call(entity, domain, service string, data map[string]any, p *p
 		return
 	}
 	go func() {
+		// The route first: it may wait on Home Assistant's REST side, and the call's own time is
+		// for the call.
+		if route != nil {
+			data["entity_id"] = route()
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := live.CallService(ctx, domain, service, data); err != nil {
+		if err := callService(live, ctx, domain, service, data); err != nil {
 			slog.Warn("dashboard: a tap failed", "service", domain+"."+service, "err", err)
 			s.mu.Lock()
 			delete(s.pending, entity)
@@ -403,7 +459,9 @@ func (s *session) once() error {
 	defer cancel()
 	live, err := hass.Get().OpenLive(ctx)
 	if err != nil {
-		s.problem("Can't reach Home Assistant.")
+		// The address the home_assistant action gave is kept until it is given again: a Home
+		// Assistant that moved is the commonest reason for this, so say where it was looked for.
+		s.problem(unreachable(hass.Get().Address()))
 		return err
 	}
 	defer live.Close()
@@ -557,7 +615,9 @@ func (s *session) pendingOn(t *Tile) {
 			}
 		}
 	case p.value != "":
-		t.On = p.on
+		if !p.keepOn {
+			t.On = p.on
+		}
 		t.Value = p.value
 		if t.Adjust != nil && t.Adjust.Kind == "brightness" {
 			t.Value = "On · " + p.value
@@ -581,3 +641,11 @@ func str(m raw, key string) string {
 type onScreen string
 
 func (s onScreen) Error() string { return string(s) }
+
+// unreachable is what a drawn dashboard says when Home Assistant does not answer at addr.
+func unreachable(addr string) string {
+	if addr == "" {
+		return "Can't reach Home Assistant."
+	}
+	return "Can't reach Home Assistant at " + addr + ". If it has moved, run the home_assistant action again with its new address."
+}

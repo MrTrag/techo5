@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"math"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -92,6 +93,12 @@ const (
 	evSpokeEnd                     // the device heard the speaker finish; text is the turn's id
 	evLookHere                     // the answer put something on the screen: no listening again after it
 	evCutOff                       // another sound took the speaker from the reply (event.reply)
+	evWakeStart                    // Home Assistant's wake word engine is listening (hawake.go)
+	evWakeEnd                      // and has heard the word
+	evUnconfirmed                  // a wake asked about was not heard in time
+	evCandidate                    // a wake the device was not sure of (event.slot, event.peak)
+	evWatch                        // something a stream to Home Assistant depends on may have changed
+	evRunStart                     // Home Assistant opened a run
 )
 
 type event struct {
@@ -108,6 +115,12 @@ type event struct {
 	// stopped, or from anything that is not a reply, must not take the turn's deadline away or end
 	// the turn after it.
 	reply uint64
+
+	// woke is an evStart from the wake word (Woke), not a button or Home Assistant (Start).
+	woke bool
+
+	// peak is an evCandidate's score.
+	peak float64
 }
 
 // conversation runs one turn at a time: microphone audio up, pipeline events back, spoken reply out.
@@ -141,6 +154,19 @@ type conversation struct {
 	// out is everything bound for Home Assistant, so nothing local waits on the socket.
 	out chan func() error
 
+	// conn is Home Assistant's connection, for the one request the satellite has no call for: a run
+	// that starts at the wake word stage (hawake.go).
+	conn atomic.Pointer[esphome.Conn]
+
+	// hears is Home Assistant listening for the first slot's wake word, so a candidate is not asked about.
+	hears atomic.Bool
+
+	// now is the clock, for tests.
+	now func() time.Time
+
+	// busy stands in for the microphones being cut or somebody else's, for tests (micBusy).
+	busy func() bool
+
 	// visible is the phase, published for anything outside the loop that needs to ask. Only the loop
 	// writes it, and a reader tolerates being a moment out of date: the button uses it to choose
 	// between starting and canceling, and posting either is safe whichever it picks.
@@ -168,6 +194,10 @@ type conversation struct {
 	followUp  bool
 	followUps int
 
+	// woke is the open turn's nextTurn.woke, and opened when it was asked for (nextTurn.at).
+	woke   bool
+	opened time.Time
+
 	// lookHere says this turn's answer put a page on the screen (the rain map, the forecast), so it is
 	// not followed by listening again: the listening screen would cover the page asked for.
 	lookHere bool
@@ -185,6 +215,10 @@ type conversation struct {
 	pending *nextTurn
 	grace   *time.Timer
 
+	// draining is a turn ended as a mistake whose run Home Assistant has yet to close: until it does,
+	// or grace runs out, a new turn waits in pending.
+	draining bool
+
 	reply reply
 
 	// replies counts the replies spoken, to give each its id.
@@ -193,15 +227,71 @@ type conversation struct {
 	// shown is what a screen is told: the phase and the words so far. Reset when a turn opens, so a
 	// new turn never shows the last one's answer.
 	shown State
+
+	// watch is a run open at Home Assistant's wake word stage, nil when there is none (hawake.go).
+	// While one is, the conversation is idle.
+	watch *watching
+
+	// runOpen is a run Home Assistant has yet to close, and stoppedAt when it was last told to stop.
+	// A run at the wake word stage waits for the last one to close: its RUN_END would end it.
+	runOpen   bool
+	stoppedAt time.Time
+
+	// fallback is the device listening for itself because Home Assistant's wake word engine failed,
+	// failures how many times in a row, and retryAt when it is tried again.
+	fallback bool
+	failures int
+	retryAt  time.Time
+
+	// proven is Home Assistant's engine having said it is listening (WAKE_WORD_START) since the last
+	// failure or connection: until it has, the device goes on listening for itself as well.
+	proven bool
+
+	// staleRun is a run at the wake word stage that was let go of before its RUN_END came. Its last
+	// events can still arrive, after a turn has opened, and would end that turn: until the next run
+	// starts, a RUN_END or an error is the old run's.
+	staleRun bool
+
+	// nextConfirm is the soonest another wake may be asked about, and confirmGap the wait after this
+	// one: it grows with every wake Home Assistant did not hear, so a steady sound near the word is
+	// not asked about every couple of seconds, and starts again from a wake that was real.
+	nextConfirm time.Time
+	confirmGap  time.Duration
+
+	// busyAt is the last time the microphones were seen to be somebody else's, while confirming is on.
+	// What is asked about includes the two seconds before the wake, which must not be a call's.
+	busyAt time.Time
 }
 
 // graceStart is how long to wait for a stopped run to close before starting the next one anyway.
 const graceStart = 750 * time.Millisecond
 
+// drainFor is the same for a run stopped as a mistake, which Home Assistant goes on with: long enough
+// for a quick answer to arrive and be dropped, short enough that a wake held behind it still feels
+// like an answer to the word.
+const drainFor = 3 * time.Second
+
 // nextTurn is a turn to open: which slot, and whether it follows a reply rather than a wake word.
 type nextTurn struct {
 	slot     int
 	followUp bool
+
+	// woke is a turn the wake word opened, rather than a button, Home Assistant or a follow-up: the
+	// only kind that can have been opened by mistake.
+	woke bool
+
+	// at is when it was asked for, which a turn held back in pending opens later than.
+	at time.Time
+
+	// afterWatch is a turn that waited for a run at the wake word stage to close. Home Assistant's engine
+	// may have heard the same word in it just before, and refuses that phrase again for a moment as a
+	// second device hearing it: so the first slot's turn reports no phrase, which reaches the same
+	// first pipeline (hawake.go).
+	afterWatch bool
+
+	// continued is a turn on a run that is already open: Home Assistant's wake word engine heard the
+	// word, and the run went on to listening by itself (hawake.go).
+	continued bool
 }
 
 // reply is which answer is being spoken, and how. Only one of them is set: a url means it is being
@@ -226,8 +316,9 @@ func newConversation(vs *esphome.VoiceSatellite) *conversation {
 		log:     activity.Get(),
 		events:  make(chan event, 32),
 		out:     make(chan func() error, outDepth),
+		now:     time.Now,
 	}
-	c.ha = ha{vs: vs}
+	c.ha = ha{vs: vs, watch: c.startWatch}
 	c.direct = newDirect(c.post)
 	c.be = c.ha
 
@@ -310,6 +401,9 @@ func (c *conversation) Run(ctx context.Context) {
 
 	safe.Go("voice sender", func() { c.sends(ctx) })
 
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+
 	for {
 		var expired, waited <-chan time.Time
 		if c.deadline != nil {
@@ -327,6 +421,10 @@ func (c *conversation) Run(ctx context.Context) {
 			c.handle(event{kind: evTimeout})
 		case <-waited:
 			c.handle(event{kind: evPending})
+		case <-c.watchTimeout():
+			c.handle(event{kind: evUnconfirmed})
+		case <-tick.C:
+			c.handle(event{kind: evWatch})
 		case e := <-c.events:
 			c.handle(e)
 		}
@@ -334,11 +432,19 @@ func (c *conversation) Run(ctx context.Context) {
 }
 
 // handle is the transition table. Anything an event cannot do from the current phase is dropped
-// here, which is what makes the whole thing idempotent.
+// here, which is what makes the whole thing idempotent. A run at Home Assistant's wake word stage
+// takes its own events first, and whether one should be open is considered after every event.
 func (c *conversation) handle(e event) {
+	if !c.watchEvent(e) {
+		c.turnEvent(e)
+	}
+	c.consider()
+}
+
+func (c *conversation) turnEvent(e event) {
 	switch e.kind {
 	case evStart:
-		c.start(nextTurn{slot: e.slot})
+		c.start(nextTurn{slot: e.slot, woke: e.woke, at: e.at})
 
 	case evSpeaking:
 		if c.followUp && c.phase == phaseListening {
@@ -390,11 +496,36 @@ func (c *conversation) handle(e event) {
 			}
 		}
 		c.turn.Heard(e.text)
+
+		// A wake word followed by only what speech-to-text writes for noise was a wake by mistake. It
+		// ends here, before the answer to "Thank you." is spoken to an empty room. A follow-up is left
+		// alone: "yeah" and "okay" are answers there.
+		//
+		// Home Assistant goes on with the run it was told to stop, and its last events are still to
+		// come: a wake in the meantime waits for them (draining), or they would land in its turn.
+		if c.woke && c.phase != phaseIdle && onlyNoise(e.text) {
+			slog.Info("heard only what noise is written as; the wake was a mistake", "slot", c.slot+1)
+			slot, opened := c.slot, c.opened
+			c.clearPending()
+			c.idle("woken by mistake", activity.Canceled)
+			// The built-in brain stops at once and sends nothing more.
+			if _, here := c.be.(*direct); !here {
+				c.draining = true
+				c.grace = time.NewTimer(drainFor)
+			}
+			Mistaken.Emit(Mistake{Slot: slot, Heard: e.text, Opened: opened})
+			return
+		}
 		if c.phase == phaseListening {
 			c.think()
 		}
 
 	case evReplyText:
+		// The reply to a turn that has ended, one taken as a mistake say: its run is being stopped, and
+		// marking the player as sounding now would hold the music down with nothing to give it back.
+		if c.phase == phaseIdle {
+			return
+		}
 		slog.Info("replying", "slot", c.slot+1, "text", e.text)
 		c.log.Replied(e.text)
 		c.turn.Replying(e.text)
@@ -511,6 +642,19 @@ func (c *conversation) handle(e event) {
 			return
 		}
 
+		// Nothing to write down: nobody spoke after the wake word, or not to this device. The chime and
+		// the red ring are for something failing, and nothing has: the turn ends quietly.
+		if e.code == errNoText {
+			slog.Info("nothing was said", "slot", c.slot+1, "follow-up", c.followUp)
+			slot, opened, mistaken := c.slot, c.opened, c.woke && c.phase != phaseIdle
+			c.clearPending()
+			c.idle("nothing said", activity.Canceled)
+			if mistaken {
+				Mistaken.Emit(Mistake{Slot: slot, Opened: opened})
+			}
+			return
+		}
+
 		slog.Error("pipeline error", "slot", c.slot+1, "code", e.code, "message", e.msg)
 		c.clearPending()
 		c.idle("failed", activity.Failed)
@@ -559,16 +703,22 @@ func (c *conversation) handle(e event) {
 // muted reports whether the microphones are cut. A device that could not take the pin has none.
 func (c *conversation) muted() (bool, error) { return mute.Get().Muted() }
 
-// start opens a turn on the pipeline paired with a slot.
-func (c *conversation) start(n nextTurn) {
+// start opens a turn on the pipeline paired with a slot, and reports whether it did.
+func (c *conversation) start(n nextTurn) bool {
 	slot := n.slot
+
+	// A wake the device's own engine was sure of: the word is being said the way it hears it, so what
+	// is asked about next is not held back by the ones Home Assistant did not hear before.
+	if n.woke && !n.continued {
+		c.confirmGap, c.nextConfirm = 0, time.Time{}
+	}
 
 	// A cut microphone hears nothing, so a turn started from a button would stream silence until it
 	// gave up — and worse, would look like the device is listening while it is muted.
 	if muted, err := c.muted(); err == nil && muted {
 		slog.Info("microphone muted, not starting a turn", "slot", slot+1)
 		c.trouble()
-		return
+		return false
 	}
 
 	// Saying the wake word while the device is still listening is part of the sentence, not a new
@@ -576,7 +726,30 @@ func (c *conversation) start(n nextTurn) {
 	// thinking or speaking, a wake word is a deliberate interruption and takes the turn over.
 	if c.phase == phaseListening {
 		slog.Info("wake word ignored, still listening", "slot", slot+1)
-		return
+		return false
+	}
+
+	// A run is open at Home Assistant's wake word stage: it is stopped, and the turn waits for it to
+	// close, as one that interrupts a turn does.
+	if c.phase == phaseIdle && c.watch != nil {
+		if !c.watch.closing {
+			c.closeWatch()
+		}
+		slog.Info("waiting for the wake word run to close", "slot", slot+1)
+		n.afterWatch = true
+		c.pending = &n
+		if c.grace == nil {
+			c.grace = time.NewTimer(graceStart)
+		}
+		return false
+	}
+
+	// A turn ended as a mistake is still being closed by Home Assistant (draining): this one waits for
+	// that, as one that interrupts a turn does.
+	if c.phase == phaseIdle && c.draining {
+		slog.Info("waiting for the mistaken turn's run to close", "slot", slot+1)
+		c.pending = &n
+		return false
 	}
 
 	if c.phase != phaseIdle {
@@ -585,12 +758,12 @@ func (c *conversation) start(n nextTurn) {
 
 		// Held back before the turn ends, so that ending it does not hand the speaker back to a track
 		// for the moment it takes the next turn to open.
-		c.pending = &nextTurn{slot: slot}
+		c.pending = &nextTurn{slot: slot, woke: n.woke, at: n.at}
 		c.idle("interrupted", activity.Canceled)
 
 		// The stopped run has yet to close, and its last events are still on their way.
 		c.grace = time.NewTimer(graceStart)
-		return
+		return false
 	}
 	c.clearPending()
 
@@ -598,15 +771,19 @@ func (c *conversation) start(n nextTurn) {
 	// it was asked for - a wake word, the button, Home Assistant's announcement, or a follow-up.
 	if micTaken() {
 		slog.Info("turn not started: the microphones are talking through a camera", "follow_up", n.followUp)
-		return
+		return false
 	}
 
+	// A run Home Assistant's engine heard the word in is its own, whatever the brain.
 	c.be = c.backendFor()
+	if n.continued {
+		c.be = c.ha
+	}
 	if !c.be.Ready() {
 		slog.Warn("no voice pipeline ready, ignoring wake", "slot", slot+1, "backend", c.be.Name())
 		wakeword.Chime(slot, n.followUp)
 		c.trouble()
-		return
+		return false
 	}
 
 	// Which pipeline runs is resolved from the phrase, so a slot with no wake word in it cannot be
@@ -617,11 +794,16 @@ func (c *conversation) start(n nextTurn) {
 	if slot > 0 && !ok {
 		slog.Warn("no wake word in that slot, nothing to reach its pipeline with", "slot", slot+1)
 		c.trouble()
-		return
+		return false
 	}
 
 	c.slot = slot
 	c.followUp = n.followUp
+	c.woke = n.woke
+	c.opened = n.at
+	if c.opened.IsZero() {
+		c.opened = time.Now()
+	}
 	c.lookHere = false
 	// Counted from the wake word: a turn it opens starts again, a follow-up is one more in a row.
 	if n.followUp {
@@ -654,7 +836,16 @@ func (c *conversation) start(n nextTurn) {
 	c.turn = c.log.Begin(slot+1, phrase)
 	recording.Get().Opens(c.turn.ID(), slot, history, loud)
 	be := c.be
-	c.send("start", func() error { return be.Start(phrase) })
+	if !n.continued {
+		asked := phrase
+		if n.afterWatch && slot == 0 {
+			asked = ""
+		}
+		c.send("start", func() error { return be.Start(asked) })
+	}
+	if _, here := be.(*direct); !here {
+		c.runOpen = true
+	}
 
 	c.shown = State{}
 	c.enter(phaseListening)
@@ -666,10 +857,11 @@ func (c *conversation) start(n nextTurn) {
 	}
 
 	c.arm(c.listenFor(n))
-	c.startAudio(slot, n.followUp)
+	c.startAudio(slot, n.followUp, n.continued)
 	// The phrase is logged for a follow-up too, because it is what chose the pipeline — not because
 	// anyone said it.
-	slog.Info("turn started", "slot", slot+1, "phrase", phrase, "follow_up", n.followUp)
+	slog.Info("turn started", "slot", slot+1, "phrase", phrase, "follow_up", n.followUp, "on_ha", n.continued)
+	return true
 }
 
 // listenFor is how long a turn may listen. A follow-up gets its own, shorter, window when the slot
@@ -761,6 +953,7 @@ func (c *conversation) idle(why string, how activity.Outcome) {
 
 	if was != phaseIdle {
 		c.send("stop", c.be.Stop)
+		c.stoppedAt = c.now()
 	}
 
 	kept := recording.Get()
@@ -814,6 +1007,7 @@ func (c *conversation) startPending() {
 
 func (c *conversation) clearPending() {
 	c.pending = nil
+	c.draining = false
 	if c.grace != nil {
 		c.grace.Stop()
 		c.grace = nil
@@ -914,8 +1108,14 @@ func (c *conversation) pipeline(e esphome.PipelineEvent) {
 		c.post(event{kind: evStreamStart})
 	case api.VoiceAssistantEvent_VOICE_ASSISTANT_TTS_STREAM_END:
 		c.post(event{kind: evStreamEnd})
+	case api.VoiceAssistantEvent_VOICE_ASSISTANT_RUN_START:
+		c.post(event{kind: evRunStart})
 	case api.VoiceAssistantEvent_VOICE_ASSISTANT_RUN_END:
 		c.post(event{kind: evRunEnd})
+	case api.VoiceAssistantEvent_VOICE_ASSISTANT_WAKE_WORD_START:
+		c.post(event{kind: evWakeStart})
+	case api.VoiceAssistantEvent_VOICE_ASSISTANT_WAKE_WORD_END:
+		c.post(event{kind: evWakeEnd})
 	case api.VoiceAssistantEvent_VOICE_ASSISTANT_ERROR:
 		c.post(event{kind: evError, code: e.Data["code"], msg: e.Data["message"]})
 	}
@@ -936,7 +1136,12 @@ func (c *conversation) tts(data []byte, end bool) {
 func (c *conversation) LookHere() { c.post(event{kind: evLookHere}) }
 
 // Start asks for a turn on a slot's pipeline. Wake detection and the buttons both use it.
-func (c *conversation) Start(slot int) { c.post(event{kind: evStart, slot: slot}) }
+func (c *conversation) Start(slot int) { c.post(event{kind: evStart, slot: slot, at: time.Now()}) }
+
+// Woke opens a turn for the wake word in slot.
+func (c *conversation) Woke(slot int) {
+	c.post(event{kind: evStart, slot: slot, woke: true, at: time.Now()})
+}
 
 // Cancel gives up on whatever is happening.
 func (c *conversation) Cancel() { c.post(event{kind: evCancel}) }
@@ -960,8 +1165,8 @@ func audioSettings() *api.VoiceAssistantAudioSettings {
 }
 
 // startAudio begins sending microphone frames. The streamer only reads, so it needs no coordination
-// beyond being told to stop.
-func (c *conversation) startAudio(slot int, followUp bool) {
+// beyond being told to stop. continued is a run that has had the audio up to now already.
+func (c *conversation) startAudio(slot int, followUp, continued bool) {
 	ctx, cancel := context.WithCancel(context.Background())
 	c.stopAudio = cancel
 
@@ -970,8 +1175,16 @@ func (c *conversation) startAudio(slot int, followUp bool) {
 	// be kept out of the microphone.
 	id := c.turn.ID()
 	be := c.be
-	safe.Go("turn audio", func() { c.stream(ctx, be, slot, followUp, id) })
+	streams.Add(1)
+	safe.Go("turn audio", func() {
+		defer streams.Done()
+		c.stream(ctx, be, slot, followUp, continued, id)
+	})
 }
+
+// streams counts the turns' audio goroutines still running, so a test can wait for the last to stop
+// before it changes the settings they read.
+var streams sync.WaitGroup
 
 func (c *conversation) stopStreaming() {
 	if c.stopAudio == nil {
@@ -984,7 +1197,7 @@ func (c *conversation) stopStreaming() {
 }
 
 // stream sends microphone frames until it is told to stop.
-func (c *conversation) stream(ctx context.Context, be backend, slot int, followUp bool, id string) {
+func (c *conversation) stream(ctx context.Context, be backend, slot int, followUp, continued bool, id string) {
 	frames, unlisten := c.source.Listen("turn")
 	defer unlisten()
 
@@ -996,6 +1209,7 @@ func (c *conversation) stream(ctx context.Context, be backend, slot int, followU
 	//
 	// A slot that chimes does not send it: whoever is talking waits for the tone, so the history holds
 	// the wake word rather than the request, and the tone itself is louder at the array than they are.
+	// That is as true of a wake Home Assistant's engine heard.
 	pre := c.source.Recent(mic.History)
 	if wakeword.Tones(slot, followUp) {
 		pre = nil
@@ -1031,6 +1245,13 @@ func (c *conversation) stream(ctx context.Context, be backend, slot int, followU
 		}
 	}
 	see(pre)
+
+	// A run Home Assistant's engine heard the word in has had all of it, and is already listening to
+	// what follows: without a tone the history is only the end-of-speech detector's, which measures the
+	// speaker by the word.
+	if continued {
+		pre = nil
+	}
 
 	if len(pre) > 0 {
 		for _, s := range pre {

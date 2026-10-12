@@ -362,6 +362,55 @@ radio_play_on_speaker:
         media_content_id: "{{ urls[station] }}"
 ```
 
+The `input_select`'s options are the station names the Favorites list shows, and the keys in `urls`
+are the same names (without an " on TuneIn" or " on iHeartRadio" at the end, which the device drops
+before it calls the script). In Home Assistant's script editor (**Edit in YAML**), leave out the
+first line, which is the script's id, and paste the rest one level less indented.
+
+**Stations from more than one place.** A station without a plain stream address can be played
+another way in the same script. This one plays a stream address if it has one, a Radio Browser
+station by its id (the `stationuuid` on radio-browser.info), and asks Music Assistant for anything
+else by name, which is how TuneIn stations play (with the TuneIn provider added in Music Assistant):
+
+```yaml
+radio_play_on_speaker:
+  fields:
+    station: {}
+    speaker: {}
+  variables:
+    urls:
+      "KXYZ 101.1": "https://stream.example.org/kxyz.mp3"
+    radio_browser:
+      "The Mountain": "<stationuuid>"
+    # This device's player from the Music Assistant integration, not its ESPHome one
+    music_assistant_player: media_player.kitchen_2
+  sequence:
+    - choose:
+        - conditions: "{{ station in urls }}"
+          sequence:
+            - action: media_player.play_media
+              target: { entity_id: "{{ speaker }}" }
+              data:
+                media_content_type: music
+                media_content_id: "{{ urls[station] }}"
+        - conditions: "{{ station in radio_browser }}"
+          sequence:
+            - action: media_player.play_media
+              target: { entity_id: "{{ speaker }}" }
+              data:
+                media_content_type: music
+                media_content_id: "media-source://radio_browser/{{ radio_browser[station] }}"
+      default:
+        - action: music_assistant.play_media
+          target: { entity_id: "{{ music_assistant_player }}" }
+          data:
+            media_id: "{{ station }}"
+            media_type: radio
+```
+
+The device drops " on TuneIn" or " on iHeartRadio" from the end of a name before it calls the
+script, so an option "BBC Radio 1 on TuneIn" reaches it as "BBC Radio 1".
+
 **Nothing to set up for the audio itself.** Home Assistant transcodes a stream for the device
 through its own ESPHome proxy, which is part of that integration: the URLs in the log with
 `/api/esphome/ffmpeg_proxy/` in them are its doing, and there is nothing to install or configure.
@@ -378,6 +427,7 @@ again on its own is this, not a fault.
 |---|---|
 | The daemon restarts every few seconds on a fresh install, log shows `slice bounds out of range` in `microwakeword` | v0.2.5 shipped damaged wake word models. Use v0.2.6 or later; on a unit already installed, copy good `.tflite` files over `/data/misc/techo5/models/`. |
 | An update from Home Assistant fails with `context deadline exceeded` | The download was too slow, usually on 2.4 GHz next to the unit's own Bluetooth. Press Install again; from v0.2.5 the unit moves itself to the network's 5 GHz radio when one is in range. |
+| An update from Home Assistant is slow, or fails with `nothing arrived` or `gave up after 2h0m0s` | The download is slow or keeps stalling. Newer builds keep what they fetched and carry on from there, on their own and on the next press of Install, and give up only after two hours. A download from the internet that crawls under 50 kB/s while the Wi-Fi is up gets one Wi-Fi reassociation (at most once every 6 hours); the log says `a download from the internet is crawling`. If it is still slow, reconnect the unit's Wi-Fi or restart it, then press Install again. |
 | The screen shows "hacked fastboot" | A leftover `reboot bootloader` request: `fastboot -s <serial> continue`. |
 | No SSH after the switch to the slot | SSH is off unless step 5 was done: turn on the SSH switch in Home Assistant and send a key with the `ssh_keys` action, or use the USB serial console. |
 | The unit sits in rescue | The screen says so: **RESCUE**, with the reason on the last line. No bootable slot. `slotctl status` shows why; the daemon still runs from a slot in rescue, so Home Assistant keeps working while you look. |

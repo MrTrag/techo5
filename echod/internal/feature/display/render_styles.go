@@ -6,16 +6,11 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"log/slog"
 	"math"
 	"strings"
-	"sync"
 	"time"
 
 	"golang.org/x/image/font"
-	"golang.org/x/image/font/gofont/gobold"
-	"golang.org/x/image/font/gofont/goregular"
-	"golang.org/x/image/font/opentype"
 
 	"github.com/HuskerMinion/techo5/echod/internal/lib/hass"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/locale"
@@ -25,41 +20,23 @@ import (
 // between the weather corner and whatever takes the foot of the screen - the running timers, the
 // glance strip, the music strip, the footer's words - which stay where they always are.
 
-// styleFont is the two faces the styles are cut from, parsed once.
-var styleFont struct {
-	once          sync.Once
-	bold, regular *opentype.Font
-}
-
 // styleFaceKey is one face: bold or not, at a size in this panel's own pixels.
 type styleFaceKey struct {
 	bold bool
 	size int
 }
 
-// styleFace is a face at size, in the Show 5's pixels and scaled to this panel. Sizes are rounded to a
-// few pixels, so a style that fits its text to the box keeps a handful of faces rather than one per
-// fraction of a pixel.
+// styleFace is a face at size in the screen font, in the Show 5's pixels and scaled to this panel.
+// Sizes are rounded to a few pixels, so a style that fits its text to the box keeps a handful of faces
+// rather than one per fraction of a pixel. A new font empties the set (useFont).
 func (r *renderer) styleFace(bold bool, size int) font.Face {
-	styleFont.once.Do(func() {
-		styleFont.bold, _ = opentype.Parse(gobold.TTF)
-		styleFont.regular, _ = opentype.Parse(goregular.TTF)
-	})
 	px := max(r.s(size)/4*4, 8)
 	k := styleFaceKey{bold, px}
 	if f, ok := r.styleFaces[k]; ok {
 		return f
 	}
-	src := styleFont.regular
-	if bold {
-		src = styleFont.bold
-	}
-	if src == nil {
-		return r.small
-	}
-	f, err := opentype.NewFace(src, &opentype.FaceOptions{Size: float64(px), DPI: 72, Hinting: font.HintingFull})
-	if err != nil {
-		slog.Error("making a clock style's face failed", "size", px, "err", err)
+	f := fontFace(r.font, bold, float64(px))
+	if f == nil {
 		return r.small
 	}
 	if r.styleFaces == nil || len(r.styleFaces) > 24 {
@@ -99,6 +76,10 @@ func (r *renderer) styledClock(s scene, style string) {
 		bottom -= r.s(64)
 	}
 	box := image.Rect(r.margin, r.s(84), r.w-r.margin, bottom)
+	r.cornered = false
+	if align, foot := clockAlign(); foot && cornerStyle(style) {
+		box, r.cornered = r.cornerBox(s, style, align, bottom), true
+	}
 
 	corner := true
 	switch style {
@@ -107,15 +88,19 @@ func (r *renderer) styledClock(s scene, style string) {
 	case styleFlip:
 		r.ink = r.dayInk()
 		r.flipClock(s.now, image.Rect(box.Min.X, box.Min.Y, box.Max.X, box.Max.Y-r.s(56)))
-		r.styleDate(s, r.w/2, box.Max.Y-r.s(8), 0)
+		r.styleDateUnder(s, box, box.Max.Y-r.s(8))
 	case styleLED:
 		r.ink = r.dayInk()
+		if r.cornered {
+			// Small, the unlit segments crowd the lit ones: fainter, so the time reads first.
+			r.ink.ghost = faded(r.ink.ghost, 96)
+		}
 		digits := image.Rect(box.Min.X, box.Min.Y+r.s(16), box.Max.X, box.Max.Y-r.s(76))
 		r.ledClock(s.now, digits, r.ampm)
-		r.styleDate(s, r.w/2, box.Max.Y-r.s(8), 0)
+		r.styleDateUnder(s, box, box.Max.Y-r.s(8))
 	case styleAnalog:
 		r.analogStyle(s, box)
-		corner = false
+		corner = r.cornered // in a corner it leaves the weather to the weather corner
 	case styleWords:
 		r.wordsStyle(s, box)
 	case styleSun:
@@ -151,14 +136,21 @@ func (r *renderer) dayInk() clockInk {
 	}
 }
 
-// styleDate is the date line, with the next alarm after it when it is within a day, at x (centered
-// on x, or starting there with align -1), and makes it the tap that opens the calendar.
-func (r *renderer) styleDate(s scene, x, baseline, align int) {
-	r.styleDateIn(r.small, s, x, baseline, align, 0)
+// styleDateUnder is the date line centered under a style drawn in box (styleDateIn). In a corner the box is narrower than
+// a long date, with the next alarm after it, would be: there it is cut to the box, so it neither starts
+// off the screen's edge nor runs on over the middle.
+func (r *renderer) styleDateUnder(s scene, box image.Rectangle, baseline int) {
+	width := 0
+	if r.cornered {
+		width = box.Dx()
+	}
+	r.styleDateIn(r.small, s, box.Min.X+box.Dx()/2, baseline, 0, width)
 }
 
-// styleDateIn is styleDate in face, cut to room when that is more than nothing: the next alarm can
-// make the line longer than the space a style has for it.
+// styleDateIn is the date line, with the next alarm after it when it is within a day, at x (centered
+// on x, or starting there with align -1), and makes it the tap that opens the calendar. It is cut to
+// room when that is more than nothing: the next alarm can make the line longer than the space a style
+// has for it.
 func (r *renderer) styleDateIn(face font.Face, s scene, x, baseline, align, room int) {
 	date := locale.LongDate(s.now, screenLang()) + alarmSuffix(s)
 	if room > 0 && r.width(face, date) > room {
@@ -206,20 +198,26 @@ func (r *renderer) bigStyle(s scene, box image.Rectangle) {
 
 // analogStyle is a dial on the left, and the day, the date and the weather beside it.
 func (r *renderer) analogStyle(s scene, box image.Rectangle) {
-	rad := float64(min(box.Dy()/2+r.s(20), box.Dx()/4))
+	// In a corner (Clock position) the dial and the words beside it come down together.
+	k, rad := 1.0, float64(min(box.Dy()/2+r.s(20), box.Dx()/4))
+	if r.cornered {
+		k, rad = 0.62, float64(min(box.Dy()/2, box.Dx()/5))
+	}
+	at := func(n int) int { return int(float64(n) * k) }
 	cx := float64(box.Min.X) + rad + float64(r.s(8))
 	cy := float64(box.Min.Y+box.Dy()/2) - float64(r.s(10))
 	r.dial(s.now, cx, cy, rad)
 
-	x := int(cx+rad) + r.s(64)
+	x := int(cx+rad) + r.s(at(64))
 	mid := box.Min.Y + box.Dy()/2
-	day := r.styleFace(true, 56)
-	r.text(day, locale.Weekday(s.now, screenLang()), x, mid-r.s(44), cream)
-	df := r.styleFace(false, 40)
-	date := r.clipTo(df, locale.MonthDay(s.now, screenLang())+alarmSuffix(s), r.w-r.margin-x)
-	r.text(df, date, x, mid+r.s(12), dateColor(dim))
-	r.setDateAt(image.Rect(x, mid-r.s(96), x+max(r.width(day, locale.Weekday(s.now, screenLang())), r.width(df, date)), mid+r.s(24)))
-	if line := weatherText(s); line != "" {
+	day := r.styleFace(true, at(56))
+	r.text(day, locale.Weekday(s.now, screenLang()), x, mid-r.s(at(44)), cream)
+	df := r.styleFace(false, at(40))
+	date := r.clipTo(df, locale.MonthDay(s.now, screenLang())+alarmSuffix(s), box.Max.X-x)
+	r.text(df, date, x, mid+r.s(at(12)), dateColor(dim))
+	r.setDateAt(image.Rect(x, mid-r.s(at(96)), x+max(r.width(day, locale.Weekday(s.now, screenLang())), r.width(df, date)), mid+r.s(at(24))))
+	// In a corner the weather corner at the top has the weather.
+	if line := weatherText(s); line != "" && !r.cornered {
 		wy := mid + r.s(82)
 		ix := x
 		if s.weather.Condition != "" {
@@ -287,29 +285,36 @@ func (r *renderer) wordsStyle(s scene, box image.Rectangle) {
 	at := func(n int) int { return int(float64(n) * k) }
 	x := box.Min.X + r.s(24)
 	room := box.Dx() - r.s(48)
+	// In a corner the small words keep a size that can still be read.
+	least := func(size, floor int) int {
+		if r.cornered {
+			return max(at(size), floor)
+		}
+		return at(size)
+	}
 	fit := func(bold bool, size int, text string, w int) font.Face {
-		f := r.styleFace(bold, at(size))
+		f := r.styleFace(bold, size)
 		if tw := r.width(f, text); tw > w {
-			f = r.styleFace(bold, at(size)*w/tw)
+			f = r.styleFace(bold, size*w/tw)
 		}
 		return f
 	}
-	small := r.styleFace(false, at(44))
+	small := r.styleFace(false, least(44, 32))
 	y := box.Min.Y + r.s(at(44))
 	r.text(small, "it's", x, y, dim)
 	if lead != "" {
-		f := fit(true, 104, lead, room)
+		f := fit(true, at(104), lead, room)
 		y += capHeight(f) + r.s(at(34))
 		r.text(f, lead, x, y, cream)
 	}
-	hf := fit(true, 124, hour, room*3/5)
+	hf := fit(true, at(124), hour, room*3/5)
 	y += capHeight(hf) + r.s(at(34))
 	r.text(hf, hour, x, y, dateColor(amber))
 	if period != "" {
-		pf := fit(false, 44, period, room-r.width(hf, hour)-r.s(36))
+		pf := fit(false, least(44, 32), period, room-r.width(hf, hour)-r.s(36))
 		r.text(pf, period, x+r.width(hf, hour)+r.s(30), y, dim)
 	}
-	r.styleDateIn(r.styleFace(false, at(34)), s, x, y+r.s(at(70)), -1, box.Max.X-x)
+	r.styleDateIn(r.styleFace(false, least(34, 28)), s, x, y+r.s(at(70)), -1, box.Max.X-x)
 }
 
 // sunStyle is the day's sun: its path from sunrise to sunset across the top, the sun where it is now,
@@ -352,9 +357,11 @@ func (r *renderer) sunStyle(s scene, box image.Rectangle) bool {
 	default:
 		r.fxDisc(x1, horizon, float64(r.s(10)), lerp(walnut, amber, 0.5), 1)
 	}
-	r.text(r.tiny, clockText(rise), box.Min.X+r.s(20), int(horizon)+r.s(30), dim)
-	st := clockText(set)
-	r.text(r.tiny, st, box.Max.X-r.s(20)-r.width(r.tiny, st), int(horizon)+r.s(30), dim)
+	if !r.cornered { // in a corner too small to read: the arc says it alone
+		r.text(r.tiny, clockText(rise), box.Min.X+r.s(20), int(horizon)+r.s(30), dim)
+		st := clockText(set)
+		r.text(r.tiny, st, box.Max.X-r.s(20)-r.width(r.tiny, st), int(horizon)+r.s(30), dim)
+	}
 
 	// The time and date under the horizon, the weather and the light left under those.
 	hm, ampm := clockHM(s.now), clockSuffix(s.now)
@@ -372,12 +379,12 @@ func (r *renderer) sunStyle(s scene, box image.Rectangle) bool {
 		aw = r.width(r.title, ampm) + gap
 	}
 	base := int(horizon) + r.s(40) + capHeight(tf)
-	x := (r.w - r.width(tf, hm) - aw) / 2
+	x := box.Min.X + (box.Dx()-r.width(tf, hm)-aw)/2
 	r.text(tf, hm, x, base, cream)
 	if ampm != "" {
 		r.text(r.title, ampm, x+r.width(tf, hm)+gap, base, dateColor(amber))
 	}
-	r.styleDate(s, r.w/2, base+r.s(46), 0)
+	r.styleDateUnder(s, box, base+r.s(46))
 	line := weatherText(s)
 	light := sunWords(s.now, rise, set)
 	if line != "" && light != "" {
@@ -385,8 +392,8 @@ func (r *renderer) sunStyle(s scene, box image.Rectangle) bool {
 	}
 	line += light
 	if line != "" && base+r.s(88) <= box.Max.Y+r.s(20) {
-		r.text(r.tiny, line, (r.w-r.width(r.tiny, line))/2, base+r.s(88), dim)
-		r.setWeatherAt(image.Rect(r.margin, base+r.s(60), r.w-r.margin, base+r.s(100)))
+		r.text(r.tiny, line, box.Min.X+(box.Dx()-r.width(r.tiny, line))/2, base+r.s(88), dim)
+		r.setWeatherAt(image.Rect(box.Min.X, base+r.s(60), box.Max.X, base+r.s(100)))
 	}
 	return true
 }
@@ -403,7 +410,8 @@ func sunWords(now, rise, set time.Time) string {
 	return "Sunset was at " + clockText(set)
 }
 
-// dashboardStyle is the time with the day's next events beside it and the coming days' weather under.
+// dashboardStyle is the time with the day's next events beside it and the coming days' weather along
+// the foot.
 func (r *renderer) dashboardStyle(s scene, box image.Rectangle) {
 	hm, ampm := clockHM(s.now), clockSuffix(s.now)
 	tf := r.styleFace(true, 132)
@@ -431,6 +439,8 @@ func (r *renderer) dashboardStyle(s scene, box image.Rectangle) {
 		r.text(r.tiny, r.clipTo(r.tiny, e.Summary, r.w-r.margin-tx), tx, y, cream)
 		y += r.s(44)
 	}
+	// A tap on the column, its heading to its last line, opens the agenda.
+	r.setNextAt(image.Rect(col-r.s(20), top-r.s(10), r.w-r.margin, max(y-r.s(30), top+r.s(76))+r.s(10)))
 
 	// The coming days, when there is room for them; otherwise today's weather on a line, so the style that
 	// leaves out the weather corner still says what it is outside and still opens the forecast.
@@ -449,11 +459,12 @@ func (r *renderer) dashboardStyle(s scene, box image.Rectangle) {
 		return
 	}
 	days = days[:min(len(days), 5)]
-	row := base + r.s(86)
-	r.fxLine(float64(box.Min.X), float64(row), float64(box.Max.X), float64(row), float64(r.s(2)), ember, 1)
-	cw := box.Dx() / len(days)
+	// The row sits at the foot, so the middle of the screen is left clear for a tap that starts Assist.
+	row := max(base+r.s(86), box.Max.Y-r.s(150))
+	left, right := r.dashRowSpan(days, box, row, s.callButton)
+	cw := (right - left) / len(days)
 	for i, d := range days {
-		cx := box.Min.X + cw*i + cw/2
+		cx := left + cw*i + cw/2
 		name := locale.ShortWeekday(d.When, screenLang())
 		if i == 0 {
 			name = locale.Today(screenLang())
@@ -464,26 +475,92 @@ func (r *renderer) dashboardStyle(s scene, box image.Rectangle) {
 		}
 		r.text(r.tiny, name, cx-r.width(r.tiny, name)/2, row+r.s(36), c)
 		r.weatherIcon(d.Condition, cx, row+r.s(80), r.s(44))
-		t := fmt.Sprintf("%.0f°  %.0f°", d.High, d.Low)
+		t := dayTemps(d)
 		r.text(r.tiny, t, cx-r.width(r.tiny, t)/2, row+r.s(138), cream)
 	}
-	r.setWeatherAt(image.Rect(box.Min.X, row, box.Max.X, row+r.s(150)))
+	r.setWeatherAt(image.Rect(left, row, right, row+r.s(150)))
+}
+
+func dayTemps(d hass.Day) string { return fmt.Sprintf("%.0f°  %.0f°", d.High, d.Low) }
+
+// dashRowSpan is where across the row of the coming days is drawn. The Call button has the bottom-left
+// corner, over Today's icon and temperatures: while it shows level with the row, the row narrows from
+// both sides, staying centered, just enough that Today clears it.
+func (r *renderer) dashRowSpan(days []hass.Day, box image.Rectangle, row int, callButton bool) (left, right int) {
+	left, right = box.Min.X, box.Max.X
+	b := r.callButtonRect()
+	n := len(days)
+	if !callButton || n < 2 || row+r.s(150) <= b.Min.Y {
+		return left, right
+	}
+	// Today's icon and temperatures, half of the wider, and how far their left edge is short of clear.
+	half := max(r.width(r.tiny, dayTemps(days[0])), r.s(44)) / 2
+	short := b.Max.X + r.s(12) + half - (left + (right-left)/n/2)
+	if short <= 0 {
+		return left, right
+	}
+	// Each step in from both sides moves Today's center right by 1 - 1/n of it.
+	in := (short*n + n - 2) / (n - 1)
+	return left + in, right - in
 }
 
 // dashWhen is when an event starts, as the dashboard writes it: "Now" for one under way, its time
-// today, "Tmrw" and the time after that, "Today" or "Tomorrow" for one with no time.
+// today, "Tmrw" and the time tomorrow, the weekday and the time after that, and "Today", "Tomorrow" or
+// the weekday alone for one with no time.
 func dashWhen(e hass.Event, now time.Time) string {
 	start, allDay := e.Start, e.AllDay
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	tomorrow, later := today.AddDate(0, 0, 1), today.AddDate(0, 0, 2)
 	switch {
 	case !allDay && !start.After(now):
 		return "Now"
-	case allDay && start.Before(today.AddDate(0, 0, 1)):
+	case allDay && start.Before(tomorrow):
 		return "Today"
-	case allDay:
+	case allDay && start.Before(later):
 		return "Tomorrow"
-	case start.Before(today.AddDate(0, 0, 1)):
+	case allDay:
+		return locale.ShortWeekday(start, screenLang())
+	case start.Before(tomorrow):
 		return clockText(start)
+	case start.Before(later):
+		return "Tmrw " + strings.TrimSpace(clockText(start))
 	}
-	return "Tmrw " + strings.TrimSpace(clockText(start))
+	return locale.ShortWeekday(start, screenLang()) + " " + strings.TrimSpace(clockText(start))
+}
+
+// cornerStyle is whether a style has a small version for a corner at the foot (Clock position). The
+// Dashboard, the Agenda and World are pages of their own rather than a clock, and keep the whole
+// screen.
+func cornerStyle(style string) bool {
+	return style != styleDashboard && style != styleAgenda && style != styleWorld
+}
+
+// cornerPct is the share of the width a style gets in a corner, the most of it the date may take.
+const cornerPct = 44
+
+// cornerBox is the box a style is drawn in at the foot, in the corner align says: the left (clear of
+// the Call button) or the right, its foot where the whole screen's box ends. The dial and the binary
+// lights are wide for their height, so theirs is narrower, to keep them clear of the middle.
+func (r *renderer) cornerBox(s scene, style string, align, bottom int) image.Rectangle {
+	pct := cornerPct
+	switch style {
+	case styleAnalog:
+		pct = 40
+	case styleBinary:
+		pct = 36
+	}
+	if r.w < 2*r.h {
+		// The Show 8's panel is taller for its width, so a style drawn to the box's height comes out
+		// wider for it: a smaller share of the width keeps it as far from the middle.
+		pct = pct * 39 / 44
+	}
+	w, h := r.w*pct/100, r.s(190)
+	x := r.w - r.margin - w
+	if align < 0 {
+		x = r.margin
+		if s.callButton {
+			x = r.callButtonRect().Max.X + r.s(24)
+		}
+	}
+	return image.Rect(x, bottom-h, x+w, bottom)
 }

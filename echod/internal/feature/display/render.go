@@ -7,15 +7,11 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
-	"log/slog"
 	"math"
 	"sync"
 	"time"
 
 	"golang.org/x/image/font"
-	"golang.org/x/image/font/gofont/gobold"
-	"golang.org/x/image/font/gofont/goregular"
-	"golang.org/x/image/font/opentype"
 
 	"github.com/HuskerMinion/techo5/echod/internal/config"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/alarm"
@@ -24,6 +20,7 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/feature/dashboard"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/home"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/media"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/notify"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/phone"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/remind"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/security"
@@ -62,12 +59,15 @@ type scene struct {
 	// The dashboard page, drawn instead of the clock while showDash is set: how it is shown, and
 	// when streamed, what arrived.
 	showDash   bool
+	dashAsked  bool // the dashboard a tap on the night screen opened (dashNight): shown over the night clock
 	dashMode   config.DashboardMode
 	dash       dashboard.View
 	drawn      dashboard.Drawn
 	dashScroll int
-	dashAdjust dashAdjusting // a level a finger is sliding
-	dashTiles  string        // the Dashboard tiles setting: "", "large" or "fill"
+	dashAdjust dashAdjusting         // a level a finger is sliding
+	dashTiles  string                // the Dashboard tiles setting: "", "large" or "fill"
+	dashColor  *dashboard.LightColor // the color sheet over the page, while it is up
+	dashMedia  *mediaView            // the media sheet over the page, while it is up
 
 	// bt is the Bluetooth audio state: the pairing page replaces everything while it is on, and a
 	// connected device is named in the footer.
@@ -79,8 +79,10 @@ type scene struct {
 	// security feeds the settings screen's Privacy & Security card.
 	security security.State
 
-	// call is the phone: while one rings, is placed or is up, its page is over everything.
-	call phone.State
+	// call is the phone: while one rings, is placed or is up, its page is over everything. atDoor is
+	// the doorbell pressed during it, which the call's page says rather than ringing (feature/doorbell).
+	call   phone.State
+	atDoor bool
 
 	// ring is a timer or an alarm sounding: the ringing page is over everything. snooze is its length.
 	ring   ringState
@@ -154,6 +156,11 @@ type scene struct {
 	cameraSound     bool
 	cameraSoundLive bool
 	cameras         []config.Camera
+
+	// notification is a notification of words from Home Assistant (feature/notify), with
+	// showNotification saying one is up; a picture notification is the camera page instead.
+	notification     notify.Notification
+	showNotification bool
 
 	// talkOffered is whether that view has Talk (feature/talkback), and talk is where a talk is.
 	talkOffered bool
@@ -249,6 +256,9 @@ type renderer struct {
 	// way; ink is what the LED and flip clocks are drawn in for the frame in hand.
 	flip flipState
 	ink  clockInk
+	// cornered is whether the day style in hand is drawn small in a corner at the foot (Clock
+	// position), for the frame in hand.
+	cornered bool
 
 	// deckZones are the deck's buttons where they were last drawn, in order, read by the touch
 	// goroutine under zmu (render_deck.go).
@@ -299,11 +309,13 @@ type renderer struct {
 	alertMax int             // how far the alert page could scroll in the frame last drawn
 	shapes   alertOverlay    // the alert shapes drawn over the rain map, kept while they stay the same
 	dateAt   image.Rectangle // the date under the clock, the same way: a tap there opens the calendar
+	nextAt   image.Rectangle // the Dashboard's next events, the same way: a tap there opens the agenda
 	popupAt  image.Rectangle // an event's pop-up, the same way: a tap on it takes it down
 
 	// calHits are the calendar page's buttons, days and events as last drawn (render_calendar.go).
-	calMu   sync.Mutex
-	calHits []calHit
+	calMu        sync.Mutex
+	calHits      []calHit
+	calAgendaMax int // how far the agenda could scroll, in rows
 
 	// weatherKept is the forecast page as last drawn, and weatherKey what it showed: while the sky
 	// moves the page is drawn twelve times a second, and the page itself changes once a minute.
@@ -370,44 +382,43 @@ func newRenderer(dst *image.RGBA) *renderer {
 	// Built in place: paint carries a mutex, so it must never be assembled elsewhere and copied in.
 	r := &renderer{paint: paint{dst: dst, w: dst.Rect.Dx(), h: dst.Rect.Dy(), sNum: dst.Rect.Dx(), sDen: drawnFor}}
 	r.margin = r.s(40)
-	bold, err := opentype.Parse(gobold.TTF)
-	if err != nil {
-		slog.Error("parsing the bold font failed", "err", err)
-	}
-	regular, err := opentype.Parse(goregular.TTF)
-	if err != nil {
-		slog.Error("parsing the regular font failed", "err", err)
-	}
-	// Sizes are points at 72 DPI, which makes them pixels, so they scale with everything else.
-	face := func(f *opentype.Font, size int) font.Face {
-		if f == nil {
-			return nil
-		}
-		fc, err := opentype.NewFace(f, &opentype.FaceOptions{Size: float64(r.s(size)), DPI: 72, Hinting: font.HintingFull})
-		if err != nil {
-			slog.Error("making a font face failed", "size", size, "err", err)
-			return nil
-		}
-		return fc
-	}
-	r.clock = face(bold, 230)
-	r.big = face(bold, 100)
-	r.ampm = face(bold, 56)
-	r.title = face(bold, 48)
-	r.body = face(regular, 42)
-	r.small = face(regular, 34)
-	r.tiny = face(regular, 26)
-	r.micro = face(regular, 18)
+	k, _ := r.fontChanged()
+	r.makeFaces(k)
+	return r
+}
+
+// makeFaces makes the renderer's faces in the font named (font.go). Sizes are points at 72 DPI, which
+// makes them pixels, so they scale with everything else.
+func (r *renderer) makeFaces(k fontKey) {
+	name := k.name
+	face := func(bold bool, size int) font.Face { return fontFace(name, bold, float64(r.s(size))) }
+	r.font, r.fontGen, r.styleFaces = name, k.gen, nil
+	r.clock = face(true, 230)
+	r.big = face(true, 100)
+	r.ampm = face(true, 56)
+	r.title = face(true, 48)
+	r.body = face(false, 42)
+	r.small = face(false, 34)
+	r.tiny = face(false, 26)
+	r.micro = face(false, 18)
 	if r.scaled() {
-		fc := sheetFacesAt(r.s)
+		fc := sheetFacesAt(name, r.s)
 		r.fc = &fc
 	}
-	return r
+}
+
+// useFont makes the faces again when the screen font, or the owner's own fonts, have changed since
+// they were made, so a new choice is drawn from the next frame on.
+func (r *renderer) useFont() {
+	if k, changed := r.fontChanged(); changed {
+		r.makeFaces(k)
+	}
 }
 
 // draw composes a whole frame. Everything is repainted: the canvas is small and a full paint is
 // simpler than tracking what changed.
 func (r *renderer) draw(s scene) {
+	r.useFont()
 	if !s.showDeck {
 		// Where the deck's buttons were is nothing to tap once something else is drawn there.
 		r.zmu.Lock()
@@ -430,6 +441,7 @@ func (r *renderer) draw(s scene) {
 	r.artDrawn = false
 	r.setWeatherAt(image.Rectangle{})
 	r.setDateAt(image.Rectangle{})
+	r.setNextAt(image.Rectangle{})
 	// The camera page's controls are tappable only in a frame that draws them, from when it is done.
 	r.drawnSound, r.drawnTalk = image.Rectangle{}, image.Rectangle{}
 	defer r.publishCameraTaps()
@@ -440,7 +452,8 @@ func (r *renderer) draw(s scene) {
 	// the night light and takes the screen; a turn, a camera, an announcement or a reminder is shown in
 	// its place at the night light's level.
 	if s.redClock && s.phase == "idle" && s.call.Phase == phone.Idle && !s.setupAsking && !s.showVideoAsk &&
-		!s.showWifi && !s.bt.Pairing && !s.showCamera && !s.showAnnouncement && !s.showReminder {
+		!s.showWifi && !s.bt.Pairing && !s.showCamera && !s.showAnnouncement && !s.showReminder &&
+		!(s.showDash && s.dashAsked) {
 		r.redClockPage(s)
 		return
 	}
@@ -498,9 +511,12 @@ func (r *renderer) draw(s scene) {
 			r.announcementStrip(s)
 		}
 		// The card is in the middle and the strips along the bottom, so a reminder and an
-		// announcement can both be up at once.
+		// announcement can both be up at once. One card at a time: a reminder over a notification
+		// over an event's pop-up.
 		if s.showReminder {
 			r.reminderCard(s)
+		} else if s.showNotification {
+			r.notifyCard(s)
 		} else if s.popup != nil {
 			r.popupCard(s, *s.popup)
 		}
@@ -679,6 +695,11 @@ func (r *renderer) timeAndDateAt(now time.Time, base int, dateSuffix string, ali
 	r.text(ampmFace, ampm, x+hw+gap, base, dateColor(amber)) // a chosen date color takes the AM/PM with it
 
 	date := locale.LongDate(now, screenLang()) + dateSuffix
+	if room := r.w * cornerPct / 100; align != 0 && r.width(r.small, date) > room {
+		// In a corner, as wide as the other styles' corner box at most (styleDateIn): the day and month
+		// short first, so the alarm still fits, and cut only if that is not enough.
+		date = r.clipTo(r.small, locale.ShortDate(now, screenLang())+dateSuffix, room)
+	}
 	x = across(r.width(r.small, date))
 	r.text(r.small, date, x, base+dateGap, dateColor(dim))
 	return image.Rect(x, base+dateGap-r.s(30), x+r.width(r.small, date), base+dateGap+r.s(10))
@@ -783,6 +804,19 @@ func (r *renderer) dateTapped(p image.Point) bool {
 	r.weatherMu.Lock()
 	defer r.weatherMu.Unlock()
 	return !r.dateAt.Empty() && p.In(r.dateAt)
+}
+
+func (r *renderer) setNextAt(b image.Rectangle) {
+	r.weatherMu.Lock()
+	r.nextAt = b
+	r.weatherMu.Unlock()
+}
+
+// nextTapped is whether a tap at p landed on the Dashboard's next events, as last drawn.
+func (r *renderer) nextTapped(p image.Point) bool {
+	r.weatherMu.Lock()
+	defer r.weatherMu.Unlock()
+	return !r.nextAt.Empty() && p.In(r.nextAt)
 }
 
 func (r *renderer) setWeatherAt(b image.Rectangle) {
