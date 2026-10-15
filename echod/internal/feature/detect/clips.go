@@ -50,6 +50,7 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/feature/talkback"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/voice"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/wakeword"
+	"github.com/HuskerMinion/techo5/echod/internal/hardware/mic"
 	"github.com/HuskerMinion/techo5/echod/internal/layout"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/safe"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/safename"
@@ -89,6 +90,10 @@ type clip struct {
 	model        string
 	peak, cutoff float64
 	pcm          []int16
+	// loud is how loud the word was before and after the leveler (jarvis): which Dot heard it loudest
+	// is the room it was said in, and the other-room floor is set from the same figures. Nil when not
+	// measured.
+	loud *mic.Loudness
 }
 
 // clips is the recorder. frame runs on the audio path with the engine's lock held, so it only copies.
@@ -121,6 +126,7 @@ type clips struct {
 	blocked  func() bool                 // something else has the room: see clipsBlocked
 	model    func(slot int) string       // the slot's model id
 	cutoff   func(slot int) float64      // the slot's threshold, for a near miss
+	loudness func() mic.Loudness         // the last ShadowClip of the microphone (jarvis); nil, none
 	now      func() time.Time            // replaced in tests
 	after    func(time.Duration, func()) // time.AfterFunc; replaced in tests
 	save     func(clip)                  // writes off the caller's goroutine; replaced in tests
@@ -162,6 +168,9 @@ func startClips(e *Engine, publish func(total int, kinds string)) *clips {
 			return 0
 		}
 		return e.Threshold(slot)
+	}
+	if e.source != nil {
+		c.loudness = func() mic.Loudness { return e.source.Loudness(ShadowClip) }
 	}
 	c.recount()
 	e.OnFrame = c.frame
@@ -351,6 +360,7 @@ func (c *clips) snapshot() []int16 {
 func (c *clips) scored(slot int, peak, cutoff float64) {
 	// Asked before mu: the engine's lock is taken before mu on the audio path, never after it.
 	model := c.model(slot)
+	loud := c.loud()
 	if !c.allowed(slot) {
 		return
 	}
@@ -358,7 +368,7 @@ func (c *clips) scored(slot int, peak, cutoff float64) {
 	if c.short() {
 		return
 	}
-	cl := &clip{kind: "wake", at: c.now(), slot: slot, model: model, peak: peak, cutoff: cutoff, pcm: c.snapshot()}
+	cl := &clip{kind: "wake", at: c.now(), slot: slot, model: model, peak: peak, cutoff: cutoff, pcm: c.snapshot(), loud: loud}
 	c.pending = append(c.pending, cl)
 	c.after(mistakeWithin, func() {
 		c.mu.Lock()
@@ -403,6 +413,7 @@ func (c *clips) mistaken(m voice.Mistake) {
 // engine's NearMiss: anything under it is not reported at all.
 func (c *clips) nearMiss(slot int, peak float64) {
 	model, cutoff := c.model(slot), c.cutoff(slot)
+	loud := c.loud()
 	if !c.allowed(slot) {
 		return
 	}
@@ -410,7 +421,19 @@ func (c *clips) nearMiss(slot int, peak float64) {
 	if c.short() {
 		return
 	}
-	c.save(clip{kind: "nearmiss", at: c.now(), slot: slot, model: model, peak: peak, cutoff: cutoff, pcm: c.snapshot()})
+	c.save(clip{kind: "nearmiss", at: c.now(), slot: slot, model: model, peak: peak, cutoff: cutoff, pcm: c.snapshot(), loud: loud})
+}
+
+// loud is how loud the last ShadowClip of the microphone was, or nil (jarvis). A wake is saved a Hold
+// after it fired and a near miss NearMissSettle after its peak, so those two seconds hold the word,
+// measured the same way as a shadow clip's and a turn's. Taken before mu, like model: the history has
+// its own lock, and the engine's is not held here.
+func (c *clips) loud() *mic.Loudness {
+	if c.loudness == nil {
+		return nil
+	}
+	l := c.loudness()
+	return &l
 }
 
 // clipMeta is what is known about a clip: its sidecar, and one entry of what wake_clips answers.
@@ -423,6 +446,24 @@ type clipMeta struct {
 	Model  string  `json:"model"`
 	Score  float64 `json:"score"`
 	Cutoff float64 `json:"cutoff"`
+	// Loudness is the word's level before and after the leveler (jarvis), in the same form as a
+	// recording's sidecar: heard_db, raw_db, floor_db.
+	Loudness *clipLoudness `json:"loudness,omitempty"`
+}
+
+// clipLoudness is a clip's mic.Loudness as its sidecar holds it, to a tenth of a dB (jarvis).
+type clipLoudness struct {
+	Heard float64 `json:"heard_db"`
+	Raw   float64 `json:"raw_db"`
+	Floor float64 `json:"floor_db"`
+}
+
+func loudnessMeta(l *mic.Loudness) *clipLoudness {
+	if l == nil {
+		return nil
+	}
+	r := func(v float64) float64 { return math.Round(v*10) / 10 }
+	return &clipLoudness{Heard: r(l.Heard), Raw: r(l.Raw), Floor: r(l.Floor)}
 }
 
 // write puts a clip on the device, with its sidecar, and lets the oldest of its kind go. The name
@@ -439,7 +480,7 @@ func (c *clips) write(cl clip) {
 	}
 	path := filepath.Join(dir, name+".wav")
 	meta, _ := json.Marshal(clipMeta{Kind: cl.kind, At: cl.at.UTC().Format(time.RFC3339), Slot: cl.slot + 1,
-		Model: cl.model, Score: round3(cl.peak), Cutoff: round3(cl.cutoff)})
+		Model: cl.model, Score: round3(cl.peak), Cutoff: round3(cl.cutoff), Loudness: loudnessMeta(cl.loud)})
 	// disk from before the switch is looked at: turned off before this, the folders the purge took away
 	// are not made again; turned off after, the purge waits for disk and takes this clip with the rest.
 	c.disk.Lock()
