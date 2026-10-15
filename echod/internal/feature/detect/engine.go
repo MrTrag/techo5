@@ -133,6 +133,9 @@ type Engine struct {
 	// Assistant's engine can tell apart (see voice's confirm).
 	Candidate   func(slot int) float64
 	OnCandidate func(slot int, peak float64)
+	// OnFrame sees every frame the detector scores, with the engine's lock held: it must only copy
+	// (clips.go).
+	OnFrame func(frame []int16)
 
 	// OnReady runs once per slot, the first time its model produces a score. That is the first moment
 	// the wake word could be detected at all: these are streaming models with a window to fill, and
@@ -166,6 +169,10 @@ type slot struct {
 	holding  bool
 	holdEnds time.Time
 	crossing float64
+	// crossCutoff is the cutoff the crossing was judged against. By the time the hold ends the wake tone
+	// is playing, and a threshold read then carries the canceller's slack (thresholdFor), which is not
+	// what the word had to reach.
+	crossCutoff float64
 
 	// shadow is whether the detection being held was watched rather than acted on, so the peak is
 	// reported as such when the hold ends.
@@ -485,6 +492,9 @@ func (e *Engine) score(frame []int16, source *mic.Source) {
 	if e.quiet {
 		return
 	}
+	if e.OnFrame != nil {
+		e.OnFrame(frame)
+	}
 
 	// Always feed. These are streaming models: a gap in the input is a gap in their history, and the
 	// next utterance gets scored from a cold state. The refractory below suppresses reporting, not
@@ -560,10 +570,11 @@ func (e *Engine) judge(n int, s *slot, score float64, now time.Time, source *mic
 			what = "wake ignored: said in another room"
 		}
 		slog.Info(what, "slot", n+1, "id", s.model.ID, "peak", s.peak,
-			"crossing", s.crossing, "cutoff", cutoff, "dropped", source.Dropped())
-		// A shadowed slot or a word from another room opened nothing, so neither is a wake's score.
+			"crossing", s.crossing, "cutoff", s.crossCutoff, "dropped", source.Dropped())
+		// A shadowed slot or a word from another room opened nothing, so neither is a wake's score (nor,
+		// since Keep wake clips hangs off OnScored, a wake clip).
 		if e.OnScored != nil && !s.shadow && !s.ignored {
-			i, peak := n, s.peak
+			i, peak, cutoff := n, s.peak, s.crossCutoff
 			safe.Go("wake scored", func() { e.OnScored(i, peak, cutoff) })
 		}
 		s.holding, s.shadow, s.ignored, s.peak = false, false, false, 0
@@ -595,7 +606,7 @@ func (e *Engine) judge(n int, s *slot, score float64, now time.Time, source *mic
 
 	// Feedback fires now; the peak is only for the log, and the slot settles when the hold ends.
 	s.holding, s.holdEnds = true, now.Add(Hold)
-	s.crossing, s.peak = score, score
+	s.crossing, s.peak, s.crossCutoff = score, score, cutoff
 
 	// How the score got here, frame by frame, ending on this one. Logged for every crossing, live or
 	// shadowed: it is the device's own curve over the audio that a turn's recording or a shadow clip
