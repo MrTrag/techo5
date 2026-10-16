@@ -79,6 +79,11 @@ var (
 	// puts one of their own in SoundsDir.
 	ClipFailure  = &Clip{file: "failure"}
 	ClipCanceled = &Clip{file: "canceled"}
+
+	// ClipDone is a command carried out (jarvis). No stock recording and no tone in its place: it is
+	// nothing at all until the owner puts done.wav in SoundsDir, and then it plays instead of the
+	// spoken reply "Done" (feature/voice/done.go).
+	ClipDone = &Clip{file: "done"}
 )
 
 func (c *Clip) ownPath() string { return filepath.Join(SoundsDir, c.file+".wav") }

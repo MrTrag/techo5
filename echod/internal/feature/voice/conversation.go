@@ -295,10 +295,15 @@ type nextTurn struct {
 }
 
 // reply is which answer is being spoken, and how. Only one of them is set: a url means it is being
-// fetched whole, a stream means it is arriving over the API. Both play under one claim on the speaker.
+// fetched whole, a stream means it is arriving over the API, own means a recording on the device is
+// standing in for the words. All play under one claim on the speaker.
 type reply struct {
 	url    string
 	stream *stream
+
+	// own is the owner's recording standing in for the words (done.go): what Home Assistant goes on
+	// to send for them, a url and a stream, arrives and goes unplayed.
+	own bool
 
 	// id tells this reply's evPlaying from a stopped one's. Zero is no reply.
 	id uint64
@@ -536,11 +541,17 @@ func (c *conversation) turnEvent(e event) {
 		}
 		c.player.Sounding(true)
 
+		// A command carried out, on a device with a recording of the owner's for it: the recording
+		// plays in the reply's place, now (done.go).
+		if note, ok := speaker.DoneSound(); ok && isDone(e.text) {
+			c.sayDone(note)
+		}
+
 	case evStreamStart:
 		// The turn has to be claimed before the audio arrives: Home Assistant closes the run as soon
 		// as it has handed over the text, and a turn still only thinking would take that as the end
 		// and go idle, discarding everything that followed.
-		if c.phase != phaseIdle && wakeword.Delivery(c.slot) == config.DeliveryStream {
+		if c.phase != phaseIdle && !c.reply.own && wakeword.Delivery(c.slot) == config.DeliveryStream {
 			c.speak("")
 		}
 
@@ -552,7 +563,7 @@ func (c *conversation) turnEvent(e event) {
 		//
 		// Which of the two runs is the slot's setting, so ignoring the url here leaves the streamed
 		// copy to arrive on its own, exactly as it would have if Home Assistant had sent no url.
-		if c.phase == phaseIdle {
+		if c.phase == phaseIdle || c.reply.own {
 			return
 		}
 		if wakeword.Delivery(c.slot) == config.DeliveryStream {
@@ -561,8 +572,9 @@ func (c *conversation) turnEvent(e event) {
 		c.speak(e.url)
 
 	case evStreamAudio:
-		// Retired as soon as a url arrives.
-		if c.phase == phaseIdle || c.reply.url != "" {
+		// Retired as soon as a url arrives, and never taken up when a recording of the owner's is
+		// standing in for the words.
+		if c.phase == phaseIdle || c.reply.url != "" || c.reply.own {
 			return
 		}
 		if c.phase != phaseReplying {
@@ -892,11 +904,27 @@ func (c *conversation) think() {
 // still downloading is abandoned rather than arriving to play into a canceled turn, and a stream
 // still receiving stops taking chunks.
 func (c *conversation) speak(url string) {
+	r := reply{url: url}
+	if url == "" {
+		r.stream = newStream(c.speaker.Splices(), c.speaker.Underruns(), wakeword.Buffer(c.slot))
+	}
+	c.respond(r, func(ctx context.Context, p *speaker.Player, playing func()) error {
+		if r.stream != nil {
+			return r.stream.play(ctx, p, playing)
+		}
+		return c.play(ctx, url, playing)
+	})
+}
+
+// respond makes r the turn's reply and has run play it under the turn's claim on the speaker, calling
+// playing once its audio is going. The turn is told when it has been heard, or stopped.
+func (c *conversation) respond(r reply, run func(ctx context.Context, p *speaker.Player, playing func()) error) {
 	c.stopStreaming()
 	c.enter(phaseReplying)
 	c.replies++
-	id := c.replies
-	c.reply = reply{url: url, id: id}
+	r.id = c.replies
+	c.reply = r
+	id, url := r.id, r.url
 	playing := func() { c.post(event{kind: evPlaying, reply: id}) }
 
 	c.showPhase(wakeword.ReplyingEffect(c.slot))
@@ -905,14 +933,7 @@ func (c *conversation) speak(url string) {
 	// The deadline is left as it was. Text arriving is not the pipeline delivering: it still owes the
 	// audio, and the limit it was given when the device stopped listening goes on running until some
 	// of that audio turns up.
-	errand := func(ctx context.Context, p *speaker.Player) error { return c.play(ctx, url, playing) }
-	if url == "" {
-		s := newStream(c.speaker.Splices(), c.speaker.Underruns(), wakeword.Buffer(c.slot))
-		c.reply.stream = s
-		errand = func(ctx context.Context, p *speaker.Player) error {
-			return s.play(ctx, p, playing)
-		}
-	}
+	errand := func(ctx context.Context, p *speaker.Player) error { return run(ctx, p, playing) }
 
 	held := c.sound.ClaimSpeech("reply", errand)
 	// The slot is read here, on the loop: by the time the reply is over, the loop may be on another

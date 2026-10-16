@@ -12,6 +12,10 @@ import (
 // press is one, so they are told apart without looking.
 const toneLevel = 0.3
 
+// ToneLevel is toneLevel for a caller outside the package playing notes under a claim of its own: the
+// level the feedback tones play at, at which a recording of the owner's plays as it was recorded.
+const ToneLevel = toneLevel
+
 var (
 	ToneVolume = []Note{{Freq: 880, Ms: 80}}
 
@@ -148,6 +152,10 @@ func FailureSound() []Note { return ownOr(ClipFailure, ToneTrouble) }
 
 // CancelSound is what a request dropped on purpose sounds like: the owner's recording, or ToneCancel.
 func CancelSound() []Note { return ownOr(ClipCanceled, ToneCancel) }
+
+// DoneSound is the owner's recording for a command carried out, and whether there is one (jarvis).
+// Nothing stands in for it: without a recording the spoken reply plays as any other does.
+func DoneSound() (Note, bool) { return ClipDone.ownNote() }
 
 func ownOr(c *Clip, notes []Note) []Note {
 	if n, ok := c.ownNote(); ok {
