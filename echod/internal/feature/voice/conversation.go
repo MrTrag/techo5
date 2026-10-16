@@ -838,10 +838,18 @@ func (c *conversation) start(n nextTurn) bool {
 	// sounds at its own level rather than being faded along with the track underneath it.
 	c.hold(true)
 
+	// Who said the wake word, asked of the house's voice-ID service while the chime waits (jarvis,
+	// wakeword/named.go): only a wake the device heard itself, with the two seconds that hold the
+	// word. It answers in a few tens of milliseconds or not at all, and not at all costs only the name.
+	named := ""
+	if n.woke && !n.followUp && !n.continued && wakeword.Tones(slot, n.followUp) {
+		named = wakeword.Who(history)
+	}
+
 	// A follow-up chimes like the wake word that started the conversation, unless the slot has been
 	// told a follow-up should be silent: the microphone is open again with nothing said to say so. It
 	// is not a wake, though, so it does not report a phrase nobody spoke.
-	wakeword.Chime(slot, n.followUp)
+	wakeword.ChimeNamed(slot, n.followUp, named)
 	if !n.followUp {
 		c.log.Woke(phrase)
 	}
@@ -869,7 +877,7 @@ func (c *conversation) start(n nextTurn) bool {
 	}
 
 	c.arm(c.listenFor(n))
-	c.startAudio(slot, n.followUp, n.continued)
+	c.startAudio(slot, n.followUp, n.continued, named)
 	// The phrase is logged for a follow-up too, because it is what chose the pipeline — not because
 	// anyone said it.
 	slog.Info("turn started", "slot", slot+1, "phrase", phrase, "follow_up", n.followUp, "on_ha", n.continued)
@@ -1187,19 +1195,19 @@ func audioSettings() *api.VoiceAssistantAudioSettings {
 
 // startAudio begins sending microphone frames. The streamer only reads, so it needs no coordination
 // beyond being told to stop. continued is a run that has had the audio up to now already.
-func (c *conversation) startAudio(slot int, followUp, continued bool) {
+func (c *conversation) startAudio(slot int, followUp, continued bool, named string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	c.stopAudio = cancel
 
 	// slot is captured rather than read from the loop's state, which the streamer does not own. So is
-	// whether this is a follow-up: between them they say what the turn sounds like and so what has to
-	// be kept out of the microphone.
+	// whether this is a follow-up, and which named wake sound played, if one did: between them they say
+	// what the turn sounds like and so what has to be kept out of the microphone.
 	id := c.turn.ID()
 	be := c.be
 	streams.Add(1)
 	safe.Go("turn audio", func() {
 		defer streams.Done()
-		c.stream(ctx, be, slot, followUp, continued, id)
+		c.stream(ctx, be, slot, followUp, continued, id, named)
 	})
 }
 
@@ -1218,7 +1226,7 @@ func (c *conversation) stopStreaming() {
 }
 
 // stream sends microphone frames until it is told to stop.
-func (c *conversation) stream(ctx context.Context, be backend, slot int, followUp, continued bool, id string) {
+func (c *conversation) stream(ctx context.Context, be backend, slot int, followUp, continued bool, id, named string) {
 	frames, unlisten := c.source.Listen("turn")
 	defer unlisten()
 
@@ -1291,7 +1299,7 @@ func (c *conversation) stream(ctx context.Context, be backend, slot int, followU
 	// hardwareTail is what the driver holds after the queue runs out.
 	var sounding time.Time
 	if wakeword.Tones(slot, followUp) {
-		sounding = time.Now().Add(wakeword.ChimeLength(slot, followUp) + speaker.HardwareTail)
+		sounding = time.Now().Add(wakeword.ChimeLengthNamed(slot, followUp, named) + speaker.HardwareTail)
 	}
 	var held int
 

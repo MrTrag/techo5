@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -87,6 +88,42 @@ var (
 )
 
 func (c *Clip) ownPath() string { return filepath.Join(SoundsDir, c.file+".wav") }
+
+// Named wake sounds (jarvis): wake_<name>.wav in SoundsDir, "Yes, Steve?" as wake_steve.wav, played in
+// the wake sound's place when the voice check says who said the word (feature/wakeword/named.go).
+// There are no stock ones, and a name with no recording plays the ordinary wake sound.
+var (
+	namedMu sync.Mutex
+	named   = map[string]*Clip{}
+)
+
+// WakeNamed is the owner's wake sound for name, and whether there is one.
+func WakeNamed(name string) (Note, bool) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" || name == "word_triggered" || strings.ContainsAny(name, "/\\. ") {
+		return Note{}, false
+	}
+	namedMu.Lock()
+	c, ok := named[name]
+	if !ok {
+		c = &Clip{file: "wake_" + name}
+		named[name] = c
+	}
+	namedMu.Unlock()
+	return c.ownNote()
+}
+
+// AnyWakeNamed reports whether the owner has a named wake sound at all, so nobody is asked who spoke
+// when there is nothing to play for the answer.
+func AnyWakeNamed() bool {
+	files, _ := filepath.Glob(filepath.Join(SoundsDir, "wake_*.wav"))
+	for _, f := range files {
+		if filepath.Base(f) != ClipWake.file+".wav" {
+			return true
+		}
+	}
+	return false
+}
 
 // ownRecording is the owner's file for this clip as it stands now, the zero value where there is none.
 func (c *Clip) ownRecording() recording {

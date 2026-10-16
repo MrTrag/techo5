@@ -22,6 +22,28 @@ type Wake struct {
 	// KeepClips keeps short clips of the wake word on the device, for training a model on (feature/
 	// detect, clips.go). Off unless chosen, and turning it off deletes what was kept.
 	KeepClips bool `json:"keep_clips,omitempty"`
+
+	// VoiceCheck is where a device asks who said the wake word, so it can answer "Yes, Steve?" rather
+	// than "Yes?" (jarvis, feature/wakeword/named.go): the voice-ID service's wake check. Empty means
+	// DefaultVoiceCheck, "off" turns it off. VoiceCheckMs is how long a wake waits for the answer
+	// before the ordinary wake sound plays anyway (wakeword.DefaultVoiceCheckWait when 0).
+	VoiceCheck   string `json:"voice_check_url,omitempty"`
+	VoiceCheckMs int    `json:"voice_check_ms,omitempty"`
+}
+
+// DefaultVoiceCheck is the wake word check on this house's server: the jarvis-voice-id container on
+// GuardianServer, which also sits in front of Whisper for every command.
+const DefaultVoiceCheck = "http://192.168.1.100:10311/wake"
+
+// VoiceCheckURL is where to ask who said the wake word, empty when turned off.
+func (w Wake) VoiceCheckURL() string {
+	switch w.VoiceCheck {
+	case "":
+		return DefaultVoiceCheck
+	case "off":
+		return ""
+	}
+	return w.VoiceCheck
 }
 
 // Gate stops a device answering a wake word that was said in another room.

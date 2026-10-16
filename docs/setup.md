@@ -529,6 +529,7 @@ in the device's sounds folder, over SSH
 | `failure.wav` | the falling notes when a request cannot be served |
 | `canceled.wav` | the notes when a request is dropped |
 | `done.wav` | (this fork) a command carried out: when Home Assistant's reply is the one word "Done", the recording plays in its place, at once, and the spoken reply goes unplayed. Nothing without the file |
+| `wake_<name>.wav` | (this fork) the wake sound for one person, `wake_steve.wav` say: played instead of `wake_word_triggered.wav` when the house's voice-ID service says that person said the wake word (`voice_check_url` in the settings; the device waits `voice_check_ms`, 250 by default, then plays the ordinary sound). Nothing without the files |
 | `timer_finished.wav` | a finished timer, and the Home Assistant alarm sound |
 | `mute_switch_on.wav`, `mute_switch_off.wav` | muting and unmuting the microphones |
 
