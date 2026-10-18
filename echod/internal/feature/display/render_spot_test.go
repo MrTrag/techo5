@@ -131,6 +131,11 @@ func TestRoundScenesDraw(t *testing.T) {
 			notification: notify.Notification{Kind: notify.Text, Title: "Washer", Icon: "mdi:washing-machine", Message: "The washing machine is done"}},
 		"notification-under-camera": {now: at, phase: "idle", showCamera: true, camera: home.CameraView{Entity: "camera.front_door", Name: "Front door", Frame: testPicture()},
 			showNotification: true, notification: notify.Notification{Kind: notify.Text, Title: "Washer", Message: "The washing machine is done"}},
+		// The device's own notes (home/hint.go): a station Home Assistant never started, the star refused.
+		"notification-radio-hint": {now: at, phase: "idle", weather: sky, showNotification: true,
+			notification: notify.Notification{Kind: notify.Text, Title: "Radio", Message: home.NoStartHint, Own: true}},
+		"notification-favorite-hint": {now: at, phase: "idle", weather: sky, showNotification: true,
+			notification: notify.Notification{Kind: notify.Text, Title: "Favorites", Message: home.FavoriteHint, Own: true}},
 		"notification-bare": {now: at, phase: "idle", showNotification: true,
 			notification: notify.Notification{Kind: notify.Text, Message: "Done"}},
 		"notification-longest": {now: at, phase: "idle", showNotification: true,
@@ -187,6 +192,15 @@ func TestRoundScenesDraw(t *testing.T) {
 	scenes["alert-face-2"] = roundScene{now: at, phase: "idle", showAlert: true, alertIdx: 1, alertScroll: 2, alerts: alerts}
 	scenes["radar-alert"] = roundScene{now: at, phase: "idle", menuOpen: true, menuMode: modeWeather, radarOn: true, alerts: alerts,
 		radar: home.RadarView{Frames: []home.RadarFrame{{Image: testPicture(), At: at}}}}
+
+	// The red night clock in its three looks, at 3:47 in the morning, muted, and with four figures.
+	late := time.Date(2026, 9, 17, 3, 47, 0, 0, time.Local)
+	for name, style := range map[string]string{"red": nightStylePlain, "led": nightStyleLED, "flip": nightStyleFlip} {
+		scenes["night-"+name] = roundScene{now: late, phase: "idle", redClock: true, redStyle: style}
+	}
+	scenes["night-red-muted"] = roundScene{now: late, phase: "idle", redClock: true, muted: true}
+	scenes["night-flip-four"] = roundScene{now: late.Add(19 * time.Hour), phase: "idle", redClock: true, redStyle: nightStyleFlip}
+	scenes["night-led-four"] = roundScene{now: late.Add(19 * time.Hour), phase: "idle", redClock: true, redStyle: nightStyleLED}
 
 	// The light before an alarm on the round face, frame by frame.
 	wake := at.Add(20 * time.Minute)

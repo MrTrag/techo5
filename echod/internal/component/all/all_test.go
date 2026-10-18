@@ -8,7 +8,12 @@ import (
 	esphome "github.com/ygelfand/go-esphome-device"
 
 	"github.com/HuskerMinion/techo5/echod/internal/component"
+	"github.com/HuskerMinion/techo5/echod/internal/hardware/speaker"
 )
+
+// The machine the tests run on has no amplifier, but may have an I2C bus that cannot say so: the
+// speaker gain is left out, as on a unit whose mixer has said it has none.
+func init() { speaker.GainPossible = func() bool { return false } }
 
 // registered is the base inventory of entities, by object id.
 //
@@ -21,6 +26,9 @@ var registered = []string{
 	"alarm_sound",
 	"alarm_sounding",
 	"alarm_stop",
+	"alarm_words",
+	"ambient_noise",
+	"ambient_noise_sensor",
 	"amp_standby",
 	"bass",
 	"ble_advertisements",
@@ -45,7 +53,9 @@ var registered = []string{
 	"camera_live",
 	"camera_sound",
 	"camera_web_access",
+	"cancel_request",
 	"check_for_updates",
+	"clap_gesture",
 	"confirm_threshold",
 	"confirm_wake_with_home_assistant",
 	"cpu_cores",
@@ -72,6 +82,7 @@ var registered = []string{
 	"keep_recordings_1",
 	"keep_recordings_2",
 	"keep_wake_clips",
+	"last_boot",
 	"last_heard",
 	"last_reply",
 	"last_wake_score",
@@ -99,6 +110,9 @@ var registered = []string{
 	"min_cores",
 	"missed_ring",
 	"mute_led_brightness",
+	"nearest_device_answers",
+	"nearest_device_offset",
+	"nearest_device_window",
 	"next_alarm",
 	"night_volume",
 	"noise_layer_1",
@@ -123,6 +137,7 @@ var registered = []string{
 	"radio_station",
 	"radio_temperature",
 	"radio_title",
+	"remote_api",
 	"reply_buffer_1",
 	"reply_buffer_2",
 	"reply_delivery_1",
@@ -152,6 +167,7 @@ var registered = []string{
 	"screen_dashboard_view",
 	"screen_font",
 	"screen_date_color",
+	"screen_ignores_room_lights",
 	"screen_language",
 	"screen_night_clock_style",
 	"screen_night_end",
@@ -159,7 +175,9 @@ var registered = []string{
 	"screen_night_light_level",
 	"screen_night_mode",
 	"screen_night_start",
+	"screen_night_tap_lifts",
 	"screen_now_playing",
+	"screen_power",
 	"screen_theme",
 	"screen_turn_style",
 	"screen_weather_animation",
@@ -179,6 +197,7 @@ var registered = []string{
 	"sendspin",
 	"sendspin_state",
 	"settings_lock",
+	"settings_sharing",
 	"setup_page",
 	"shadow_2",
 	"sleep_timer",
@@ -191,6 +210,12 @@ var registered = []string{
 	"slideshow_subfolders",
 	"slideshow_weather_art",
 	"slideshow_whole_photo",
+	"slideshow_caption",
+	"slideshow_pairs",
+	"immich_favorites",
+	"immich_from",
+	"immich_person",
+	"immich_to",
 	"sounding",
 	"sounding_what",
 	"speaker",
@@ -214,6 +239,8 @@ var registered = []string{
 	"wake_clips_by_kind",
 	"wake_effect_1",
 	"wake_effect_2",
+	"wake_light_brightness",
+	"wake_light_color",
 	"wake_threshold_1",
 	"wake_threshold_2",
 	"wake_tone_1",
@@ -228,6 +255,14 @@ var registered = []string{
 	"screen_clock_style_swipe",
 	"screen_dashboard_return",
 	"screen_dashboard_tiles",
+	"calendar_day_timeline",
+	"calendar_coming_up_refined",
+	"calendar_month_details",
+	"calendar_event_icons",
+	"calendar_countdowns",
+	"calendar_week_view",
+	"calendar_next_up",
+	"calendar_weather",
 }
 
 func TestEveryComponentStillRegisters(t *testing.T) {

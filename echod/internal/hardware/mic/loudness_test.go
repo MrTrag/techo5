@@ -6,14 +6,7 @@ import (
 	"time"
 )
 
-// steady is one frame holding the same sample throughout, so its level is exactly 20 log10(v/full).
-func steady(v int16) []int16 {
-	f := make([]int16, FrameSamples)
-	for i := range f {
-		f[i] = v
-	}
-	return f
-}
+// steady, one frame at a constant level, is noise_test.go's: its level is exactly 20 log10(v/full).
 
 func dbFS(v int16) float64 { return 20 * math.Log10(float64(v)/fullScale) }
 

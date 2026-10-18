@@ -2,21 +2,25 @@ package setup
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"html"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/HuskerMinion/techo5/echod/internal/config"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/announce"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/api"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/diag"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/home"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/media"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/timezone"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/web"
+	"github.com/HuskerMinion/techo5/echod/internal/hardware/speaker"
 	"github.com/HuskerMinion/techo5/echod/internal/layout"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/wifi"
 )
@@ -34,8 +38,17 @@ const maxDeckBody = 128 << 10
 // cookieName is the session a press hands out.
 const cookieName = "techo5_setup"
 
+// sweptUploads is the sweep of what sound uploads a power cut stopped left behind, made once a process.
+// The supervisor runs Run again after it fails, and by then the page may be open with an upload half
+// written under its temporary name: a sweep at every Run would delete it from under its writer.
+var sweptUploads sync.Once
+
 // Run closes the page when it has been left alone, and keeps Home Assistant's switch honest.
 func (f *Feature) Run(ctx context.Context) error {
+	// The first thing at a start, before the page can be opened to send one: what an upload a power cut
+	// stopped left behind. The wake word library sweeps its own as it is made.
+	sweptUploads.Do(speaker.SweepUploads)
+
 	t := time.NewTicker(15 * time.Second)
 	defer t.Stop()
 	for {
@@ -75,9 +88,21 @@ func (f *Feature) serve(w http.ResponseWriter, r *http.Request) {
 		f.photo(w, r)
 	case "/setup/font":
 		f.font(w, r)
+	case "/setup/sound":
+		f.sound(w, r)
+	case "/setup/wakeword":
+		f.wakeWordUpload(w, r)
 	case "/setup/diagnostics.txt":
 		f.diagnostics(w, r)
+	case "/setup/settings.json":
+		f.settingsFile(w, r)
+	case "/setup/restore":
+		f.restore(w, r)
 	default:
+		if route, ok := routes[strings.TrimSuffix(r.URL.Path, "/")]; ok {
+			route(f, w, r)
+			return
+		}
 		http.NotFound(w, r)
 	}
 }
@@ -186,7 +211,7 @@ func (f *Feature) save(w http.ResponseWriter, r *http.Request) {
 	}
 	// The form carries the session it came from, so a page on another site cannot post here with a
 	// browser's cookie.
-	if r.PostFormValue("token") != token {
+	if !sameToken(r.PostFormValue("token"), token) {
 		slog.Warn("setup page: a save arrived without the page's own token")
 		http.Error(w, "that form did not come from this page", http.StatusForbidden)
 		return
@@ -251,10 +276,18 @@ func (f *Feature) save(w http.ResponseWriter, r *http.Request) {
 		problem = saveImmich(r)
 	case "immich-album":
 		problem = chooseImmichAlbum(r)
+	case "immich-show":
+		problem = saveImmichShow(r)
 	case "immich-forget":
 		problem = forgetImmich()
 	case "font-remove":
 		problem = removeFont(r)
+	case "sound-play":
+		problem = playSound(r)
+	case "sound-remove":
+		problem = removeSound(r)
+	case "wakeword-remove":
+		problem = removeWakeWord(r)
 	case "reolink":
 		problem = saveReolink(r)
 	case "doorbell":
@@ -271,6 +304,8 @@ func (f *Feature) save(w http.ResponseWriter, r *http.Request) {
 		problem = saveCalendarLink(r)
 	case "calendar-remove":
 		problem = removeCalendarLink(r)
+	case "calendar-look":
+		problem = saveCalendarLook(r)
 	case "adopt":
 		if _, err := api.Get().OpenAdoption(); err != nil {
 			problem = "could not open the device to a Home Assistant: " + err.Error()
@@ -302,7 +337,9 @@ func (f *Feature) save(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	default:
-		if !alarmSave(r, what, &problem) {
+		if save, ok := saves[what]; ok {
+			problem = save(r)
+		} else if !alarmSave(r, what, &problem) {
 			problem = "nothing to save"
 		}
 	}
@@ -370,8 +407,11 @@ func (f *Feature) settingsPage(ctx context.Context, w http.ResponseWriter, token
 		streamingSection(w, token)
 		fmt.Fprint(w, `<h3>Voice</h3>`)
 		brainSection(w, token)
+		realtimeSection(w, token)
 		listeningSection(w, token)
 		houseSection(w, token)
+		wakeWordsSection(w, token)
+		soundsSection(w, token)
 	case "alarms":
 		alarmsSection(w, token)
 	case "connections":
@@ -383,6 +423,7 @@ func (f *Feature) settingsPage(ctx context.Context, w http.ResponseWriter, token
 			 is not one this page can change.</p></fieldset>`)
 		}
 		reolinkSection(w, token)
+		go2rtcSection(w, token)
 		doorbellSection(w, token)
 		talkBackSection(w, token)
 		dashboardSection(w, token)
@@ -397,14 +438,19 @@ func (f *Feature) settingsPage(ctx context.Context, w http.ResponseWriter, token
 	case "weather":
 		placeSection(w, token)
 		calendarLinksSection(w, token)
+		calendarLookSection(w, token)
 	case "privacy":
 		lockSection(w, token)
+		camStreamSection(w, token)
 		privacySection(w)
+		remoteSection(w, token)
 	case "general":
 		nameSection(w, token)
 		updatesSection(w, token)
 		timezoneSection(w, token)
 		homeAssistantSection(w, token)
+		settingsFileSection(w, token)
+		shareSection(w, token)
 		diagnosticsSection(w)
 	}
 	fmt.Fprint(w, `</section></div></div>`)
@@ -417,6 +463,15 @@ func timezoneSection(w http.ResponseWriter, token string) {
 	hidden(w, token, "timezone", "general")
 	fmt.Fprint(w, `<label for="zone">Zone</label><select id="zone" name="zone">`)
 	fmt.Fprintf(w, `<option value=""%s>Follow Home Assistant</option>`, selected(!timezone.Get().SetHere()))
+	if !timezone.HasDatabase() {
+		// An image without the zone database still puts the common zones in force (timezone.Common).
+		fmt.Fprint(w, `<optgroup label="Common">`)
+		for _, full := range timezone.Common {
+			fmt.Fprintf(w, `<option value="%s"%s>%s</option>`,
+				html.EscapeString(full), selected(full == cur && timezone.Get().SetHere()), html.EscapeString(full))
+		}
+		fmt.Fprint(w, `</optgroup>`)
+	}
 	for _, region := range timezone.Regions() {
 		fmt.Fprintf(w, `<optgroup label="%s">`, html.EscapeString(region))
 		for _, z := range timezone.Zones(region) {
@@ -561,8 +616,6 @@ func stationsSection(w http.ResponseWriter, token string) {
 	 <p><button type="submit">Save stations</button></p></form></fieldset>`)
 }
 
-// saveStations takes the rows the form posted, in the order they were in. Names and addresses come
-// back as two lists of the same length, one row each.
 // playRow plays the row whose Play button was pressed, with the name and address as they stand in
 // the form. A row with nothing in it is a press on the spare row at the bottom, which is somebody
 // asking for nothing.
@@ -588,17 +641,25 @@ func playRow(r *http.Request) string {
 	return ""
 }
 
+// saveStations takes the rows the form posted, in the order they were in. Names and addresses come
+// back as two lists of the same length, one row each. A row whose name was cleared on a station
+// already kept is left out, whatever its address still says: that is how the note under the form
+// says a station is taken out. A new address typed without a name is a mistake, and said to be.
 func saveStations(r *http.Request) string {
 	names, urls := r.PostForm["name"], r.PostForm["url"]
 	if len(names) != len(urls) {
 		return "that form did not arrive whole"
 	}
+	kept := map[string]bool{}
+	for _, s := range home.OwnStations() {
+		kept[s.URL] = true
+	}
 	var list []config.Station
 	for i := range names {
 		name, u := strings.TrimSpace(names[i]), strings.TrimSpace(urls[i])
 		switch {
-		case name == "" && u == "":
-			continue // an empty row is one that was never filled in, or one being taken out
+		case name == "" && (u == "" || kept[u]):
+			continue // a row never filled in, or one being taken out
 		case name == "":
 			return "a station needs a name as well as an address"
 		case u == "":
@@ -678,11 +739,44 @@ func houseSection(w http.ResponseWriter, token string) {
 	 <p class="note">Type the <strong>same word on every device in this house</strong>. They then find
 	  each other on the network, and speaking to one plays it on the others. Anything that does not
 	  have the word is ignored.</p>
+	 <p class="note">Case-sensitive: it has to match the other devices' exactly, capitals included.</p>%s
 	 <p class="note">Leave it empty to turn announcements and intercom calls off here: the device takes
 	  neither. The other devices can still see it on the network, but what they send it is refused.
 	  Reminders set to go off on other devices use it too.</p>
+	 <p class="note">Make it a long phrase, %d characters or more. What the devices send each other is
+	  signed with it, and anything on the network that hears them can try words until one fits.</p>%s
 	 <p><button type="submit">Save</button></p></form></fieldset>`,
-		html.EscapeString(word))
+		html.EscapeString(word), otherWordNote(announce.OtherWords()), longHouseWord, shortWordNote(word))
+}
+
+// otherWordNote names the devices here that refused this one's announcements in the last hour, for
+// having another house word.
+func otherWordNote(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	devices := "other devices here use"
+	if len(names) == 1 {
+		devices = "other device here uses"
+	}
+	return fmt.Sprintf(`
+	 <p class="note"><strong>%d %s a different house word: %s.</strong> They refuse what this one
+	  sends them. Check the word on each, capitals included.</p>`,
+		len(names), devices, html.EscapeString(strings.Join(names, ", ")))
+}
+
+// longHouseWord is how long a house word has to be before the page stops saying it is short. A short
+// one still works: it is a warning, not a refusal.
+const longHouseWord = 16
+
+// shortWordNote is the warning for a house word that is set and short.
+func shortWordNote(word string) string {
+	if word == "" || len([]rune(word)) >= longHouseWord {
+		return ""
+	}
+	return `
+	 <p class="note"><strong>This word is short.</strong> It works, but it is easy to guess: a longer one
+	  keeps the announcements, the intercom and the other devices' messages yours.</p>`
 }
 
 // saveHouse keeps the word, and then tells the web feature to look again: the port announcements
@@ -738,4 +832,9 @@ func deviceName() string {
 		return n
 	}
 	return layout.DefaultName
+}
+
+// sameToken is whether a form's token is the page's, compared in the same time whatever it holds.
+func sameToken(got, token string) bool {
+	return subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1
 }

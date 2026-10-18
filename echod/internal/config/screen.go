@@ -5,6 +5,9 @@ import "slices"
 // Screen is the panel: whether it is lit, how brightly in percent, and whether the room's light
 // is allowed to dim it below that. Only the Echo Show has one; on the Dot nothing reads this.
 type Screen struct {
+	// ClockHold tells Home Assistant of a finger held on the clock (feature/display, gesture_hold.go).
+	ClockHold bool `json:"clock_hold,omitempty"`
+
 	On         bool `json:"on"`
 	Brightness int  `json:"brightness"`
 	Auto       bool `json:"auto"`
@@ -21,12 +24,32 @@ type Screen struct {
 	// is. Only with NightLight.
 	NightRed bool `json:"night_red,omitempty"`
 
+	// NightDark puts a Spot's screen out through the night rather than dimming it; a touch lights it
+	// for a while. Only without NightLight. A Show's screen goes out whenever NightLight is off.
+	NightDark bool `json:"night_dark,omitempty"`
+
+	// NightTapLifts has a tap on a Show's night light bring the screen back as by day, as a long press
+	// does, until the room has been quiet a while. Off, a tap on the night light does nothing.
+	NightTapLifts bool `json:"night_tap_lifts,omitempty"`
+
+	// IgnoreRoomLights has the screen's light in Home Assistant described as a configuration entity, so
+	// it stands apart from the room's lights, and the Screen power switch is what a voice names
+	// (feature/display, screen_room.go). Off, the usual, the light stands with the room's lights as it
+	// always did: shown with the device's controls, and handed to Assist, so "lights off" said in its
+	// area puts the screen out too. Off is its zero value, so a device that never saved it is as it was
+	// before the setting. (#179)
+	IgnoreRoomLights bool `json:"ignore_room_lights,omitempty"`
+
 	// NightClockStyle is how the red clock looks: empty for the ordinary clock face, "led" for an LED
 	// clock's seven segments, "flip" for a flip clock's cards.
 	NightClockStyle string `json:"night_clock_style,omitempty"`
 
 	// NightLightLevel is how bright the night light is, 1 to 10; none is the panel's own default.
 	NightLightLevel int `json:"night_light_level,omitempty"`
+
+	// NightLightRescaled is whether a Spot's NightLightLevel is on the night clock's new scale, which
+	// starts at backlight 3 rather than 6: set once the old one has been moved over (rescaleNightLight).
+	NightLightRescaled bool `json:"night_light_rescaled,omitempty"`
 
 	// AutoDimmest is how far auto-brightness takes a Show's screen down in a dark room, in percent of
 	// Brightness, 1 to 50; none is the default (display.go).
@@ -163,13 +186,31 @@ func (w ScreenWriter) NightLight(v bool) error {
 	return w.st.Update(func(c *Config) { c.Screen.NightLight = v })
 }
 
+func (w ScreenWriter) NightTapLifts(v bool) error {
+	return w.st.Update(func(c *Config) { c.Screen.NightTapLifts = v })
+}
+
+// IgnoreRoomLights is taken back when it could not be saved, since a change to it asks for a reconnect
+// that a change not kept must not get, nor carry to the next one saved.
+func (w ScreenWriter) IgnoreRoomLights(v bool) error {
+	return w.st.UpdateOrUndo(func(c *Config) { c.Screen.IgnoreRoomLights = v })
+}
+
 func (w ScreenWriter) NightClockStyle(v string) error {
 	return w.st.Update(func(c *Config) { c.Screen.NightClockStyle = v })
 }
 
-// AtNight sets both at once: the night light, and whether it is the red clock.
+// AtNight sets both at once: the night light, and whether it is the red clock. NightDark is cleared.
 func (w ScreenWriter) AtNight(light, red bool) error {
-	return w.st.Update(func(c *Config) { c.Screen.NightLight, c.Screen.NightRed = light, light && red })
+	return w.AtNightDark(light, red, false)
+}
+
+// AtNightDark sets all three at once: the night light, whether it is the red clock, and on the Spot
+// whether the night puts the screen out.
+func (w ScreenWriter) AtNightDark(light, red, dark bool) error {
+	return w.st.Update(func(c *Config) {
+		c.Screen.NightLight, c.Screen.NightRed, c.Screen.NightDark = light, light && red, !light && dark
+	})
 }
 
 func (w ScreenWriter) Night(v string) error {
@@ -257,4 +298,9 @@ func (w ScreenWriter) ClockTap(v string) error {
 // Custom saves a palette and makes it the theme.
 func (w ScreenWriter) Custom(p Palette) error {
 	return w.st.Update(func(c *Config) { c.Screen.Theme, c.Screen.Palette = "Custom", p })
+}
+
+// ClockHold is whether a finger held on the clock is told to Home Assistant.
+func (w ScreenWriter) ClockHold(v bool) error {
+	return w.st.Update(func(c *Config) { c.Screen.ClockHold = v })
 }

@@ -23,8 +23,11 @@ import (
 const (
 	drawerWBase = 620
 
-	// drawerEdgeBase is how far from the right edge a leftward swipe has to start to open the drawer.
-	drawerEdgeBase = 240
+	// drawerEdgeBase is how far from the right edge a leftward swipe has to start to open the drawer,
+	// and from the left edge a rightward one to bring the dashboard up. It was 240, a quarter of the
+	// Show 5's width, and a swipe across the clock meant for its style kept opening one or the other
+	// (#113); an eighth still catches a swipe that starts on the bezel.
+	drawerEdgeBase = 120
 
 	// drawerSegBase is the width of the Cameras/Radio/Announce/Call strip.
 	drawerSegBase = 520 // wide enough for "Announce" when it is the chosen one
@@ -126,6 +129,17 @@ func drawerRows(s scene) ([]settingRow, string) {
 			return nil, "No cameras yet. Set a Home Assistant token to list them all, or pick some with the home_cameras action."
 		}
 		var rows []settingRow
+		// Several cameras at once, when there are several to show.
+		others := 0
+		for _, c := range s.cameras {
+			if c.Entity != home.LocalCamera {
+				others++
+			}
+		}
+		if others >= 2 {
+			rows = append(rows, settingRow{id: "grid:0", label: "All cameras",
+				sub: "Up to six at once; tap one to see it alone", kind: ctlButton, button: "Show", rowTap: true})
+		}
 		for i, c := range s.cameras {
 			name := c.Name
 			if s.demo {

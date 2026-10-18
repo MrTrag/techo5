@@ -189,6 +189,9 @@ type WakeWord struct {
 	// the same nights and the same sounds as the live word in the other slot, before it goes live.
 	// Off by default and stored only when on, so a slot saved before this existed needs no key for it.
 	Shadow bool `json:"shadow,omitempty"`
+
+	// Realtime is this slot answered by realtime voice (config.Realtime) in place of its assistant.
+	Realtime bool `json:"realtime,omitempty"`
 }
 
 const (

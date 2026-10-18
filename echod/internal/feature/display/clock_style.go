@@ -179,7 +179,7 @@ func styleFactsFor(style string, now time.Time) (f styleFacts) {
 		f.rise, f.set, f.sunOK = home.Get().SunTimes(now)
 	case styleDashboard:
 		f.days = home.Get().Forecast()
-		f.next = upcomingEvents(now, 3)
+		f.next = upcomingEvents(now, 8) // the style draws as many as fit above the coming days: 4 on a Show 5, 7 on a Show 8
 	case styleAgenda:
 		f.next = upcomingEvents(now, 8)
 		events, _ := home.Get().EventsOn(now)
@@ -295,6 +295,9 @@ func upcomingEvents(now time.Time, n int) []hass.Event {
 			}
 		}
 	}
+	// Not those of a calendar hidden with the calendar page's chips: hidden on this screen, they are
+	// hidden on its clock too.
+	out = visibleEvents(out, hiddenHere(config.Get().Calendar))
 	slices.SortStableFunc(out, func(a, b hass.Event) int { return a.Start.Compare(b.Start) })
 	return out[:min(len(out), n)]
 }

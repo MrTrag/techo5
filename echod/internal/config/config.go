@@ -48,6 +48,11 @@ type Config struct {
 	Brain          Brain          `json:"brain"`
 	Deck           Deck           `json:"deck,omitempty"`
 	Video          Video          `json:"video,omitempty"`
+	Nearest        Nearest        `json:"nearest,omitempty"`
+	Remote         Remote         `json:"remote,omitempty"`
+	CamStream      CamStream      `json:"cam_stream,omitempty"`
+	Share          Share          `json:"share,omitempty"`
+	Realtime       Realtime       `json:"realtime,omitempty"`
 }
 
 // Defaults is a device nobody has set anything on.
@@ -110,6 +115,11 @@ func (w Writer) Streaming() StreamingWriter           { return StreamingWriter(w
 func (w Writer) Presence() PresenceWriter             { return PresenceWriter(w) }
 func (w Writer) Deck() DeckWriter                     { return DeckWriter(w) }
 func (w Writer) Video() VideoWriter                   { return VideoWriter(w) }
+func (w Writer) Nearest() NearestWriter               { return NearestWriter(w) }
+func (w Writer) Remote() RemoteWriter                 { return RemoteWriter(w) }
+func (w Writer) CamStream() CamStreamWriter           { return CamStreamWriter(w) }
+func (w Writer) Share() ShareWriter                   { return ShareWriter(w) }
+func (w Writer) Realtime() RealtimeWriter             { return RealtimeWriter(w) }
 
 // Wake names one slot, since every wake word setting belongs to one.
 func (w Writer) Wake(slot int) WakeWriter { return WakeWriter{st: w.st, slot: slot} }
@@ -128,9 +138,14 @@ func (w Writer) NoneChosen(v bool) error {
 	return w.st.Update(func(c *Config) { c.Wake.NoneChosen = v })
 }
 
-// KeepClips records whether the device keeps clips of the wake word.
+// KeepClips records whether the device keeps clips of the wake word. An on that could not be saved is
+// taken back, as the recorder stays off for it; an off holds either way, as the recorder stops anyway,
+// and goes to disk with the next change saved if not with this one.
 func (w Writer) KeepClips(v bool) error {
-	return w.st.Update(func(c *Config) { c.Wake.KeepClips = v })
+	if v {
+		return w.st.UpdateOrUndo(func(c *Config) { c.Wake.KeepClips = true })
+	}
+	return w.st.Update(func(c *Config) { c.Wake.KeepClips = false })
 }
 
 func errSlot(n int) error { return fmt.Errorf("config: wake slot %d", n) }

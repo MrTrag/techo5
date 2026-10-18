@@ -12,6 +12,11 @@ package wakeword
 // The check takes a few tens of milliseconds on the server. The wait is bounded (VoiceCheckMs) and
 // the wake sound is held back until the answer or the deadline, whichever is first: the device
 // listens only once the sound has played, so a slow answer would otherwise cut into the request.
+//
+// The question is put as the word is detected (Ask, from detect's OnDetect) and the answer collected
+// when the turn opens (Who). Between the two the devices that heard the word may spend a window
+// agreeing which of them answers (feature/nearest); the check runs inside that window rather than
+// after it, so the two waits do not add up.
 
 import (
 	"bytes"
@@ -22,6 +27,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/HuskerMinion/techo5/echod/internal/config"
@@ -33,20 +39,89 @@ const DefaultVoiceCheckWait = 250 * time.Millisecond
 
 var checkClient = &http.Client{}
 
-// Who asks who said the wake word in history (16 kHz mono) and reports the lower-case name, or ""
-// when there is no name to play: the check is off, there is no named sound to play, no answer came
-// in time, or the answer has no recording.
-func Who(history []int16) string {
-	w := config.Get().Wake
-	url := w.VoiceCheckURL()
-	if url == "" || len(history) == 0 || !speaker.AnyWakeNamed() {
+// asked is the question put at detection (Ask), for Who to collect the answer of. One at a time: a
+// wake word detected before the last one's answer was collected replaces it.
+var asked struct {
+	sync.Mutex
+	slot int
+	at   time.Time
+	done chan string
+}
+
+// askedFor is how long an answer is kept for: longer than the longest nearest window and the check's
+// own wait together, and short enough that a wake word that never opened a turn is not answered for
+// by the next.
+const askedFor = 2 * time.Second
+
+// Ask puts the question as the wake word in slot is detected, before the devices that heard it agree
+// which answers, so the answer is in by the time the wake sound is due (Who). history is the two
+// seconds of microphone that hold the word. Nothing is asked when the check is off, no named sound
+// could play, or the slot makes no sound, so it costs nothing then.
+func Ask(slot int, history []int16) {
+	url, wait, ok := check(history)
+	if !ok || !Tones(slot, false) {
+		return
+	}
+	ask(slot, url, wait, history)
+}
+
+// ask puts the question for slot, in the background, keeping the answer for collect.
+func ask(slot int, url string, wait time.Duration, history []int16) {
+	done := make(chan string, 1)
+	asked.Lock()
+	asked.slot, asked.at, asked.done = slot, time.Now(), done
+	asked.Unlock()
+	go func() { done <- who(url, wait, history) }()
+}
+
+// Who is who said the wake word in slot: the lower-case name to play, or "" when there is no name to
+// play (the check is off, there is no named sound to play, no answer came in time, or the answer has
+// no recording). The answer to a question Ask put for this slot is waited for, which is usually no
+// wait at all; with none put, the question is asked now, of history (16 kHz mono).
+func Who(slot int, history []int16) string {
+	url, wait, ok := check(history)
+	if !ok {
 		return ""
 	}
-	wait := time.Duration(w.VoiceCheckMs) * time.Millisecond
+	if name, put := collect(slot, wait); put {
+		return name
+	}
+	return who(url, wait, history)
+}
+
+// collect is the answer to the question ask put for slot, and whether one was put: none, one for
+// another slot, or one too old to be this wake word's is no question. An answer is collected once.
+func collect(slot int, wait time.Duration) (name string, put bool) {
+	asked.Lock()
+	done, at, ours := asked.done, asked.at, asked.slot == slot
+	asked.done = nil
+	asked.Unlock()
+	if done == nil || !ours || time.Since(at) >= askedFor {
+		return "", false
+	}
+	// who gives up within wait of the question, so this is a bound on a wait that is already over.
+	select {
+	case name = <-done:
+		return name, true
+	case <-time.After(wait):
+		slog.Info("wake word voice check: the answer asked for at the word never came", "ms", time.Since(at).Milliseconds())
+		return "", true
+	}
+}
+
+// check is whether a check is worth making, and where and for how long: the check is on, there is
+// audio to send, and a named sound exists to play.
+func check(history []int16) (url string, wait time.Duration, ok bool) {
+	w := config.Get().Wake
+	url = w.VoiceCheckURL()
+	if url == "" || len(history) == 0 || !speaker.AnyWakeNamed() {
+		return "", 0, false
+	}
+	wait = time.Duration(w.VoiceCheckMs) * time.Millisecond
 	if wait <= 0 {
 		wait = DefaultVoiceCheckWait
 	}
-	return who(url, wait, history)
+	return url, wait, true
 }
 
 func who(url string, wait time.Duration, history []int16) string {

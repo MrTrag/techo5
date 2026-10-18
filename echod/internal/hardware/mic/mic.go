@@ -48,7 +48,7 @@ type Source struct {
 	// The hardware, taken by Start and let go by Close. Nil in between: the handle outlives the
 	// device so that a restart can take it again without every listener being rebuilt.
 	devMu sync.Mutex
-	pcm   *alsa.Capture
+	pcm   capture
 
 	mu        sync.Mutex
 	listeners map[int]*listener
@@ -84,6 +84,11 @@ type Source struct {
 	denoiser     *denoise.Stream
 	wasDenoising bool
 	denoising    atomic.Bool
+
+	// noise measures the room for the ambient noise sensor, while that is on.
+	noise noiseMeter
+	// standout measures how far speech stands out from the room, while something has asked for it.
+	standout standout
 
 	// Which way the loudest sound is, as a beam, or -1 until something asks. finder belongs to the
 	// reader; wantFacing is how anything else asks it to look.
@@ -198,8 +203,17 @@ func Acquire() (*Source, error) {
 	return s, nil
 }
 
-func (s *Source) open() error {
-	pcm, err := alsa.Open(Card, CaptureDevice, alsa.Config{
+// capture is the hardware as the reader sees it: whole frames of Channels at Rate in S24_3LE, the
+// microphones and then the loopback. On every board but one that is a single capture device as it
+// comes (openPlain); see openDevice in the device files.
+type capture interface {
+	Read(buf []byte) (int, error)
+	Close() error
+}
+
+// openPlain opens the one capture device that carries the microphones and the loopback together.
+func openPlain() (capture, error) {
+	return alsa.Open(Card, CaptureDevice, alsa.Config{
 		Channels:   Channels,
 		Rate:       Rate,
 		Format:     alsa.FormatS24_3LE,
@@ -207,6 +221,10 @@ func (s *Source) open() error {
 		PeriodSize: period,
 		Periods:    periods,
 	})
+}
+
+func (s *Source) open() error {
+	pcm, err := openDevice()
 	if err != nil {
 		return fmt.Errorf("mic: opening capture: %w", err)
 	}
@@ -221,7 +239,7 @@ func (s *Source) open() error {
 }
 
 // device is the hardware, or nil when it is not held.
-func (s *Source) device() *alsa.Capture {
+func (s *Source) device() capture {
 	s.devMu.Lock()
 	defer s.devMu.Unlock()
 	return s.pcm
@@ -411,6 +429,11 @@ func (s *Source) broadcast(raw []byte) {
 	// a pool or a ring would save nothing worth measuring — and a ring would have to be sized against
 	// how far behind a listener may fall, which is the thing this is fixing.
 	frame = append([]int16(nil), frame...)
+
+	// Before the noise reduction and the leveling, which would take the room out and put gain back on.
+	s.noise.add(raw, frame)
+	// Before the noise reduction, which would lower the floor it is measured against.
+	s.standout.add(frame, s.leveler.leastNow())
 
 	s.findFacing(mics)
 

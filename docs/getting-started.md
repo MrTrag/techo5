@@ -15,11 +15,11 @@ The model number is on the bottom of the device, or in the Alexa app under the d
 
 | Device | Codename | Model | Supported by | Difficulty today |
 |---|---|---|---|---|
-| **Echo Show 5, 2nd gen** (2021) | `cronos` | C76N82 | [TECHO5](https://github.com/HuskerMinion/techo5) | Moderate: the unlock and LineageOS by hand, then a one-command installer |
-| **Echo Dot, 2nd gen** (2016) | `biscuit` | RS03QR | [TECHO5 Dot](https://github.com/HuskerMinion/techo5-dot) | Moderate: the unlock and Fire OS steps by hand, then a one-command installer |
-| **Echo Spot, 1st gen** (2017) | `rook` | VN94DQ | [TECHO5 Spot](https://github.com/HuskerMinion/techo5-spot) | Moderate: the unlock and LineageOS by hand, then a one-command installer |
-| **Echo Show 5, 1st gen** (2019) | `checkers` | H23K37 | [TECHO5](https://github.com/HuskerMinion/techo5) | Moderate: the unlock and LineageOS by hand, then the same one-command installer |
-| **Echo Show 8, 1st gen** (2019) | `crown` | C7H6N3 | [TECHO5](https://github.com/HuskerMinion/techo5) | Moderate: the unlock and LineageOS by hand, then the same one-command installer |
+| <img src="images/badges/cronos.png" alt="" width="36" align="absmiddle"> **Echo Show 5, 2nd gen** (2021) | `cronos` | C76N8S | [TECHO5](https://github.com/HuskerMinion/techo5) | Moderate: the unlock and LineageOS by hand, then a one-command installer |
+| <img src="images/badges/biscuit.png" alt="" width="36" align="absmiddle"> **Echo Dot, 2nd gen** (2016) | `biscuit` | RS03QR | [TECHO5 Dot](https://github.com/HuskerMinion/techo5-dot) | Moderate: the unlock and Fire OS steps by hand, then a one-command installer |
+| <img src="images/badges/rook.png" alt="" width="36" align="absmiddle"> **Echo Spot, 1st gen** (2017) | `rook` | VN94DQ | [TECHO5 Spot](https://github.com/HuskerMinion/techo5-spot) | Moderate: the unlock and LineageOS by hand, then a one-command installer |
+| <img src="images/badges/checkers.png" alt="" width="36" align="absmiddle"> **Echo Show 5, 1st gen** (2019) | `checkers` | H23K37 | [TECHO5](https://github.com/HuskerMinion/techo5) | Moderate: the unlock and LineageOS by hand, then the same one-command installer |
+| <img src="images/badges/crown.png" alt="" width="36" align="absmiddle"> **Echo Show 8, 1st gen** (2019) | `crown` | C7H6N3 | [TECHO5](https://github.com/HuskerMinion/techo5) | Moderate: the unlock and LineageOS by hand, then the same one-command installer |
 
 All three Shows install with the same command and run the same build, which tells them apart when it
 starts; the installer picks each one's boot image out of the release. The Show 5 1st gen has been
@@ -105,11 +105,19 @@ board is called out — `checkers`, `cronos`, `crown`.
    has the details.
 2. **Install LineageOS 18.1.** Follow
    [[ROM][UNOFFICIAL][11][cronos] LineageOS 18.1 for the Echo Show 5 (2021)](https://xdaforums.com/t/rom-unofficial-11-cronos-lineageos-18-1-for-the-amazon-echo-show-5-2021.4772598/).
-   Use a current build (0.4 or later; earlier ones lose audio after a few days). A **1st gen** takes
-   R0rt1z2's `checkers` build of the same LineageOS, dated 2026-09-04 or later: TECHO5's kernel is
-   rebuilt from that source, and the installer checks the version before it does anything. A **Show 8**
-   takes R0rt1z2's `crown` build of the same LineageOS:
+   **Use the 2026-09-04 build, not the newest:** `cronos` v0.4,
+   [lineage-18.1-20260904-UNOFFICIAL-cronos.zip](https://github.com/amazon-oss/releases/releases/tag/lineage-18.1-cronos-v0.4)
+   (earlier ones lose audio after a few days). A **1st gen** takes R0rt1z2's `checkers` build of the
+   same LineageOS, v0.7
+   ([lineage-18.1-20260904-UNOFFICIAL-checkers.zip](https://github.com/amazon-oss/releases/releases/tag/lineage-18.1-checkers-v0.7)).
+   A **Show 8** takes R0rt1z2's `crown` build, v0.5
+   ([lineage-18.1-20260904-UNOFFICIAL-crown.zip](https://github.com/amazon-oss/releases/releases/tag/lineage-18.1-crown-v0.5));
+   its guide is
    [[ROM][UNOFFICIAL][11][crown] LineageOS 18.1 for the Amazon Echo Show 8 (2019)](https://xdaforums.com/t/rom-unofficial-11-crown-lineageos-18-1-for-the-amazon-echo-show-8-2019.4766709/).
+   TECHO5's kernel is rebuilt from the kernel of exactly that build, and LineageOS's Wi-Fi and Bluetooth
+   drivers only load on the kernel they were built with. The builds of 2026-10-14 (`cronos` v0.5,
+   `checkers` v0.8, `crown` v0.6) have a newer kernel and are not supported yet; the installer checks
+   the version before it does anything.
    *Check:* LineageOS boots.
 3. **Prepare LineageOS:** join your Wi-Fi, then in Settings → About → tap Build number seven times,
    and in Developer options turn on **USB debugging**.
@@ -201,6 +209,17 @@ loops. Every command runs the same on Windows, Linux and macOS once the Dot is u
    *Check:* the installer ends with the Dot healthy and its Home Assistant port answering.
 7. **Add it to Home Assistant**: see [After installing](#after-installing-every-device).
 
+### The Echo 2nd gen (radar)
+
+The Echo 2nd gen (2017, `radar`) is built like the Dot inside: the same chip, sound card,
+microphones, light ring and buttons. It takes the Dot's release, installer and daemon, which
+recognizes it when it starts and drives its speaker, which has an amplifier of its own. From
+dot-v1.0.19 the release carries its own Bluetooth kernel. Supported, tested on one unit so far.
+
+Its USB is only on pads inside the case, so the install starts with opening it. The steps are in
+the [TECHO5 Dot README](https://github.com/HuskerMinion/techo5-dot#echo-2nd-gen). It plays without
+Amazon's sound tuning files, and the volume curve is a first guess.
+
 ### Going back to TWRP or Fire OS
 
 TECHO5 Dot lives in the Dot's recovery partition, where TWRP was, and asks for recovery on every
@@ -275,7 +294,11 @@ is built on, runs on the unlocked Dot's Fire OS 6 with its own installer, and is
 3. **Pick a wake word** on the device's Assist satellite: Okay Nabu, Hey Jarvis, Hey Mycroft, Alexa,
    and eight more (Computer, Jarvis, Home Assistant and others), the same on every device.
 4. **Updates** from then on come from Home Assistant's update card: signed releases install into the
-   spare slot and roll back on their own if they don't come up healthy.
+   spare slot and roll back on their own if they don't come up healthy. **Update channel** in Home
+   Assistant is *stable* unless you change it; *dev* follows test builds, for a device being worked
+   on. **Install updates automatically** (in Home Assistant, or on the setup page's General tab,
+   under Updates) installs a new release by itself between 2 and 5 AM, while nothing is playing. It
+   is off until you turn it on.
 5. **Optional:**
    - [phone calls](phone.md) through your own SIP provider;
    - SSH (keys only) through the `ssh_keys` action and the SSH switch;
@@ -340,8 +363,11 @@ pipeline rather than the device: Home Assistant is replying in text only.
 5. **Home Assistant on HTTPS with its own certificate.** If Home Assistant's address is `https://` with
    a self-signed certificate, or one issued for a different name than the one the device is given,
    the device refuses the download and the log says `x509: certificate`. The fix that keeps checking
-   is to give Home Assistant a certificate for the name it is reached by (or set its internal URL,
-   Settings → System → Network, to the plain `http://` address on your network). Otherwise turn on
+   is to give Home Assistant a certificate for the name it is reached by. Where a proxy in front of
+   Home Assistant does the HTTPS and Home Assistant itself serves plain HTTP, setting its internal
+   URL (Settings → System → Network, **Local network**) to the plain `http://` address on your
+   network works too; where Home Assistant serves HTTPS itself, the internal URL has to be `https://`
+   as well, or radio streams and replies get no answer. Otherwise turn on
    **Skip certificate checks**, a diagnostic switch on the device in Home Assistant. It covers what
    the device downloads for Home Assistant and the screen (replies and announcements, wake word
    models, slideshow pictures), which is why it is off by default; the device's Settings screen shows

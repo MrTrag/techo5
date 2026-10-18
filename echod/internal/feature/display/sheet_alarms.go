@@ -72,6 +72,7 @@ func alarmsCard(sv sheetView) cardView {
 		settingRow{id: "snooze", label: "Snooze length", kind: ctlStepper, value: fmt.Sprintf("%d min", sv.snooze)},
 		ringVolumeRow(),
 		settingRow{id: "alarmsound", label: "Alarm sound", sub: "Plays once when you choose it", kind: ctlChoice, value: alarm.Get().Sound()},
+		settingRow{id: "alarmwords", label: "Said as it rings", sub: "Spoken by Home Assistant", kind: ctlChoice, value: alarm.Get().Say().Label()},
 	)
 }
 
@@ -145,9 +146,13 @@ func alarmEditorCard(sv sheetView, d alarmDraft) cardView {
 		title = "New alarm"
 	}
 	when := clockTime(a.Hour, a.Minute)
-	blurb := "Rings at " + when + ", " + config.DaysLabel(a.Days)
+	does := "Rings"
+	if a.LightOnly {
+		does = "Lights the room, no sound,"
+	}
+	blurb := does + " at " + when + ", " + config.DaysLabel(a.Days)
 	if a.Days&config.DaysEvery == config.DaysOnce {
-		blurb = "Rings once, at " + when
+		blurb = does + " once, at " + when
 		if t, ok := a.OnDate(); ok {
 			blurb += ", " + t.Format("Monday, January 2")
 		}
@@ -165,6 +170,11 @@ func alarmEditorCard(sv sheetView, d alarmDraft) cardView {
 	// A reminder is nobody waking up, so it has no light of its own to choose.
 	if !a.Remind {
 		v.rows = append(v.rows, settingRow{id: "e.sunrise", label: "Wake with light", kind: ctlChoice, value: alarmSunriseValue(a)})
+		// A silent alarm is Home Assistant's, set there; it has no light to be only.
+		if !a.Silent {
+			v.rows = append(v.rows, settingRow{id: "e.lightonly", label: "Light only",
+				sub: "No sound: the light, then the night ends", kind: ctlToggle, on: a.LightOnly})
+		}
 	}
 	if !d.isNew {
 		del := settingRow{id: "e.delete", label: "Delete alarm", sub: "Asks twice", kind: ctlDanger, button: "Delete"}
@@ -236,8 +246,8 @@ func (d *Display) actionTap(id string) {
 		var err error
 		if dr.isNew {
 			var al config.Alarm
-			if al, err = alarm.Get().Set(a.Hour, a.Minute, a.Days, a.Label); err == nil && al.Sunrise != a.Sunrise {
-				al.Sunrise = a.Sunrise
+			if al, err = alarm.Get().Set(a.Hour, a.Minute, a.Days, a.Label); err == nil && (al.Sunrise != a.Sunrise || al.LightOnly != a.LightOnly) {
+				al.Sunrise, al.LightOnly = a.Sunrise, a.LightOnly
 				err = alarm.Get().Put(al)
 			}
 		} else {
@@ -313,7 +323,7 @@ func (d *Display) alarmRowTap(id string, p part, opt int) bool {
 		case partPlus:
 			alarm.Get().SetRingVolume(n+1, true)
 		}
-	case "alarmsound", "e.repeat", "e.sunrise":
+	case "alarmsound", "alarmwords", "e.repeat", "e.sunrise":
 		d.openPicker(id)
 	case "e.hour":
 		d.editDraft(func(dr *alarmDraft) {
@@ -337,6 +347,8 @@ func (d *Display) alarmRowTap(id string, p part, opt int) bool {
 		if p == partDay && opt >= 0 && opt < 7 {
 			d.editDraft(func(dr *alarmDraft) { dr.alarm.Days ^= 1 << opt })
 		}
+	case "e.lightonly":
+		d.editDraft(func(dr *alarmDraft) { dr.alarm.LightOnly = !dr.alarm.LightOnly })
 	case "e.delete":
 		d.mu.Lock()
 		dr := d.draft

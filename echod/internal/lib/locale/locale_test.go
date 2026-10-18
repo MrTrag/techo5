@@ -85,3 +85,29 @@ func TestTheClockStylesWords(t *testing.T) {
 		}
 	}
 }
+
+// The Dashboard's heading and its empty list in every screen language, never left in English.
+func TestTheDashboardWords(t *testing.T) {
+	for lang := range langs {
+		if Upcoming(lang) == Upcoming("") || NothingSoon(lang) == NothingSoon("") {
+			t.Errorf("%s: the Dashboard's words are in English: %q, %q", lang, Upcoming(lang), NothingSoon(lang))
+		}
+	}
+	if got := [2]string{Upcoming("xx"), NothingSoon("xx")}; got != [2]string{"NEXT", "Nothing coming up"} {
+		t.Errorf("a language with none: %q", got)
+	}
+}
+
+func TestPhotoDate(t *testing.T) {
+	d := time.Date(2019, 1, 2, 12, 0, 0, 0, time.UTC)
+	for lang, want := range map[string]string{
+		"en": "January 2, 2019",
+		"":   "January 2, 2019",
+		"de": "2. Januar 2019",
+		"es": "2 de enero de 2019",
+	} {
+		if got := PhotoDate(d, lang); got != want {
+			t.Errorf("PhotoDate(%q) = %q, want %q", lang, got, want)
+		}
+	}
+}

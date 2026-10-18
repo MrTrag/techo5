@@ -117,10 +117,43 @@ func TestNobodyIsAskedWithoutNamedSounds(t *testing.T) {
 	ownSounds(t)
 	config.Use(filepath.Join(t.TempDir(), "state.json"))
 	t0 := time.Now()
-	if name := Who(make([]int16, 16000)); name != "" {
+	if name := Who(0, make([]int16, 16000)); name != "" {
 		t.Fatalf("named %q with no sounds", name)
 	}
 	if took := time.Since(t0); took > 50*time.Millisecond {
 		t.Errorf("took %v: something was asked", took)
+	}
+}
+
+// A question put at the word is answered by the time the turn opens: the answer is collected at once,
+// the service was asked only once, and the answer is collected only once.
+func TestAQuestionPutAtTheWordIsAnsweredByTheTurn(t *testing.T) {
+	ownSounds(t, "steve")
+	url, asked, _ := answering(t, "Steve", 50*time.Millisecond)
+	ask(0, url, time.Second, make([]int16, 32000))
+	time.Sleep(150 * time.Millisecond) // the nearest window
+	t0 := time.Now()
+	name, put := collect(0, time.Second)
+	if took := time.Since(t0); !put || name != "steve" || took > 20*time.Millisecond {
+		t.Fatalf("collected %q (put %v) after %v, want steve at once", name, put, took)
+	}
+	if asked.Load() != 1 {
+		t.Errorf("asked %d times, want once", asked.Load())
+	}
+	if _, put := collect(0, time.Second); put {
+		t.Error("the answer was collected twice")
+	}
+}
+
+// With no question put, or one for another slot, Who asks for itself.
+func TestWhoAsksWhenNothingWasPut(t *testing.T) {
+	ownSounds(t, "steve")
+	if _, put := collect(0, time.Second); put {
+		t.Fatal("an answer with no question")
+	}
+	url, _, _ := answering(t, "Steve", 0)
+	ask(1, url, time.Second, make([]int16, 16000))
+	if _, put := collect(0, time.Second); put {
+		t.Fatal("another slot's answer was taken")
 	}
 }
