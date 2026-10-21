@@ -1,4 +1,4 @@
-//go:build !dot
+//go:build !dot && !panel
 
 // Package screen owns the panel of a device with a screen (the Echo Show 5, the Echo Spot): the kernel framebuffer it is painted through and the
 // backlight that lights it.
@@ -109,7 +109,19 @@ type Device struct {
 	// stale marks a page that a frame (PresentFrame) was painted on, so it no longer holds what its
 	// shadow says: the next Present onto it writes every row.
 	stale []bool
+
+	// filter is laid over every row on its way to the panel (SetFilter, filter.go).
+	filter rowFilter
 }
+
+// SetFilter lays f over every row of the canvas on its way to the panel, a row of four-byte RGBA
+// pixels at a time, y its row; nil takes it off. name tells one filter from another, so a new one
+// filters every row again. The canvas itself is not touched: drawing goes on as before, and a row
+// drawn again is filtered again from what was drawn, never from what was filtered.
+func (d *Device) SetFilter(name string, f func(row []byte, y int)) { d.filter.set(name, f) }
+
+// source is what Present sends: the canvas, or the canvas through the filter.
+func (d *Device) source() *image.RGBA { return d.filter.over(d.canvas) }
 
 // Open maps the framebuffer and reads its geometry.
 func Open() (*Device, error) {
@@ -150,7 +162,8 @@ func Open() (*Device, error) {
 	// On TECHO5's mainline kernel /dev/fb0 can be DRM's fbdev emulation (mediatek-drm), which sets no
 	// mode of its own while there is no console on it: unblanking does, so the panel shows this buffer
 	// even before the first pan. simple-framebuffer has no blank operation and says EINVAL; that is fine.
-	if layout.AthenaMainline() {
+	// The Skylight's rockchip-drm fbdev emulation is the same kind.
+	if layout.AthenaMainline() || layout.Skylight() {
 		_ = ioctl(f.Fd(), fbioBlank, nil)
 	}
 
@@ -218,7 +231,7 @@ func (d *Device) Present() error {
 	}
 	dst := d.mem[next*d.pageBytes : (next+1)*d.pageBytes]
 
-	img := d.canvas
+	img := d.source()
 	w, h := img.Rect.Dx(), img.Rect.Dy()
 	sr, sg, sb, sa := d.shift[0], d.shift[1], d.shift[2], d.shift[3]
 	// The common layouts row by row, a copy and at most a swap of red and blue, rather than a pixel
@@ -266,7 +279,7 @@ func (d *Device) Present() error {
 		}
 		return d.pan(next)
 	}
-	d.rotate(dst, next)
+	d.rotate(img, dst, next)
 	return d.pan(next)
 }
 
@@ -279,8 +292,7 @@ const band = 8
 // compared with what the page already holds, and only a row that differs is written: the
 // framebuffer's own memory is slow to write, and most frames change few of its rows. A row is
 // written whole, in order, which that memory is quickest at.
-func (d *Device) rotate(dst []byte, next int) {
-	img := d.canvas
+func (d *Device) rotate(img *image.RGBA, dst []byte, next int) {
 	w, h := img.Rect.Dx(), img.Rect.Dy()
 	sr, sg, sb, sa := d.shift[0], d.shift[1], d.shift[2], d.shift[3]
 	// The common layouts are a byte copy, with red and blue swapped or not; anything else is packed
@@ -387,11 +399,34 @@ const (
 	mainlineBacklightMax  = 1023
 )
 
+// The Skylight's pwm-backlight has as many steps as its device tree's interpolated level table
+// gives (235 for brightness-levels 20..255): the top is read from the driver, not assumed.
+const (
+	skylightBacklightDir = "/sys/class/backlight/backlight"
+	skylightBacklightMax = 235
+)
+
 func backlightNode() (path string, top int) {
 	if layout.AthenaMainline() {
 		return mainlineBacklightPath, mainlineBacklightMax
 	}
+	if layout.Skylight() {
+		return skylightBacklightDir + "/brightness", readTop(skylightBacklightDir+"/max_brightness", skylightBacklightMax)
+	}
 	return backlightPath, BacklightMax
+}
+
+// readTop is a backlight's max_brightness, or fallback where it cannot be read or is not positive.
+func readTop(path string, fallback int) int {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return fallback
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || n <= 0 {
+		return fallback
+	}
+	return n
 }
 
 // SetBacklight sets the panel's backlight, 0 (off) to BacklightMax.

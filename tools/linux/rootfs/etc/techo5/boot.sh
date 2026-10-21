@@ -45,6 +45,8 @@ mountpoint -q /store || mount -t ext4 -o ro,noatime $STORE_DEV /store
 mount -t tmpfs tmpfs /var/log
 mount -t tmpfs tmpfs /var/tmp
 mkdir -p /run/lock /run/techo5 $LOGDIR /data/misc/techo5/models
+# /etc/hosts is a symlink to it: localhost here, and echod adds the .local names it looks up.
+[ -e /run/hosts ] || printf '127.0.0.1\tlocalhost localhost.localdomain\n::1\t\tlocalhost localhost.localdomain\n' > /run/hosts
 # The clock's zone lives on userdata (echod sets it from Home Assistant); a unit without one starts
 # on the image's default.
 if [ ! -e /data/misc/techo5/timezone ] || [ ! -e /data/misc/techo5/localtime ]; then
@@ -98,7 +100,9 @@ if [ -n "${VENDOR_DEV:-}" ] && ! mountpoint -q /vendor; then
 		log "vendor tree: mounting $VENDOR_DEV failed"
 fi
 [ -n "${FIRMWARE_PATH:-}" ] && printf %s "$FIRMWARE_PATH" > /sys/module/firmware_class/parameters/path 2>/dev/null
-if [ -z "${VENDOR_DEV:-}" ] && [ ! -e "/store/vendor/$VMOD" ]; then
+# A unit whose Wi-Fi driver is built into its kernel and that has no vendor partition (the Skylight)
+# has no vendor tree to keep at all.
+if [ -z "${VENDOR_DEV:-}" ] && [ "$WIFI_MODULE" != builtin ] && [ ! -e "/store/vendor/$VMOD" ]; then
 	src=
 	for d in /vendor /store/slots/a/vendor /store/slots/b/vendor; do
 		[ -e "$d/$VMOD" ] && { src=$d; break; }
@@ -282,9 +286,10 @@ TRIAL_TIMEOUT=${TRIAL_TIMEOUT:-900}
 	done
 ) &
 
-# --- Kernel (KERNEL_UPDATE, device.conf: athena on mainline). The slot carries the kernel it was
-# tested with, and once the slot is good that kernel goes to the boot partition with the unit's own
-# amp tuning (`techo5 tools kernel`, echod/internal/update/kernel). A new kernel is on trial as a new
+# --- Kernel (KERNEL_UPDATE, device.conf: athena on mainline, the Skylight). The slot carries the
+# kernel it was tested with, and once the slot is good that kernel goes to the kernel's partition:
+# athena's boot, with the unit's own amp tuning; the Skylight's recovery, as it is (`techo5 tools
+# kernel`, echod/internal/update/kernel). A new kernel is on trial as a new
 # slot is: every boot takes a try, a daemon that settles commits it, and one that never settles
 # reboots at TRIAL_TIMEOUT to use up a try; out of tries, the previous kernel is put back.
 # Settled means more for a kernel than for a slot: Wi-Fi, the sound card and the backlight are the

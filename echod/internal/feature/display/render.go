@@ -25,6 +25,7 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/feature/remind"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/security"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/talkback"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/tessera"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/timer"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/video"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/hass"
@@ -44,6 +45,7 @@ type scene struct {
 	now     time.Time
 	phase   string  // idle, listening, thinking, replying, lingering
 	eq      *eqView // a turn's bars, when turns are drawn as the equalizer
+	cue     string  // a turn's phase, when turns are a cue over the page and phase is idle (turn_cue.go)
 	heard   string
 	reply   string
 	since   time.Time
@@ -78,6 +80,10 @@ type scene struct {
 	dashColor   *dashboard.LightColor // the color sheet over the page, while it is up
 	dashMedia   *mediaView            // the media sheet over the page, while it is up
 	dashClimate *climateView          // the thermostat sheet over the page, while it is up
+	// The Tessera layout, when that is the dashboard: whether Tessera screen is on, and the page shown.
+	tessera  tessera.View
+	tessOn   bool
+	tessPage int
 
 	// bt is the Bluetooth audio state: the pairing page replaces everything while it is on, and a
 	// connected device is named in the footer.
@@ -269,6 +275,10 @@ type renderer struct {
 	climateParts // the thermostat sheet's, where it was last drawn (climate_sheet.go)
 	// glow is the Glow style's images, kept between frames (glow.go).
 	glow glowBuffers
+	// nixie is the Nixie style's tubes, kept between frames (nixie.go).
+	nixie nixieTubes
+	// figures is the Stack and Overlap styles' figures, likewise (figures.go).
+	figures figureShapes
 
 	// flip is the flip clock's cards, at night or as a day style: what they show, and a flip under
 	// way; ink is what the LED and flip clocks are drawn in for the frame in hand.
@@ -277,6 +287,9 @@ type renderer struct {
 	// cornered is whether the day style in hand is drawn small in a corner at the foot (Clock
 	// position), for the frame in hand.
 	cornered bool
+	// lcarsDrawn is whether LCARS's frame, its top bar included, was drawn in the frame in hand: only
+	// around the home clock (lcarsFrame).
+	lcarsDrawn bool
 
 	// deckZones are the deck's buttons where they were last drawn, in order, read by the touch
 	// goroutine under zmu (render_deck.go).
@@ -447,6 +460,7 @@ func (r *renderer) useFont() {
 // simpler than tracking what changed.
 func (r *renderer) draw(s scene) {
 	r.useFont()
+	r.marked, r.footAt, r.lcarsDrawn = false, 0, false
 	defer r.streamingDot(s)  // over everything, the update overlay included: deferred first, drawn last
 	defer r.updateOverlay(s) // Draw update overlay at the end of frame using defer
 
@@ -460,6 +474,7 @@ func (r *renderer) draw(s scene) {
 		r.shapes = alertOverlay{} // the alert shapes' picture is the page's size: kept only while the rain map is up
 	}
 	r.videoOver = image.Rectangle{}
+	r.setCaptionsAt(image.Rectangle{}) // until a frame draws them (render_cue.go)
 	// A video is over everything it is not covered by (video.go decides which), the night clock
 	// included, and has no header: the picture is the screen.
 	if s.showVideo {
@@ -469,6 +484,9 @@ func (r *renderer) draw(s scene) {
 	r.zmu.Lock()
 	r.videoZones = nil
 	r.zmu.Unlock()
+	// A cue turn goes over the page it was on, the night clock included, when that page is one to be
+	// looked at rather than answered (render_cue.go).
+	defer r.turnCue(s)
 	r.artDrawn = false
 	r.setWeatherAt(image.Rectangle{})
 	r.setTempAt(image.Rectangle{})
@@ -484,9 +502,7 @@ func (r *renderer) draw(s scene) {
 	// and it stays up while an alarm or a timer rings (a tap on it stops the ring). A call has lifted
 	// the night light and takes the screen; a turn, a camera, an announcement or a reminder is shown in
 	// its place at the night light's level.
-	if s.redClock && s.phase == "idle" && s.call.Phase == phone.Idle && !s.setupAsking && !s.showVideoAsk &&
-		!s.showWifi && !s.bt.Pairing && !s.showCamera && !s.showAnnouncement && !s.showReminder &&
-		!(s.showDash && s.dashAsked) {
+	if s.redClockFace() {
 		r.redClockPage(s)
 		return
 	}
@@ -618,9 +634,12 @@ func (r *renderer) draw(s scene) {
 	}
 
 	if s.eq != nil {
-		if s.eq.wave {
+		switch {
+		case s.eq.wave:
 			r.wave(s)
-		} else {
+		case s.eq.style == "vu" || s.eq.style == "orb" || s.eq.style == "hal":
+			r.turnVisual(s)
+		default:
 			r.equalizer(s)
 		}
 		if s.showVolume {
@@ -635,10 +654,10 @@ func (r *renderer) draw(s scene) {
 		r.status(s, "Listening…", true)
 	case "thinking":
 		r.status(s, "Thinking…", true)
-		r.words(s.heard, "", 200)
+		r.words(s.heard, "", r.s(200))
 	case "replying", "lingering":
 		r.cornerClock(s)
-		r.words(s.heard, s.reply, 70)
+		r.words(s.heard, s.reply, r.s(70))
 	default:
 		if s.sunrise > 0 {
 			// The light before an alarm takes the whole screen: the panel is the lamp in the room, and
@@ -686,18 +705,21 @@ func (r *renderer) draw(s scene) {
 
 // volumeBar is the level, laid over the bottom of whatever is showing while it moves.
 func (r *renderer) volumeBar(s scene) {
-	top := r.h - 110
+	top := r.h - r.s(volumeBarH)
 	draw.Draw(r.dst, image.Rect(0, top, r.w, r.h), image.NewUniform(walnut), image.Point{}, draw.Src)
 	label := "Volume"
-	r.text(r.small, label, r.margin, top+38, dim)
+	r.text(r.small, label, r.margin, top+r.s(38), dim)
 	full := r.w - 2*r.margin
-	y0 := top + 56
-	draw.Draw(r.dst, image.Rect(r.margin, y0, r.margin+full, y0+14), image.NewUniform(ember), image.Point{}, draw.Src)
+	y0, thick := top+r.s(56), r.s(14)
+	draw.Draw(r.dst, image.Rect(r.margin, y0, r.margin+full, y0+thick), image.NewUniform(ember), image.Point{}, draw.Src)
 	fill := full * min(max(s.volume, 0), media.VolumeSteps) / media.VolumeSteps
-	draw.Draw(r.dst, image.Rect(r.margin, y0, r.margin+fill, y0+14), image.NewUniform(amber), image.Point{}, draw.Src)
+	draw.Draw(r.dst, image.Rect(r.margin, y0, r.margin+fill, y0+thick), image.NewUniform(amber), image.Point{}, draw.Src)
 	pct := fmt.Sprintf("%d%%", s.volume*100/media.VolumeSteps)
-	r.text(r.small, pct, r.w-r.margin-r.width(r.small, pct), top+38, cream)
+	r.text(r.small, pct, r.w-r.margin-r.width(r.small, pct), top+r.s(38), cream)
 }
+
+// volumeBarH is how tall the volume bar along the foot is, in the Show 5's pixels.
+const volumeBarH = 110
 
 // timeAndDate draws the hour, AM/PM and date centered, with the hour's baseline at base and an
 // optional suffix appended to the date line (an alarm note, on the ordinary idle page). Shared by
@@ -754,6 +776,18 @@ func (r *renderer) timeAndDateAt(now time.Time, base int, dateSuffix string, ali
 // the date.
 func (r *renderer) bigClock(s scene) {
 	defer r.styleNameTag(s)
+	defer r.lcarsFrame()
+	bigTimer := timerStyle() == timerBig && len(runningTimers(s)) > 0
+	if bigTimer || s.style.style() != styleGlow {
+		r.skinBackdrop(s) // Glow's colors cover the screen: its backdrop goes over them (styledClock)
+	}
+	if bigTimer {
+		r.bigTimer(s)
+		r.weatherCorner(s)
+		r.alertBadge(s)
+		return
+	}
+	defer r.timerCorner(s, timerStyle() == timerCorner)
 	// The Sun without sunrise and sunset yet is the classic face, drawn as the classic face is.
 	if style := s.style.style(); style != styleClassic && !(style == styleSun && !s.style.sunOK) {
 		r.styledClock(s, style)
@@ -765,10 +799,7 @@ func (r *renderer) bigClock(s scene) {
 		// The compact clock in a corner at the foot, the date clear of the footer's line.
 		base, timersAt = r.h-r.s(106), r.s(96)
 	}
-	timers := false
-	for _, t := range s.timers {
-		timers = timers || t.Active
-	}
+	timers := timersAtFoot(s)
 	if timers {
 		base -= r.s(36)
 		if foot {
@@ -809,7 +840,7 @@ func (r *renderer) bigClock(s scene) {
 	}
 	r.setDateAt(r.timeAndDateAt(s.now, base, suffix, align, left).Inset(-r.s(16)))
 	if timers {
-		r.timersLine(s, base+timersAt)
+		r.timersFoot(s, base+timersAt)
 	}
 	if glance {
 		r.glanceStrip(s.glance, s.callButton)
@@ -837,15 +868,15 @@ func (r *renderer) weatherCorner(s scene) {
 		}
 		line += c
 	}
-	x := r.margin
+	x, mark, mid := r.margin, r.s(weatherMark), r.margin+r.s(15)
 	if w.Condition != "" && conditionWords(w.Condition) != "" {
-		r.weatherIcon(w.Condition, r.margin+weatherMark/2, r.margin+15, weatherMark)
-		r.over.note(image.Rect(r.margin, r.margin+15-weatherMark/2, r.margin+weatherMark, r.margin+15+weatherMark/2))
-		x += weatherMark + 14
+		r.weatherIcon(w.Condition, r.margin+mark/2, mid, mark)
+		r.over.note(image.Rect(r.margin, mid-mark/2, r.margin+mark, mid+mark/2))
+		x += mark + r.s(14)
 	}
-	r.text(r.small, line, x, r.margin+26, dim)
+	r.text(r.small, line, x, r.margin+r.s(26), dim)
 	// A tap on it opens the forecast: the icon and the words, with a finger's room around them.
-	r.setWeatherAt(image.Rect(r.margin, r.margin+15-weatherMark/2, x+r.width(r.small, line), r.margin+15+weatherMark/2).Inset(-r.s(14)))
+	r.setWeatherAt(image.Rect(r.margin, mid-mark/2, x+r.width(r.small, line), mid+mark/2).Inset(-r.s(14)))
 }
 
 func (r *renderer) setDateAt(b image.Rectangle) {
@@ -926,7 +957,8 @@ func (r *renderer) cameraSoundTapped(p image.Point) bool {
 }
 
 // weatherMark is how big the corner's icon is: the height of the line it sits beside, so it reads as
-// part of it rather than as a picture somebody put there.
+// part of it rather than as a picture somebody put there. In Show 5 pixels, so it is drawn at
+// r.s(weatherMark).
 const weatherMark = 46
 
 // conditionWords is the weather condition in words, in the screen's language (lib/locale).
@@ -935,7 +967,7 @@ func conditionWords(c string) string { return locale.Sky(c, screenLang()) }
 // cornerClock keeps the time in view while words have the screen.
 func (r *renderer) cornerClock(s scene) {
 	t := clockText(s.now)
-	r.text(r.small, t, r.w-r.margin-r.width(r.small, t), r.margin+26, dim)
+	r.text(r.small, t, r.w-r.margin-r.width(r.small, t), r.margin+r.s(26), dim)
 }
 
 // cornerClockDated is the corner clock with the day under it, for a screen somebody looks at for
@@ -960,29 +992,29 @@ func (r *renderer) status(s scene, title string, breathe bool) {
 	}
 }
 
-// words lays out what was heard, dimmed, and the reply beneath it, starting at top and stopping at
-// the footer. A long reply is shrunk one step before being cut.
+// words lays out what was heard, dimmed, and the reply beneath it, starting at top (in this panel's
+// pixels) and stopping at the footer. A long reply is shrunk one step before being cut.
 func (r *renderer) words(heard, reply string, top int) {
 	y := top
 	maxW := r.w - 2*r.margin
-	bottom := r.h - 70
+	bottom := r.h - r.s(70)
 	if heard != "" {
 		for _, line := range r.wrap(r.small, "“"+heard+"”", maxW) {
-			if y+40 > bottom {
+			if y+r.s(40) > bottom {
 				break
 			}
-			r.text(r.small, line, r.margin, y+30, dim)
-			y += 42
+			r.text(r.small, line, r.margin, y+r.s(30), dim)
+			y += r.s(42)
 		}
-		y += 18
+		y += r.s(18)
 	}
 	if reply == "" {
 		return
 	}
-	face, lineH := r.body, 52
+	face, lineH := r.body, r.s(52)
 	lines := r.wrap(face, reply, maxW)
 	if len(lines)*lineH > bottom-y {
-		face, lineH = r.small, 42
+		face, lineH = r.small, r.s(42)
 		lines = r.wrap(face, reply, maxW)
 	}
 	for i, line := range lines {
@@ -992,7 +1024,7 @@ func (r *renderer) words(heard, reply string, top int) {
 			}
 			break
 		}
-		r.text(face, line, r.margin, y+lineH-12, cream)
+		r.text(face, line, r.margin, y+lineH-r.s(12), cream)
 		y += lineH
 	}
 }
@@ -1039,6 +1071,7 @@ func (r *renderer) header(s scene) {
 	x := (r.w - w) / 2
 	r.roundButton(image.Rect(x-pad, r.s(4), x+w+pad, r.s(32)), float64(r.s(14)), walnut)
 	r.text(r.tiny, line, x, r.s(25), amber)
+	r.marked = true
 }
 
 // playingWord is what the footer says about the music: empty when nothing is playing.
@@ -1086,7 +1119,7 @@ func (r *renderer) playingButton() image.Rectangle {
 // The microphone used to be here. It moved to the header, because the footer is drawn by two of the
 // pages and the microphone is true on all of them.
 func (r *renderer) footer(s scene) {
-	y := r.h - 24
+	y := r.h - r.s(24)
 	switch {
 	case s.setupAsking:
 		r.text(r.tiny, "setup: a browser is asking to be let in", r.margin, y, amber)

@@ -10,8 +10,11 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/config"
 )
 
-// What a voice turn looks like on the screen: Classic, the title and the words, or Equalizer, bars
-// moving with the voice being heard and the answer being spoken. Classic until somebody chooses.
+// What a voice turn looks like on the screen: Classic, the title and the words, or a picture moving
+// with the voice being heard and the answer being spoken: the wave, the bars, VU meters, the orb or
+// HAL 9000's eye (turn_draw.go, turn_visual.go). Or a cue: the page stays as it was and the turn is a
+// light along its edge, with the words as captions over the page's foot if asked for (turn_cue.go).
+// Classic until somebody chooses.
 
 // turnStyles are the choices, with what the config keeps for each; Classic is kept as nothing.
 var turnStyles = []struct {
@@ -21,6 +24,11 @@ var turnStyles = []struct {
 	{"Classic", ""},
 	{"Wave", "wave"},
 	{"Bars", "equalizer"},
+	{"VU meters", "vu"},
+	{"Orb", "orb"},
+	{"HAL 9000", "hal"},
+	{"Cue light", "cue"},
+	{"Cue and captions", "captions"},
 }
 
 func turnStyleOptions() []string {

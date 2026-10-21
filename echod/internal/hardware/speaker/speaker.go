@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -102,7 +101,7 @@ type Player struct {
 	// The hardware, taken by Start and let go by Close. Nil in between: the handle outlives the
 	// device so that a restart can take it again without everything holding a Player being rebuilt.
 	devMu sync.Mutex
-	pb    *alsa.Playback
+	pb    playback
 	mixer *alsa.Mixer
 
 	// hold is DRAMHold, kept open for as long as pb is: see paths_cronos.go.
@@ -337,44 +336,9 @@ func (p *Player) Name() string { return "speaker" }
 // open takes the playback stream and the mixer. Mixer writes happen in Run: the first one enumerates
 // the card, which takes over a second.
 func (p *Player) open() error {
-	m, err := alsa.OpenMixer(Card)
+	pb, m, hold, err := openDevice()
 	if err != nil {
-		return fmt.Errorf("speaker: opening mixer: %w", err)
-	}
-
-	// Before the playback device, so its driver sees the AFE in use and takes the DRAM ring.
-	var hold *os.File
-	if DRAMHold != "" {
-		hold, err = os.OpenFile(DRAMHold, os.O_RDWR|syscall.O_NONBLOCK, 0)
-		if err != nil {
-			_ = m.Close()
-			return fmt.Errorf("speaker: holding %s: %w", DRAMHold, err)
-		}
-	}
-
-	// A card whose front end reaches the codec only through mixer routes will not open the device
-	// before they are on (openSequence).
-	applyTo(m, openSequence)
-
-	// The ring is the same length of time at whatever rate the card runs (hwRate).
-	pb, err := alsa.OpenPlayback(Card, PlaybackDevice, alsa.Config{
-		Channels:   Channels,
-		Rate:       hwRate,
-		Format:     alsa.FormatS16_LE,
-		Bits:       Bits,
-		PeriodSize: period * hwRate / Rate,
-		Periods:    periods,
-		StartFull:  startFull,
-	})
-	if err != nil {
-		_ = m.Close()
-		if hold != nil {
-			_ = hold.Close()
-		}
-		return fmt.Errorf("speaker: opening playback: %w", err)
-	}
-	if startFull && !pb.StartsFull() {
-		slog.Warn("the kernel would not hold playback until its ring is full; it starts on the first period")
+		return err
 	}
 
 	p.devMu.Lock()
@@ -384,7 +348,7 @@ func (p *Player) open() error {
 }
 
 // device is the hardware, or nils when it is not held.
-func (p *Player) device() (*alsa.Playback, *alsa.Mixer) {
+func (p *Player) device() (playback, *alsa.Mixer) {
 	p.devMu.Lock()
 	defer p.devMu.Unlock()
 	return p.pb, p.mixer
@@ -404,7 +368,18 @@ func (p *Player) route() {
 	if p.out == OutputSpeaker {
 		p.apply(headphoneOff)
 	}
-	p.apply(pathSequence[p.out])
+	p.apply(p.path(p.out))
+}
+
+// path is out's sequence, with the Speaker gain in it where the board writes that with the path
+// (gainOnPath). Every place that writes a path takes it from here, so a gain chosen once holds through
+// a start, a route change, the jack coming and going, and a path written again (Reopen). Called with
+// pathMu held, which is what guards gainDB where gainOnPath is set (setPathGain).
+func (p *Player) path(out Output) []kctl {
+	if !gainOnPath {
+		return pathSequence[out]
+	}
+	return withSpeakerGain(pathSequence[out], out, p.gainDB)
 }
 
 // amp switches the speaker amplifier, where the device has a switch that is safe to touch: see
@@ -521,7 +496,7 @@ func (p *Player) setOutput(out Output) {
 	if out == OutputSpeaker {
 		p.apply(headphoneOff)
 	}
-	p.apply(pathSequence[out])
+	p.apply(p.path(out))
 	p.pathMu.Unlock()
 
 	p.SetVolume(int(p.step.Load()))
@@ -574,7 +549,7 @@ func (p *Player) Reopen() {
 	}
 	p.apply(initSequence)
 	p.apply(headphoneOff)
-	p.apply(pathSequence[OutputSpeaker])
+	p.apply(p.path(OutputSpeaker))
 	p.pathMu.Unlock()
 
 	p.SetVolume(int(p.step.Load()))
@@ -666,8 +641,9 @@ func (p *Player) Run(ctx context.Context) error {
 	// Written on every start, even at 0 dB: 110 (0 dB) is the TAS5805M driver's own default (probe
 	// sets its vol to 110, and every unmute writes that cached vol to the chip), so at 0 dB this
 	// writes what is already there. But the driver keeps the last level written across a restart of
-	// this service, so the saved gain, 0 dB included (settings reset, say), is written over it.
-	if gainOn(p.heldMixer()) {
+	// this service, so the saved gain, 0 dB included (settings reset, say), is written over it. Where
+	// the gain goes with the path (gainOnPath), route has just written it.
+	if !gainOnPath && gainOn(p.heldMixer()) {
 		if err := p.applySpeakerGain(); err != nil {
 			slog.Error("restoring speaker gain failed, continuing playback", "err", err)
 		}
@@ -897,9 +873,13 @@ func (p *Player) fill(buf []byte) bool {
 	// The two are compared at the level they come out at: tuned with a curve in front, that is the
 	// curve's, which can rise where the usual one stands still (the Spot's and the Dot's vendor curves
 	// repeat values near the top).
+	// A panel plays at Android's volume, which a ring raises for as long as it sounds (paths_panel.go);
+	// an Echo's volume is all here.
+	ringing := rang > 0 || p.ringing.Load()
+	p.followRing(ringing, int(p.bellStep.Load()))
 	gain, step := p.Volume(), int(p.step.Load())
 	mediaK, bellK := float32(1), float32(0)
-	if rang > 0 || p.ringing.Load() {
+	if ringing {
 		var first *[VolumeSteps + 1]float64
 		if tuned {
 			first = p.first
@@ -1246,6 +1226,7 @@ func tone(n Note, level float64) []int16 {
 func (p *Player) SetVolume(step int) {
 	step = max(0, min(step, VolumeSteps))
 	p.step.Store(int32(step))
+	volumeChanged(step)
 	if p.sink.Load() != nil {
 		p.volume.Store(math.Float32bits(sinkGain(step)))
 		return
