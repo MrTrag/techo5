@@ -29,6 +29,7 @@ import (
 
 	"github.com/zserge/microwakeword"
 
+	"github.com/HuskerMinion/techo5/echod/internal/lib/mwwfront"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/oww"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/wake"
 )
@@ -66,12 +67,20 @@ func main() {
 	agree := flag.Duration("agree", 1500*time.Millisecond, "two models agree when they fire within this of each other")
 	trace := flag.String("trace", "", "write a CSV of time,score per file and model into this directory")
 	verbose := flag.Bool("v", false, "print every detection and near miss with its time")
+	front := flag.String("front", "approx", "microWakeWord feature front end: approx (zserge, the Dot's default) or exact (mwwfront, TECHO5_WAKE_FRONTEND=exact)")
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: wakescore -models DIR [flags] FILE|DIR...")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
 
+	switch *front {
+	case "approx":
+	case "exact":
+		exactFrontEnd = true
+	default:
+		fail(fmt.Errorf("-front is approx or exact, not %q", *front))
+	}
 	if *modelDir == "" || flag.NArg() == 0 {
 		flag.Usage()
 		os.Exit(2)
@@ -243,11 +252,24 @@ type engine interface {
 
 type microEngine struct {
 	dets   map[string]*microwakeword.Detector
+	fronts map[string]*exactFront // -front exact: each model's mwwfront, as detect's microFront
 	scores map[string]float64
 }
 
+// exactFront is mwwfront and the audio it has not read yet, for -front exact: the daemon's
+// TECHO5_WAKE_FRONTEND=exact path (detect.microBackend with exact set), repeated here for the same
+// reason as the judge's timings.
+type exactFront struct {
+	fe  *mwwfront.Frontend
+	buf []int16
+}
+
+// exactFrontEnd is -front exact. False is zserge's audiofrontend inside the detector, what the Dot
+// runs by default.
+var exactFrontEnd bool
+
 func newMicro(models []wake.Model) (e *microEngine, err error) {
-	e = &microEngine{dets: map[string]*microwakeword.Detector{}, scores: map[string]float64{}}
+	e = &microEngine{dets: map[string]*microwakeword.Detector{}, fronts: map[string]*exactFront{}, scores: map[string]float64{}}
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("damaged microWakeWord model: %v", r)
@@ -261,13 +283,27 @@ func newMicro(models []wake.Model) (e *microEngine, err error) {
 			return nil, fmt.Errorf("%s: %w", m.ID, err)
 		}
 		e.dets[m.ID] = det
+		if exactFrontEnd {
+			e.fronts[m.ID] = &exactFront{fe: mwwfront.New(mwwfront.StepMs(cfg.FeaturesStepMs))}
+		}
 	}
 	return e, nil
 }
 
 func (e *microEngine) feed(frame []int16) (map[string]float64, bool) {
 	for id, det := range e.dets {
-		det.ProcessAudio(frame)
+		if f := e.fronts[id]; f != nil {
+			f.buf = append(f.buf, frame...)
+			win, step := f.fe.WindowSamples(), f.fe.StepSamples()
+			for len(f.buf) >= win {
+				feat := make([]int8, mwwfront.Channels)
+				mwwfront.Quantize(f.fe.ProcessFrame(f.buf[:win]), feat)
+				det.ProcessFeatures([][]int8{feat})
+				f.buf = f.buf[step:]
+			}
+		} else {
+			det.ProcessAudio(frame)
+		}
 		e.scores[id] = det.SlidingAverage()
 	}
 	return e.scores, true
