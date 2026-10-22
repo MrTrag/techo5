@@ -294,6 +294,8 @@ func (f *Feature) save(w http.ResponseWriter, r *http.Request) {
 		problem = removeSound(r)
 	case "wakeword-remove":
 		problem = removeWakeWord(r)
+	case "hacameras":
+		problem = saveHACameras(r)
 	case "reolink":
 		problem = saveReolink(r)
 	case "doorbell":
@@ -341,6 +343,10 @@ func (f *Feature) save(w http.ResponseWriter, r *http.Request) {
 			if err := timezone.Get().Choose(zone); err != nil {
 				problem = "that is not a time zone this device knows: " + err.Error()
 			}
+		}
+	case "timeserver":
+		if err := timezone.SetServer(r.PostFormValue("server")); err != nil {
+			problem = err.Error()
 		}
 	default:
 		if save, ok := saves[what]; ok {
@@ -419,6 +425,7 @@ func (f *Feature) settingsPage(ctx context.Context, w http.ResponseWriter, token
 			realtimeSection(w, token)
 			listeningSection(w, token)
 			houseSection(w, token)
+			phoneBookSection(w, token)
 			wakeWordsSection(w, token)
 		} else {
 			fmt.Fprint(w, `<h3>Announcements and sounds</h3>`)
@@ -436,8 +443,10 @@ func (f *Feature) settingsPage(ctx context.Context, w http.ResponseWriter, token
 			 is not one this page can change.</p></fieldset>`)
 		}
 		bluetoothSection(w, token)
+		haCamerasSection(w, token)
 		reolinkSection(w, token)
 		go2rtcSection(w, token)
+		cameraListSection(w, token)
 		doorbellSection(w, token)
 		if layout.HasMicrophone() {
 			talkBackSection(w, token) // the microphones to a camera's speaker
@@ -465,6 +474,7 @@ func (f *Feature) settingsPage(ctx context.Context, w http.ResponseWriter, token
 		nameSection(w, token)
 		updatesSection(w, token)
 		timezoneSection(w, token)
+		timeServerSection(w, token)
 		homeAssistantSection(w, token)
 		settingsFileSection(w, token)
 		shareSection(w, token)
@@ -502,6 +512,22 @@ func timezoneSection(w http.ResponseWriter, token string) {
 	 which zone it shows.</p><p><button type="submit">Save</button></p></fieldset></form>`)
 }
 
+// timeServerSection is a time server of the home's own, asked before the internet's.
+func timeServerSection(w http.ResponseWriter, token string) {
+	if !timezone.ServerSettable {
+		return
+	}
+	fmt.Fprint(w, `<form method="post" action="/setup/save"><fieldset><legend>Time server</legend>`)
+	hidden(w, token, "timeserver", "general")
+	fmt.Fprintf(w, `<label for="ntp">Your own time server (optional)</label>
+	 <input id="ntp" name="server" value="%s" placeholder="192.168.1.1" maxlength="253" autocomplete="off">
+	 <p class="note">The device sets its clock from time servers on the internet. A device that cannot
+	  reach them can use one on your network, like your router: it is asked first, and the internet's
+	  after it. %s Leave it empty for the internet's only. Without any time server, the clock is set
+	  from Home Assistant's when it connects.</p>
+	 <p><button type="submit">Save</button></p></fieldset></form>`, html.EscapeString(timezone.Server()), timezone.ServerWhen)
+}
+
 // privacySection says what the device has open, and what this page will never do. It shows and does
 // not change: a web page that could open SSH would be a bigger hole than the convenience is worth, so
 // these stay on the device's own screen and in Home Assistant.
@@ -513,10 +539,22 @@ func privacySection(w http.ResponseWriter) {
 		}
 		return "off"
 	}
+	// A panel has no SSH and no camera page at all (privacy_panel.go): "off" would send somebody
+	// looking for a switch that is not there.
+	ssh, camera, missing := onOff(s.SSH), onOff(s.Camera), ""
+	if !sshHere {
+		ssh = "not available on this device"
+	}
+	if !cameraWebHere {
+		camera = "not available on this device"
+	}
+	if !sshHere || !cameraWebHere {
+		missing = " " + notHereWhy
+	}
 	fmt.Fprintf(w, `<fieldset><legend>What is switched on</legend>
 	 <p style="margin:0">SSH: %s · Camera on the network: %s · Screen on the network: %s</p>
 	 <p class="note">Shown here, not changed here. Change them on the device's own screen, or in Home
-	  Assistant.</p></fieldset>`, onOff(s.SSH), onOff(s.Camera), onOff(s.Screen))
+	  Assistant.%s</p></fieldset>`, ssh, camera, onOff(s.Screen), missing)
 	fmt.Fprint(w, `<fieldset><legend>This page</legend>
 	 <p class="note" style="margin:0">It opens only after a press on the device, and closes itself when it
 	  is left alone. It is on your own network, without encryption. It never touches SSH keys or the

@@ -139,17 +139,25 @@ type Player struct {
 	resampling config.Resampling
 	splices    atomic.Uint64
 
-	// tuning is the vendor's driver tuning, loaded once, and chain is it applied to this stream. Both
-	// are nil on a device whose tuning we could not read, which plays untuned rather than not at all.
-	// on gates it; the chain is only ever touched by the write loop.
+	// Each internal speaker driver needs its own filter and limiter history. The vendor tuning
+	// is shared and immutable; only the write loop touches either processing chain.
+	// Mono uses the first lane; athena, which can play stereo, has a second lane and chain for its
+	// other driver, so stereo turns on and off while playing (SetStereo).
 	tuning *asp.Tuning
-	chain  *asp.Chain
+	// canStereo is a board with two internal drivers that can play stereo: athena. stereo is whether
+	// it does, which starts mono unless speaker.stereo is saved.
+	canStereo bool
+	stereo    atomic.Bool
+	// On athena the first playback PCM slot feeds the physical right speaker.
+	// Reverse logical L/R on internal speakers, never on the headphone-only path.
+	swapLR bool
+	chains []*asp.Chain
+	lanes  [][]float32
 	// first is the volume curve to apply in front of the tuning, where this tuning has one
 	// (firstCurves); nil turns down what the tuning produced instead.
 	first *[VolumeSteps + 1]float64
 	on    atomic.Bool
 	stale atomic.Bool
-	mono  []float32
 
 	// tone is the listener's own shelves, waiting to be picked up: the chain belongs to the write
 	// loop, so a setting changed from anywhere else is left here and applied there. applied is what
@@ -177,11 +185,19 @@ type Player struct {
 
 	mu      sync.Mutex
 	pending []int16 // interleaved stereo waiting to go out
+	// overlay is how many samples at the front of pending carry a sound mixed in by Overlay (a chime, a
+	// beep), so whatever else is queued there knows not to drain it away (Overlaying).
+	overlay int
 
 	// bed is a track's audio, queued apart from pending so an answer or an announcement can sound
 	// over it rather than after it: the two are summed as they go out, as a Source is. Same stereo,
 	// same media volume; a track ducks its own samples before they are queued.
 	bed []int16
+
+	// under is a call's far end played under whatever took the speaker from it (a turn's reply, an
+	// announcement), a lane of its own beside bed: bed is a track's, which keeps what is left in it as the
+	// track's own audio and resumes paused music into it. Summed as bed is, at the media volume.
+	under []int16
 
 	// bell is a ring's chime, queued apart from everything else because it goes out at a level of
 	// its own: bellStep rather than the media volume. ringing holds that level for the whole of a
@@ -271,13 +287,25 @@ func (p *Player) Position() (written uint64, latency time.Duration) {
 	return r.written, max(left, 0) + OutputExtra
 }
 
+// stereoInternalSpeakers permits stereo only on athena after explicit opt-in.
+// Every board uses two-channel PCM, so channel count alone cannot decide.
+func stereoInternalSpeakers(board string, enabled bool) bool {
+	return board == "athena" && enabled
+}
+
 // New makes the speaker without taking the hardware, so callers can hold it before there is anything
 // to play through. Audio queued before Start waits; Volume and the rest work throughout.
 func New() *Player {
 	detected := DetectOutput()
 	p := &Player{
-		out:  detected,
-		jack: detected,
+		out:       detected,
+		jack:      detected,
+		canStereo: stereoInternalSpeakers(layout.Board, true),
+		swapLR:    layout.Board == "athena",
+	}
+	p.stereo.Store(stereoInternalSpeakers(layout.Board, config.Get().Speaker.Stereo))
+	if p.canStereo {
+		slog.Info("speaker stereo", "on", p.stereo.Load())
 	}
 	p.outNow.Store(detected)
 	p.voice, p.resampling = NewResampler(config.ResampleSinc)
@@ -298,12 +326,21 @@ func New() *Player {
 		slog.Error("the driver tuning is not available, playing untuned", "err", err)
 		return p
 	}
-	c, err := t.Chain(period)
-	if err != nil {
-		slog.Error("the driver tuning will not run, playing untuned", "err", err)
-		return p
+	lanes := 1
+	if p.canStereo {
+		lanes = Channels
 	}
-	p.tuning, p.chain, p.mono = t, c, make([]float32, period)
+	for range lanes {
+		c, err := t.Chain(period)
+		if err != nil {
+			slog.Error("the driver tuning will not run, playing untuned", "err", err)
+			p.chains, p.lanes = nil, nil
+			return p
+		}
+		p.chains = append(p.chains, c)
+		p.lanes = append(p.lanes, make([]float32, period))
+	}
+	p.tuning = t
 	if curve, ok := firstCurves[t.Name()]; ok {
 		p.first = &curve
 	}
@@ -820,11 +857,18 @@ func (p *Player) fill(buf []byte) bool {
 	if len(p.pending) == 0 {
 		p.pending = nil
 	}
+	p.overlay = max(0, p.overlay-take)
 	bedTake := min(len(p.bed), period*Channels)
 	bed := p.bed[:bedTake]
 	p.bed = p.bed[bedTake:]
 	if len(p.bed) == 0 {
 		p.bed = nil
+	}
+	underTake := min(len(p.under), period*Channels)
+	under := p.under[:underTake]
+	p.under = p.under[underTake:]
+	if len(p.under) == 0 {
+		p.under = nil
 	}
 	rang := min(len(p.bell), period*Channels)
 	bell := p.bell[:rang]
@@ -845,24 +889,25 @@ func (p *Player) fill(buf []byte) bool {
 	// summed rather than one replacing the other, and a reply still sounds over a room stream.
 	rendered := p.render()
 
-	// The internal speaker is one driver wired to the right channel, so a stereo track would lose
-	// everything panned left. The line-out is not: it gets both channels as they came. Neither is a
-	// sink, which is stereo and untuned: it has its own driver and its own tuning.
+	// The internal speakers are mixed to mono unless athena has explicitly enabled
+	// stereo, which preserves independent driver processing including EQ.
+	// The line-out and an external sink always receive stereo and remain untuned.
 	sinking := p.sink.Load() != nil
 	out := p.Output()
-	mono := (out == OutputSpeaker || out == OutputBoth) && !sinking
+	speaker := (out == OutputSpeaker || out == OutputBoth) && !sinking
+	stereo := p.stereo.Load()
+	mono := speaker && !stereo
 
 	// The write loop runs whether or not anything is playing, since the amplifier hisses when nothing
 	// drives the DAC, and tuning silence costs what tuning music costs. The block after the audio stops
 	// still goes through: that is the filter's own length, and it holds the tail.
-	fed := take > 0 || bedTake > 0 || len(rendered) > 0 || rang > 0
+	fed := take > 0 || bedTake > 0 || underTake > 0 || len(rendered) > 0 || rang > 0
 	drain := fed || p.fed
 	p.fed = fed
 
-	// The tuning is for the driver, so the line-out is left with what it was sent. Both is the
-	// exception: one mixer feeds the speaker and the jack, so the headphones get the speaker's mono
-	// and its tuning too.
-	tuned := mono && p.chain != nil && p.on.Load() && drain
+	// The tuning is for the internal drivers, not a line-out or external sink. In Both mode,
+	// the shared mixer feeds the same tuned output to the speaker and the headphones.
+	tuned := speaker && len(p.chains) > 0 && p.on.Load() && drain
 
 	// There is one gain after the tuning, so two levels are made from it: the output goes at the
 	// louder of the two, and whichever lane is quieter is scaled down by the difference before the
@@ -899,9 +944,14 @@ func (p *Player) fill(buf []byte) bool {
 	// carry more bass and treble rather than simply less of everything. Telling the chain where the
 	// dial is picks the one it meant.
 	if tuned {
-		p.chain.Volume(float64(step) / VolumeSteps)
+		share := float64(step) / VolumeSteps
+		for _, chain := range p.chains {
+			chain.Volume(share)
+		}
 		if want, ok := p.tone.Load().(asp.Tone); ok && want != p.applied {
-			p.chain.SetTone(want)
+			for _, chain := range p.chains {
+				chain.SetTone(want)
+			}
 			p.applied = want
 		}
 	}
@@ -920,6 +970,12 @@ func (p *Player) fill(buf []byte) bool {
 		if i+1 < len(bed) {
 			r += int32(bed[i+1])
 		}
+		if i < len(under) {
+			l += int32(under[i])
+		}
+		if i+1 < len(under) {
+			r += int32(under[i+1])
+		}
 		if i < len(rendered) {
 			l += int32(rendered[i])
 		}
@@ -937,12 +993,22 @@ func (p *Player) fill(buf []byte) bool {
 			l = int32(float32(l)*mediaK + bl*bellK)
 			r = int32(float32(r)*mediaK + br*bellK)
 		}
+		// The real athena speaker wiring reverses the standard PCM L/R order.
+		// Apply this before either DSP branch so the same physical mapping is
+		// used with tuning enabled or disabled. The software reference taps
+		// the post-DSP PCM that is actually sent to the ALSA playback device.
+		if speaker && stereo && p.swapLR {
+			l, r = r, l
+		}
 		if mono {
 			l = (l + r) / 2
 			r = l
 		}
 		if tuned {
-			p.mono[j] = float32(clamp(l)) / full * pre
+			p.lanes[0][j] = float32(clamp(l)) / full * pre
+			if stereo {
+				p.lanes[1][j] = float32(clamp(r)) / full * pre
+			}
 			continue
 		}
 		binary.LittleEndian.PutUint16(buf[i*2:], uint16(limit(float32(l)*OutputBoost*gain)))
@@ -954,17 +1020,26 @@ func (p *Player) fill(buf []byte) bool {
 
 	// Resetting belongs to whoever processes, so a toggle only says that the history is no longer
 	// about what is playing.
-	if p.stale.Swap(false) {
-		p.chain.Reset()
-	}
+	stale := p.stale.Swap(false)
 
-	// Without a curve of its own, the volume attenuates what the tuning produced: the compressor then
-	// works on full-scale music at every volume, which is what firstCurves is for.
-	p.chain.Process(p.mono)
+	// Without a curve of its own, the volume attenuates what the tuning produced: the compressor
+	// then works on full-scale music at every volume. Each driver has independent limiter state;
+	// in mono the second chain, where there is one, waits, and is reset when stereo comes back.
+	for i, chain := range p.chains {
+		if stale {
+			chain.Reset()
+		}
+		if i == 0 || stereo {
+			chain.Process(p.lanes[i])
+		}
+	}
+	right := p.lanes[0]
+	if stereo {
+		right = p.lanes[1]
+	}
 	for i, j := 0, 0; i < period*Channels; i, j = i+Channels, j+1 {
-		s := clamp16(p.mono[j] * full * post)
-		binary.LittleEndian.PutUint16(buf[i*2:], uint16(s))
-		binary.LittleEndian.PutUint16(buf[(i+1)*2:], uint16(s))
+		binary.LittleEndian.PutUint16(buf[i*2:], uint16(clamp16(p.lanes[0][j]*full*post)))
+		binary.LittleEndian.PutUint16(buf[(i+1)*2:], uint16(clamp16(right[j]*full*post)))
 	}
 	return drain
 }
@@ -1014,6 +1089,7 @@ func (p *Player) Take() []int16 {
 
 	pending := p.pending
 	p.pending = nil
+	p.overlay = 0
 	return pending
 }
 
@@ -1041,6 +1117,7 @@ func (p *Player) PlayVoice(mono []int16) {
 func (p *Player) Drain() {
 	p.mu.Lock()
 	p.pending = nil
+	p.overlay = 0
 	p.mu.Unlock()
 
 	p.voiceMu.Lock()
@@ -1058,10 +1135,24 @@ func (p *Player) SetResampling(r config.Resampling) config.Resampling {
 	return p.resampling
 }
 
+// CanStereo is whether this board's internal speakers can play stereo: athena's two drivers.
+func (p *Player) CanStereo() bool { return p.canStereo }
+
+// SetStereo plays the internal speakers in stereo or mono from the next block on, and reports what it
+// settled on, which is mono on a board without two drivers. A change starts the tuning's history
+// again, as turning the tuning on does.
+func (p *Player) SetStereo(on bool) bool {
+	on = on && p.canStereo
+	if p.stereo.Swap(on) != on {
+		p.stale.Store(true)
+	}
+	return on
+}
+
 // SetASP turns the driver tuning on or off and reports what it settled on, which is off on a device
 // whose tuning never loaded.
 func (p *Player) SetASP(on bool) bool {
-	on = on && p.chain != nil
+	on = on && len(p.chains) > 0
 	if on && !p.on.Load() {
 		p.stale.Store(true)
 	}
@@ -1157,6 +1248,19 @@ func (p *Player) Overlay(samples []int16) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.pending = mix(p.pending, samples)
+	p.overlaid(len(samples))
+}
+
+// overlaid notes that the first n samples of the queue now carry an overlay. Called with mu held.
+func (p *Player) overlaid(n int) { p.overlay = max(p.overlay, n) }
+
+// Overlaying reports whether a sound mixed in by Overlay is still queued. Something that keeps the queue
+// short by draining it (a call that has fallen behind) drops its own audio instead while this is so, or
+// the chime or the beep would go with it.
+func (p *Player) Overlaying() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.overlay > 0
 }
 
 // mix sums add into the front of into, extending it if add outlasts it.
@@ -1388,4 +1492,32 @@ func (b *Bed) Drain() {
 	b.p.mu.Lock()
 	b.p.bed = nil
 	b.p.mu.Unlock()
+}
+
+// Underlay queues interleaved stereo for the underlay lane (under), dropped as Player.Play drops audio
+// with no device.
+func (p *Player) Underlay(samples []int16) {
+	if pb, _ := p.device(); pb == nil {
+		if n := p.deaf.Add(1); n == 1 || n%100 == 0 {
+			slog.Warn("audio dropped, no playback device", "times", n)
+		}
+		return
+	}
+	p.mu.Lock()
+	p.under = append(p.under, samples...)
+	p.mu.Unlock()
+}
+
+// UnderQueued is how many frames of the underlay are waiting.
+func (p *Player) UnderQueued() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.under) / Channels
+}
+
+// DrainUnder discards the underlay: the call has the speaker back, and plays its far end as itself.
+func (p *Player) DrainUnder() {
+	p.mu.Lock()
+	p.under = nil
+	p.mu.Unlock()
 }

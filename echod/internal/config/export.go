@@ -357,6 +357,12 @@ func KeepOwn(c *Config, from Config) {
 	// What has the microphones or the camera take in the room: listening in, sending it to Home
 	// Assistant, keeping clips of it, watching for people.
 	c.Home.DropIn = from.Home.DropIn
+	// What may listen during a call or end one by voice: the wake word let through, its answer sent up
+	// the call, the far end played under it, and the hang-up word.
+	c.Home.CallWake, c.Home.CallReplies, c.Home.CallUnderlay = from.Home.CallWake, from.Home.CallReplies, from.Home.CallUnderlay
+	// And what may place one: a contact called by voice.
+	c.Home.CallByVoiceOff = from.Home.CallByVoiceOff
+	c.Wake.Hangup = from.Wake.Hangup
 	c.Wake.OnHA.Stream, c.Wake.OnHA.Confirm = from.Wake.OnHA.Stream, from.Wake.OnHA.Confirm
 	c.Wake.KeepClips = from.Wake.KeepClips
 	c.Presence.On, c.Presence.Gestures = from.Presence.On, from.Presence.Gestures
@@ -365,6 +371,12 @@ func KeepOwn(c *Config, from Config) {
 	c.Video.On, c.Video.DLNA = from.Video.On, from.Video.DLNA
 	c.Video.Allowed = slices.Clone(from.Video.Allowed)
 	c.Home.CameraLive = from.Home.CameraLive
+	// Which of Home Assistant's cameras the device lists: a file that says All (or is from a build that
+	// had no choice) does not undo None or a list chosen here, so a device that shares a Home Assistant
+	// with other homes is not given every camera in it by a file.
+	if c.Home.AllHACameras() && !from.Home.AllHACameras() {
+		c.Home.Cameras, c.Home.CamerasChosen = slices.Clone(from.Home.Cameras), from.Home.CamerasChosen
+	}
 	// Keeping the audio of a slot's turns on disk is this device's: the file's words come in, kept
 	// to as many turns as the device kept for that slot before, none for a slot it did not have.
 	for i := range c.Wake.Words {

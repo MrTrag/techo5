@@ -46,6 +46,10 @@ type Detect struct {
 	gate   *esphome.Switch
 	gateDB *esphome.Number
 
+	// command is the volume down word's select and threshold, and its loading with the music: see
+	// command.go.
+	command *command
+
 	// loading is held for a whole load, so a refresh (wakeword.Refresh) and a selection take turns, and
 	// asked is what the latest one was asked for, which is what a refresh loads again. refreshing keeps
 	// a run of connects from queueing refreshes behind it, and lib is the library, wake.Lib() unless a
@@ -54,6 +58,9 @@ type Detect struct {
 	asked      []string
 	refreshing atomic.Bool
 	lib        *wake.Library
+
+	// hangup is the hang-up word's select and threshold, and its loading with the call: see hangup.go.
+	hangup *hangup
 
 	// score is the last wake's peak, for setting the threshold by: see newScoreEntity.
 	score *esphome.Sensor
@@ -119,6 +126,26 @@ func thresholdFor(slot int, base func(int) float64, stop float64, canceling bool
 	return t
 }
 
+// slackFor reports whether a slot is judged with the allowance for the speaker (thresholdFor): while the
+// canceller runs, except for the words that end a call, during one. A call keeps the canceller running
+// even with the far end silent, so they would always be judged low, and a word heard by mistake ends the
+// call. The stop word keeps the allowance over a ring, which it has to be heard over to stop.
+//
+// The volume down word (command.go) never gets it. It is listened for only while the speaker plays, so
+// the allowance would be off its threshold all the time, and it acts at once with no turn after it to
+// show a mistake: the music it is said over is the one thing it must not take for the word.
+func slackFor(slot int, canceling, onCall, ringing bool) bool {
+	switch {
+	case !canceling, slot == CommandSlot:
+		return false
+	case onCall && slot == HangupSlot:
+		return false
+	case onCall && slot == StopSlot:
+		return ringing
+	}
+	return true
+}
+
 // settleTail is how long past the unmute sound detections stay held: the echo of its last notes,
 // and the canceller letting go of them.
 const settleTail = 300 * time.Millisecond
@@ -138,56 +165,97 @@ func unmuteSettle() time.Duration {
 }
 
 func newDetect() *Detect {
-	// Sized to reach the stop word's reserved index. The slots between it and Home Assistant's are never
-	// loaded, and an unloaded slot is one comparison a frame.
-	e := New(StopSlot+1, mic.Get())
+	// Sized to reach the reserved indexes, the stop word's, the hang-up word's and the volume down
+	// word's. The slots between them and Home Assistant's are never loaded, and an unloaded slot is one
+	// comparison a frame.
+	e := New(CommandSlot+1, mic.Get())
 
+	// The hang-up and volume down words are judged as a wake word is, their own thresholds standing in
+	// for the slot's.
+	base := func(slot int) float64 {
+		switch slot {
+		case HangupSlot:
+			return config.Get().Wake.Hangup.ThresholdAt()
+		case CommandSlot:
+			return config.Get().Wake.VolumeDown.ThresholdAt()
+		}
+		return wakeword.Threshold(slot)
+	}
 	e.Threshold = func(slot int) float64 {
-		return thresholdFor(slot, wakeword.Threshold, config.Get().Wake.Stop.Threshold, mic.Get().Canceling())
+		// A call still waiting to be dialed has no far end in the speaker, only "Calling Mom.", so the
+		// stop word keeps the slack it has over any announcement.
+		onCall := phone.Get().Busy() && !phone.Get().State().Waiting
+		slack := slackFor(slot, mic.Get().Canceling(), onCall, ring.IsSounding())
+		return thresholdFor(slot, base, config.Get().Wake.Stop.Threshold, slack)
 	}
 
+	// d is made below, once the hooks it chains onto are in place; a detection only arrives after Start.
+	var d *Detect
 	e.OnDetect = func(slot int) {
 		// A training session is somebody saying the word over and over on purpose, to be recorded; a
 		// turn on each one would talk over them. The detection is still logged, with its loudness and
-		// trace, by the engine. The stop word still works.
-		if slot != StopSlot && recording.Get().Training() {
+		// trace, by the engine. The stop, hang-up and volume down words still work.
+		if slot < StopSlot && recording.Get().Training() {
 			slog.Info("wake ignored: a training session is recording", "slot", slot+1)
 			return
 		}
-		// A call has the microphones and the speaker. The far end talking through the speaker is not
-		// someone in the room, and a turn would take the call's audio away mid-sentence. A talk through
-		// a camera (feature/talkback) is the same: whoever is at the door is being spoken to.
-		if phone.Get().Busy() || talkback.Get().Busy() {
-			// A ring during a call is the one thing that still has to hear "stop". The call page
-			// takes every tap and Home Assistant cannot stop a timer, so without this a timer that
-			// finishes mid-call sounds for its full fifteen minutes with no way out at all.
-			//
-			// It ends the ring and nothing else: the call is not interrupted, and the word is not
-			// passed to the turn, because the far end talking through the speaker is not somebody in
-			// the room.
-			if slot == StopSlot && ring.IsSounding() {
-				slog.Info("stop word during a call, ending the ring")
-				ring.End()
-				return
+		c := config.Get()
+		st := phone.Get().State()
+		h := heard{
+			phase:    st.Phase,
+			talkBack: talkback.Get().Busy(),
+			ringing:  ring.IsSounding(),
+			stopHang: c.Wake.Hangup.StopWord(),
+			callWake: c.Home.CallWake,
+			farEnd:   phone.Get().FarEndTalking(),
+			turnOpen: voice.Get().Busy(),
+			waiting:  st.Waiting,
+		}
+		switch routeFor(slot, h) {
+		case routeHangUp:
+			if slot == StopSlot {
+				hangUp("stop word")
+			} else {
+				hangUp("hang-up word")
 			}
-			slog.Debug("wake word ignored during a call or a talk through a camera", "slot", slot+1)
-			return
-		}
-		if slot == StopSlot {
+		case routeCancelTurn:
+			slog.Info("stop word during a turn on a call, canceling the turn")
+			voice.Get().Cancel()
+		case routeCancelAndHangUp:
+			if hangUp("hang-up word during a turn") {
+				voice.Get().Cancel()
+			}
+		case routeCancelCall:
+			slog.Info("stop or hang-up word before a call was dialed, canceling it", "slot", slot+1)
+			phone.Get().Hangup()
+		case routeEndRing:
+			slog.Info("stop word during a call, ending the ring")
+			ring.End()
+		case routeCommand:
+			d.command.heard()
+		case routeInterrupt:
 			voice.Get().Interrupt()
-			return
+		case routeFarEnd:
+			slog.Info("wake word during a call ignored, the far end was talking", "slot", slot+1)
+		case routeTurn:
+			if h.phase != phone.Idle {
+				slog.Info("wake word during a call", "slot", slot+1)
+			}
+			// Heard here while Home Assistant's engine is listening too (config.OnHA), it still wakes:
+			// the run there is closed and the turn opens here. The same word heard by both opens one
+			// turn, since a wake word while listening is ignored.
+			//
+			// Who said it is asked of the house's voice-ID service now, with the two seconds that hold
+			// the word, so the answer is in by the time the devices have agreed which answers and the
+			// wake sound is due (jarvis: wakeword.Ask, collected by voice's start through wakeword.Who).
+			wakeword.Ask(slot, mic.Get().Recent(recording.Prewake))
+			// The other devices that heard it may be asked first which of them heard it best
+			// (feature/nearest); with that off, or nobody to ask, the turn opens at once as it always
+			// has.
+			nearest.Get().Woke(slot)
+		default:
+			slog.Debug("wake word ignored during a call or a talk through a camera", "slot", slot+1)
 		}
-		// Heard here while Home Assistant's engine is listening too (config.OnHA), it still wakes: the
-		// run there is closed and the turn opens here. The same word heard by both opens one turn, since
-		// a wake word while listening is ignored.
-		//
-		// Who said it is asked of the house's voice-ID service now, with the two seconds that hold the
-		// word, so the answer is in by the time the devices have agreed which answers and the wake
-		// sound is due (jarvis: wakeword.Ask, collected by voice's start through wakeword.Who).
-		wakeword.Ask(slot, mic.Get().Recent(recording.Prewake))
-		// The other devices that heard it may be asked first which of them heard it best (feature/nearest);
-		// with that off, or nobody to ask, the turn opens at once as it always has.
-		nearest.Get().Woke(slot)
 	}
 
 	// A wake the device was not sure of, asked about when confirming is on: only the first wake word,
@@ -220,18 +288,22 @@ func newDetect() *Detect {
 
 	// The other-room floor (config.Gate) for Home Assistant's slots. The stop word is never gated:
 	// shouting stop from the next room should still stop it, and a floor it can never be under says so.
+	// Nor are the hang-up and volume down words, which the floor was never tuned for.
 	e.Gate = func(slot int) (bool, float64) {
-		if slot == StopSlot {
+		if slot >= StopSlot {
 			return false, silentDB
 		}
 		g := config.Get().Wake.Gate
 		return g.On, g.Level()
 	}
 
-	d := &Detect{engine: e, busy: newWakeBusy(led.Get().Busy(), e.Ready)}
+	d = &Detect{engine: e, busy: newWakeBusy(led.Get().Busy(), e.Ready)}
 	d.ducker = newDucker()
 	d.ducker.watch(e)
 	d.stop = newStopEntity(d)
+	d.hangup = newHangup(d)
+	d.command = newCommand(d)
+	d.command.watch()
 	d.score = newScoreEntity()
 	d.onHA = newOnHAEntities()
 	e.OnScored = func(slot int, peak, _ float64) {
@@ -272,6 +344,11 @@ func newDetect() *Detect {
 		}
 	})
 	e.OnReady = d.busy.scored
+	e.OnDropped = func(slot int, id string) {
+		if slot == CommandSlot {
+			d.command.dropped(id)
+		}
+	}
 
 	// The engine loads on every start, including a restart. Home Assistant only pushes a selection when
 	// the user changes one, so an engine that came back empty would leave the device deaf while it went
@@ -280,6 +357,10 @@ func newDetect() *Detect {
 		turn := voice.Get()
 		turn.SetActiveWakeWords(d.load(turn.ActiveWakeWords()))
 		d.loadStop()
+		// A call already up when the engine starts has its hang-up word, as one that starts later does.
+		d.hangup.follow(hangupListens(phone.Get().State()))
+		// Back in if music is playing: the start emptied its slot.
+		d.command.restarted()
 		// A device that was muted when it was switched off comes back muted, and the hook below only
 		// fires on a change, so the state has to be read once here as well.
 		if muted, err := mute.Get().Muted(); err == nil {
@@ -288,9 +369,7 @@ func newDetect() *Detect {
 		return nil
 	}
 
-	// A selection both downloads models and lets go of the ones it replaced, so it is the one thing that
-	// moves either number the disk reports.
-	voice.Get().OnWakeWord(d.load, diag.Get().Measure)
+	voice.Get().OnWakeWord(d.load, d.selected)
 	wakeword.Refresh = d.refresh
 
 	ours := wake.Lib().Ours()
@@ -299,6 +378,15 @@ func newDetect() *Detect {
 		"microwakeword", len(wake.OfKind(ours, wake.KindMicroWakeWord)))
 
 	return d
+}
+
+// selected is a wake word selection saved. A selection both downloads models and lets go of the ones it
+// replaced, so it is the one thing that moves either number the disk reports. Saved, it is also what
+// the volume down word is kept apart from, looked at here rather than from load, which runs before the
+// save.
+func (d *Detect) selected() {
+	diag.Get().Measure()
+	d.command.follow()
 }
 
 func (d *Detect) Name() string { return "wake" }
@@ -399,6 +487,16 @@ func (d *Detect) loadLocked(ids []string) []string {
 		loaded = append(loaded, slot)
 	}
 	d.library().Loaded(accepted)
+	// A word running as a wake word now is not listened for as the volume down word too. A selection
+	// looks again once it is saved (OnWakeWord); this covers a start and a refresh.
+	d.command.nudge()
+
+	// The hang-up word's list leaves the wake words out, and a word just chosen as one is no longer
+	// listened for as the hang-up word.
+	if d.hangup != nil {
+		d.hangup.refreshOptions()
+		d.hangup.follow(hangupListens(phone.Get().State()))
+	}
 
 	// Only the slots that took a wake word are waited on. A selection that loaded nothing has nothing to
 	// warm up, so the ring goes back to what it was showing rather than animating for a device that is

@@ -28,9 +28,9 @@ On TECHO5's kernel:
 
 Known limits:
 
-- **Only one screen is tested: the ILI9881C panel with BOE glass.** Amazon built this model with
-  several panels. TECHO5's kernel has the others' settings too, but they haven't been tried on a
-  unit yet. The installer checks which one your unit has (see [Which screen](#which-screen)).
+- **Two screens are tested: the ILI9881C panel with BOE glass, and the JD9365 with KD/HSD glass.**
+  Amazon built this model with several panels. TECHO5's kernel has the others' settings too, but they
+  haven't been tried on a unit yet. The installer checks which one your unit has (see [Which screen](#which-screen)).
 - The light sensor works but its lux values aren't calibrated yet.
 - The microphone beamformer is off; the microphones are used without it.
 
@@ -120,12 +120,13 @@ loader tells the kernel which one the unit has: by name in its framebuffer entry
 and with `jd936x_id=` on the command line, whose low digit is the panel. TECHO5's kernel picks the
 panel's settings from that at boot, so one kernel covers every unit.
 
-Only one has been tested on a unit: the **ILI9881C with BOE glass** (`jd936x_id=0x36`, the boot
-loader's name `ili9881c_wxga_dsi_vdo_st_boe`). The others:
+Two have been tested on units: the **ILI9881C with BOE glass** (`jd936x_id=0x36`, the boot
+loader's name `ili9881c_wxga_dsi_vdo_st_boe`) and the **JD9365 with KD/HSD glass** (`jd936x_id=0x31`,
+`jd936x_wxga_dsi_vdo_athena_st_kd_hsd`, reported in #187). All of them:
 
 | `jd936x_id` low digit | Boot loader's name | Panel |
 |---|---|---|
-| 1 | `jd936x_wxga_dsi_vdo_athena_st_kd_hsd` | JD9365, KD/HSD glass |
+| 1 | `jd936x_wxga_dsi_vdo_athena_st_kd_hsd` | JD9365, KD/HSD glass (tested) |
 | 2 | `jd936x_wxga_dsi_vdo_athena_st_kd_hsd_new` | JD9365, KD/HSD glass (new) |
 | 3 | `jd936x_wxga_dsi_vdo_athena_st_kd_hsd_proto` or `ili9881c_wxga_dsi_vdo_st_kd_hsd` | JD9365 or ILI9881C, KD/HSD glass |
 | 4 | `jd936x_wxga_dsi_vdo_athena_st_boe` | JD9365, BOE glass |
@@ -137,7 +138,7 @@ loader's name `ili9881c_wxga_dsi_vdo_st_boe`). The others:
 | a | `ili9881c_wxga_dsi_vdo_st_kd_inx_o` | ILI9881C, KD/INX glass |
 
 The installer reads both in TWRP (`/proc/cmdline` and the device tree) and goes on by itself only on
-the tested panel. On one of the others it stops and says which panel it found: add `--force-panel`
+a tested panel. On one of the others it stops and says which panel it found: add `--force-panel`
 to try it, with `--wifi` and `--ssh-key` too, so you can still reach the unit if its screen stays
 dark (without a screen there's no other way to set up Wi-Fi). On a panel it doesn't know, or when it can't tell, it stops too. To check by hand:
 
@@ -190,6 +191,21 @@ table. To add them, put the hashes in `KNOWN_AMP_TABLES` in `tools/install-athen
 letter. Only do that after checking the tables: the speaker-config 0 table must be the one Amazon's
 driver uses for 0 (table A), the other for 1. Please open an issue with the Fire OS version and the
 hashes so the next release knows them.
+
+## Stereo speakers
+
+The Show 8 2nd gen has two speakers. TECHO5 plays them in mono by default: left and right are mixed
+and both speakers play the mix. To hear left and right on their own speakers, turn on **Stereo
+speakers** in the **Configuration** card of the device's page in Home Assistant, or on the setup
+page under **Speaker and voice**. It changes at once, no restart.
+
+In stereo each speaker gets its own EQ and limiter, and the speaker EQ, bass and treble apply to
+both. Amazon wired the speakers the other way round from the usual left/right order, so TECHO5
+swaps them back. A Bluetooth speaker always gets stereo, with or without this switch.
+
+**Stereo can make the wake word harder to catch while music plays.** The echo canceller works from
+one reference, the mix of the two speakers, so a sound panned hard to one side is canceled less
+well than in mono. If the wake word gets missed over music, turn stereo back off.
 
 ## The store fills the partition
 

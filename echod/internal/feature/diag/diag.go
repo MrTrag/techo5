@@ -126,7 +126,11 @@ func (d *Diag) Entities() []esphome.Entity {
 		d.temperature, d.radioTemp, d.cores, d.coresOnline, d.load, d.memory, d.booted, d.lux,
 		d.roomLevel, d.roomFloor,
 		d.tls, d.ip, d.color, d.signal, d.rxRate, d.txRate,
-		d.testPlayback, d.interval, d.minCores,
+		d.testPlayback, d.interval,
+	}
+	// Holding cores online is the hotplug governor's, which an app on a tablet may not touch (coresHere).
+	if coresHere {
+		out = append(out, d.minCores)
 	}
 	// What the BLE radio hears, where the daemon has the radio (bluetooth.Here).
 	if bluetooth.Here {
@@ -673,6 +677,9 @@ func (d *Diag) Restore(c config.Config) {
 	d.tls.Set(c.Diag.InsecureTLS)
 	slog.Info("restored", "what", d.tls.ObjectID, "using", c.Diag.InsecureTLS)
 
+	if !coresHere {
+		return
+	}
 	if err := setup.MinCores(c.Diag.MinCores); err != nil {
 		slog.Error("holding cores online failed", "cores", c.Diag.MinCores, "err", err)
 	} else {
@@ -788,7 +795,8 @@ func set(s *esphome.Sensor, r metrics.Reading) {
 	}
 }
 
-// inUse is what the slots are set to, which is what a purge has to leave alone.
+// inUse is what the slots are set to, the hang-up word and the volume down word, which is what a purge
+// has to leave alone.
 func inUse() []string {
 	saved := config.Get().Wake
 
@@ -797,6 +805,12 @@ func inUse() []string {
 		if id := saved.Slot(slot).ID; id != "" {
 			ids = append(ids, id)
 		}
+	}
+	if id := saved.Hangup.ModelID(); id != "" {
+		ids = append(ids, id)
+	}
+	if id := saved.VolumeDown.ID; id != "" {
+		ids = append(ids, id)
 	}
 	return ids
 }

@@ -132,6 +132,12 @@ func (w Writer) Stop() StopWriter { return StopWriter(w) }
 // Gate is the other-room floor, which is not a slot either.
 func (w Writer) Gate() GateWriter { return GateWriter(w) }
 
+// Hangup is the hang-up word, which is not a slot either.
+func (w Writer) Hangup() HangupWriter { return HangupWriter(w) }
+
+// VolumeDown is the volume down word, which is not a slot either.
+func (w Writer) VolumeDown() VolumeDownWriter { return VolumeDownWriter(w) }
+
 // OnHA is Home Assistant's wake word engine.
 func (w Writer) OnHA() OnHAWriter { return OnHAWriter(w) }
 

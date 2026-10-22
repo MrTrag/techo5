@@ -83,11 +83,14 @@ type Screen struct {
 	// default five seconds, -1 until they are tapped away.
 	AnswerSeconds int `json:"answer_seconds,omitempty"`
 
-	// ClockPosition is where the home screen's clock sits: empty for the center, "bottom-left" or
-	// "bottom-right" on a Show, "bottom" on the Spot; DateColor the date's color, empty for the
-	// theme's (display/clock_position.go, clock_layout.go).
+	// ClockPosition is where the home screen's clock sits: empty for the center, "bottom-left",
+	// "bottom-center" or "bottom-right" on a Show, "bottom" on the Spot; DateColor the date's color,
+	// empty for the theme's (display/clock_position.go, clock_layout.go).
 	ClockPosition string `json:"clock_position,omitempty"`
 	DateColor     string `json:"date_color,omitempty"`
+	// WeatherPosition is where the home screen's weather sits: empty for the top left, "top-right"
+	// (display/clock_layout.go). The Show's only.
+	WeatherPosition string `json:"weather_position,omitempty"`
 
 	// ClockStyle is how the home screen's clock looks all day: empty for the classic face, or "big",
 	// "flip", "led", "analog", "words", "sun", "dashboard", "binary", "world", "agenda", "glow", "nixie",
@@ -153,6 +156,10 @@ type Screen struct {
 	// NoStyleSwipe stops a swipe left or right across the clock from turning its style (on unless
 	// this is set; display/style_swipe.go).
 	NoStyleSwipe bool `json:"no_style_swipe,omitempty"`
+
+	// NoVolumeSwipe stops a swipe up or down on the clock from changing the volume (on unless this is
+	// set; display/volume_swipe.go, #243).
+	NoVolumeSwipe bool `json:"no_volume_swipe,omitempty"`
 
 	// Font is the font the screen's words are drawn in: empty for Go, the screen's own, or one of the
 	// others lib/fonts offers ("inter", "comicneue", ...). One this build does not have is Go.
@@ -327,6 +334,10 @@ func (w ScreenWriter) DateColor(v string) error {
 	return w.st.Update(func(c *Config) { c.Screen.DateColor = v })
 }
 
+func (w ScreenWriter) WeatherPosition(v string) error {
+	return w.st.Update(func(c *Config) { c.Screen.WeatherPosition = v })
+}
+
 func (w ScreenWriter) AnswerSeconds(v int) error {
 	return w.st.Update(func(c *Config) { c.Screen.AnswerSeconds = v })
 }
@@ -353,6 +364,10 @@ func (w ScreenWriter) MuteRingSubtle(v bool) error {
 
 func (w ScreenWriter) NoStyleSwipe(v bool) error {
 	return w.st.Update(func(c *Config) { c.Screen.NoStyleSwipe = v })
+}
+
+func (w ScreenWriter) NoVolumeSwipe(v bool) error {
+	return w.st.Update(func(c *Config) { c.Screen.NoVolumeSwipe = v })
 }
 
 func (w ScreenWriter) CallButton(v bool) error {

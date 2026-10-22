@@ -321,6 +321,14 @@ type renderer struct {
 	// forecast too. Under weatherMu, like weatherAt.
 	tempAt image.Rectangle
 
+	// weatherRight is this frame having drawn the weather at the top right (Weather position): the alert
+	// badge goes beside it, from the middle to weatherLeft (under it, from weatherFoot, when there is no
+	// room), and a Corner timer in the row under that, so together they take no more of the corner than
+	// the badge and the timer did. The drawing goroutine's alone.
+	weatherRight bool
+	weatherLeft  int
+	weatherFoot  int
+
 	// cameraSoundAt is where the camera page's sound control was drawn in the frame last drawn, for a
 	// tap there to silence the sound rather than take the view down; empty when there was no control to
 	// draw. Under the same lock and for the same reason as weatherAt.
@@ -488,6 +496,7 @@ func (r *renderer) draw(s scene) {
 	// looked at rather than answered (render_cue.go).
 	defer r.turnCue(s)
 	r.artDrawn = false
+	r.weatherRight = false
 	r.setWeatherAt(image.Rectangle{})
 	r.setTempAt(image.Rectangle{})
 	r.setDateAt(image.Rectangle{})
@@ -725,15 +734,15 @@ const volumeBarH = 110
 // optional suffix appended to the date line (an alarm note, on the ordinary idle page). Shared by
 // bigClock and the screensaver's normal-size overlay, which wants the clock alone.
 func (r *renderer) timeAndDate(now time.Time, base int, dateSuffix string) image.Rectangle {
-	return r.timeAndDateAt(now, base, dateSuffix, 0, 0)
+	return r.timeAndDateAt(now, base, dateSuffix, 0, 0, false)
 }
 
 // timeAndDateAt is timeAndDate lined up across as align says: -1 against left (a left edge), 0
 // centered, 1 against the right margin. Off center it is the compact clock, for a corner: the time at
 // the size of the weather's reading, the date close under it.
-func (r *renderer) timeAndDateAt(now time.Time, base int, dateSuffix string, align, left int) image.Rectangle {
+func (r *renderer) timeAndDateAt(now time.Time, base int, dateSuffix string, align, left int, compact bool) image.Rectangle {
 	clock, ampmFace, dateGap := r.clock, r.ampm, r.s(70)
-	if align != 0 {
+	if compact {
 		clock, ampmFace, dateGap = r.big, r.small, r.s(48)
 	}
 	hour := clockHM(now)
@@ -741,7 +750,7 @@ func (r *renderer) timeAndDateAt(now time.Time, base int, dateSuffix string, ali
 	hw := r.width(clock, hour)
 	aw := r.width(ampmFace, ampm)
 	gap := r.s(18)
-	if align != 0 {
+	if compact {
 		gap = r.s(10)
 	}
 	if ampm == "" {
@@ -761,8 +770,8 @@ func (r *renderer) timeAndDateAt(now time.Time, base int, dateSuffix string, ali
 	r.text(ampmFace, ampm, x+hw+gap, base, dateColor(amber)) // a chosen date color takes the AM/PM with it
 
 	date := locale.LongDate(now, screenLang()) + dateSuffix
-	if room := r.w * cornerPct / 100; align != 0 && r.width(r.small, date) > room {
-		// In a corner, as wide as the other styles' corner box at most (styleDateIn): the day and month
+	if room := r.w * cornerPct / 100; compact && r.width(r.small, date) > room {
+		// At the foot, as wide as the other styles' corner box at most (styleDateIn): the day and month
 		// short first, so the alarm still fits, and cut only if that is not enough.
 		date = r.clipTo(r.small, locale.ShortDate(now, screenLang())+dateSuffix, room)
 	}
@@ -796,7 +805,7 @@ func (r *renderer) bigClock(s scene) {
 	align, foot := clockAlign()
 	base, timersAt := r.h/2+r.s(60), r.s(128)
 	if foot {
-		// The compact clock in a corner at the foot, the date clear of the footer's line.
+		// The compact clock at the foot, in a corner or between them, the date clear of the footer's line.
 		base, timersAt = r.h-r.s(106), r.s(96)
 	}
 	timers := timersAtFoot(s)
@@ -838,7 +847,7 @@ func (r *renderer) bigClock(s scene) {
 	if s.callButton && foot && align < 0 {
 		left = r.callButtonRect().Max.X + r.s(24)
 	}
-	r.setDateAt(r.timeAndDateAt(s.now, base, suffix, align, left).Inset(-r.s(16)))
+	r.setDateAt(r.timeAndDateAt(s.now, base, suffix, align, left, foot).Inset(-r.s(16)))
 	if timers {
 		r.timersFoot(s, base+timersAt)
 	}
@@ -853,30 +862,76 @@ func (r *renderer) bigClock(s scene) {
 	r.alertBadge(s)
 }
 
-// weatherCorner is the weather where it has always been, top left, with the drawing of it that the
-// forecast page has had all along. The icon is read before the words are: a glance at the corner of
-// a clock is not reading, and the screen already knew how to draw it.
+// weatherCorner is the weather at the top of the home screen, in the corner Weather position says:
+// the top left, where it has always been, or the top right.
 func (r *renderer) weatherCorner(s scene) {
+	r.weatherCornerAt(s, weatherOnRight())
+}
+
+// weatherCornerAt is the weather in a top corner, with the drawing of it that the forecast page has
+// had all along. The icon is read before the words are: a glance at the corner of a clock is not
+// reading, and the screen already knew how to draw it. On the right the icon takes the outer edge,
+// as it does on the left, and the HAL 9000 skin's eye keeps its corner, the weather just inside it.
+func (r *renderer) weatherCornerAt(s scene, right bool) {
 	w := s.weather
 	if w.Temp == "" && w.Condition == "" {
 		return
 	}
-	line := w.Temp
-	if c := conditionWords(w.Condition); c != "" {
-		if line != "" {
-			line += "  ·  "
+	// At the top right with an alert, the temperature alone, so the alert's badge fits beside it: the
+	// icon still says what the sky is doing.
+	short := right && len(s.alerts.Here) > 0 && w.Temp != ""
+	mark, mid := r.s(weatherMark), r.margin+r.s(15)
+	if right {
+		// On the badges' row, so the Corner timer's row under it stays clear of the icon.
+		mid = min(mid, r.badgeTop()+r.s(20))
+	}
+	icon := w.Condition != "" && conditionWords(w.Condition) != ""
+	var line string
+	var lw, width, left int
+	for {
+		line = w.Temp
+		if c := conditionWords(w.Condition); c != "" && !short {
+			if line != "" {
+				line += "  ·  "
+			}
+			line += c
 		}
-		line += c
+		lw = r.width(r.small, line)
+		width = lw
+		if icon {
+			width += mark + r.s(14)
+		}
+		left = r.margin
+		if right {
+			edge := r.w - r.margin
+			if eye := r.halEyeAt(s); !eye.Empty() {
+				edge = eye.Min.X - r.s(16)
+			}
+			left = edge - width
+		}
+		// Muted, the header's "microphone off" pill is on this row too: the temperature alone when the
+		// whole line would run under it.
+		if right && s.muted && !short && w.Temp != "" && left < r.micPillRight()+r.s(12) {
+			short = true
+			continue
+		}
+		break
 	}
-	x, mark, mid := r.margin, r.s(weatherMark), r.margin+r.s(15)
-	if w.Condition != "" && conditionWords(w.Condition) != "" {
-		r.weatherIcon(w.Condition, r.margin+mark/2, mid, mark)
-		r.over.note(image.Rect(r.margin, mid-mark/2, r.margin+mark, mid+mark/2))
-		x += mark + r.s(14)
+	x, ix := left, left // where the words start, and the icon
+	if icon {
+		if right {
+			ix = left + lw + r.s(14)
+		} else {
+			x += mark + r.s(14)
+		}
+		r.weatherIcon(w.Condition, ix+mark/2, mid, mark)
+		r.over.note(image.Rect(ix, mid-mark/2, ix+mark, mid+mark/2))
 	}
-	r.text(r.small, line, x, r.margin+r.s(26), dim)
+	r.text(r.small, line, x, mid+r.s(11), dim)
 	// A tap on it opens the forecast: the icon and the words, with a finger's room around them.
-	r.setWeatherAt(image.Rect(r.margin, mid-mark/2, x+r.width(r.small, line), mid+mark/2).Inset(-r.s(14)))
+	r.setWeatherAt(image.Rect(left, mid-mark/2, left+width, mid+mark/2).Inset(-r.s(14)))
+	r.weatherRight = right
+	r.weatherLeft, r.weatherFoot = left, mid+mark/2+r.s(10)
 }
 
 func (r *renderer) setDateAt(b image.Rectangle) {

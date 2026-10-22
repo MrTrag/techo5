@@ -32,8 +32,8 @@ whatever paired the device, and isn't something you call from an automation afte
 > **Good to know**
 >
 > Several other actions depend on this being set first: `home_show_camera` and
-> `home_show_camera_sound`, `home_weather`, `home_cameras`' automatic camera list (when called with
-> `cameras` empty), `home_slideshow`, Home Assistant's Radio Browser lists on the Radio page, and the
+> `home_show_camera_sound`, `home_weather`, `home_cameras`' automatic camera list (All, when called
+> with `cameras` empty), `home_slideshow`, Home Assistant's Radio Browser lists on the Radio page, and the
 > player's star. They all fetch in the background, so the action itself succeeds either way. Without
 > the token they show or offer nothing, and the camera actions open the view with
 > `hass: no access configured` on it in place of the picture. The radio lists are the exception: the
@@ -339,6 +339,23 @@ recorder:
       - esphome.echolocal_turn
 ```
 
+## Command word events
+
+Each time the [volume down word](setup.md#the-volume-down-word) acts, it fires
+`esphome.techo5_command` on Home Assistant's bus, with:
+
+| Field | |
+|---|---|
+| `command` | What the word did: `volume_down` |
+| `word` | The id of the model that heard it, as on the setup page |
+| `score` | How sure the model was when it acted, `0.50` to `1.00` |
+| `volume` | The volume step it went to, `0` to `30` |
+| `device` | The device's name |
+
+It acted already: the event says so, for an automation or a dashboard to follow. All values are text,
+and the device needs **Allow the device to perform Home Assistant actions** turned on, as for alarm
+events.
+
 ## Show an effect on the ring during a request
 
 In YAML, refer to this action as `esphome.<node>_voice_effect`.
@@ -576,7 +593,8 @@ Home Assistant's own voice commands know timers but not clock alarms, so "set an
 agent if you have one. Its volume command works, but it changes every speaker in the room's area,
 so in a room with a TV or another speaker, "volume down" can turn down the wrong one. These three
 automations answer those sentences on the TECHO5 device that heard them. Add each one in Settings >
-Automations & scenes > Create automation > Edit in YAML.
+Automations & scenes > Create automation > Edit in YAML. The time can come from speech-to-text as
+digits or as words ("6:30" or "six thirty"); both work.
 
 ```yaml
 alias: TECHO5 - set an alarm by voice
@@ -595,7 +613,18 @@ actions:
       spoken: "{{ (trigger.slots.when | default('')) | lower | replace('.', '') | trim }}"
       pm: "{{ 'pm' in spoken or 'p m' in spoken }}"
       am: "{{ 'am' in spoken or 'a m' in spoken }}"
-      nums: "{{ spoken | regex_findall('[0-9]{1,2}') }}"
+      nums: >-
+        {%- set w = {'one':1,'two':2,'three':3,'four':4,'five':5,'six':6,'seven':7,'eight':8,'nine':9,'ten':10,'eleven':11,'twelve':12,'thirteen':13,'fourteen':14,'fifteen':15,'sixteen':16,'seventeen':17,'eighteen':18,'nineteen':19,'twenty':20,'thirty':30,'forty':40,'fifty':50,'oh':0,'o':0} -%}
+        {%- set ns = namespace(n=[], tens=false) -%}
+        {%- for t in spoken | regex_findall('[a-z]+|[0-9]+') -%}
+          {%- if t.isdigit() -%}{%- set ns.n = ns.n + [t | int] -%}{%- set ns.tens = false -%}
+          {%- elif t in w -%}
+            {%- set v = w[t] -%}
+            {%- if ns.tens and v > 0 and v < 10 -%}{%- set ns.n = ns.n[:-1] + [ns.n[-1] + v] -%}{%- set ns.tens = false -%}
+            {%- else -%}{%- set ns.n = ns.n + [v] -%}{%- set ns.tens = v in [0, 20, 30, 40, 50] -%}{%- endif -%}
+          {%- endif -%}
+        {%- endfor -%}
+        {{- ns.n -}}
       h: "{{ nums[0] | int(-1) if nums else -1 }}"
       m: "{{ nums[1] | int(0) if nums | count > 1 else 0 }}"
       hh: "{{ h + 12 if pm and h < 12 else (0 if am and h == 12 else h) }}"
@@ -645,7 +674,18 @@ actions:
       everything: "{{ 'all' in trigger.sentence | lower or 'alarms' in trigger.sentence | lower }}"
       pm: "{{ 'pm' in spoken or 'p m' in spoken }}"
       am: "{{ 'am' in spoken or 'a m' in spoken }}"
-      nums: "{{ spoken | regex_findall('[0-9]{1,2}') }}"
+      nums: >-
+        {%- set w = {'one':1,'two':2,'three':3,'four':4,'five':5,'six':6,'seven':7,'eight':8,'nine':9,'ten':10,'eleven':11,'twelve':12,'thirteen':13,'fourteen':14,'fifteen':15,'sixteen':16,'seventeen':17,'eighteen':18,'nineteen':19,'twenty':20,'thirty':30,'forty':40,'fifty':50,'oh':0,'o':0} -%}
+        {%- set ns = namespace(n=[], tens=false) -%}
+        {%- for t in spoken | regex_findall('[a-z]+|[0-9]+') -%}
+          {%- if t.isdigit() -%}{%- set ns.n = ns.n + [t | int] -%}{%- set ns.tens = false -%}
+          {%- elif t in w -%}
+            {%- set v = w[t] -%}
+            {%- if ns.tens and v > 0 and v < 10 -%}{%- set ns.n = ns.n[:-1] + [ns.n[-1] + v] -%}{%- set ns.tens = false -%}
+            {%- else -%}{%- set ns.n = ns.n + [v] -%}{%- set ns.tens = v in [0, 20, 30, 40, 50] -%}{%- endif -%}
+          {%- endif -%}
+        {%- endfor -%}
+        {{- ns.n -}}
       h: "{{ nums[0] | int(-1) if nums else -1 }}"
       m: "{{ nums[1] | int(0) if nums | count > 1 else 0 }}"
       hh: "{{ h + 12 if pm and h < 12 else (0 if am and h == 12 else h) }}"
@@ -1019,26 +1059,44 @@ response_variable: go2rtc
 
 In YAML, refer to this action as `esphome.<node>_home_cameras`.
 
-Sets the list of cameras offered on the device's Cameras page and by voice ("show the front door").
+Sets which of Home Assistant's cameras the device offers on its Cameras page, in the camera grid,
+on the setup page's Talk through cameras list and by voice ("show the front door"). There are three
+choices, also on the setup page under Connections → Home Assistant cameras:
+
+- **None**: no Home Assistant camera at all.
+- **All**: every camera entity Home Assistant has, refreshed every 10 minutes. This is the default for
+  a device that was never set, and needs `home_assistant` to be set up first.
+- **These**: only the cameras listed, with the names given.
+
+A device that shares a Home Assistant with other homes should be set to None or a list: with All it
+offers every camera in that Home Assistant, the other homes' too. Cameras set up on the device itself
+(a Reolink recorder, go2rtc) and the device's own camera are offered whichever is chosen.
 
 ### cameras (Can be empty)
 
 *string*
 
-A comma-separated list of `entity=Display Name` pairs:
+`none` (any case) for None, empty (`""`) for All, or a comma-separated list of
+`entity=Display Name` pairs for These:
 
 ```text
 camera.front_door=Front door,camera.deck=Deck
 ```
 
 The `=Display Name` half can be left off, in which case the entity ID is used with its `camera.`
-prefix stripped. Left empty (`""`), the device instead lists every camera entity Home Assistant
-has, refreshed every 10 minutes — this needs `home_assistant` to be set up first.
+prefix stripped.
 
 ```yaml
 action: esphome.office_home_cameras
 data:
   cameras: camera.front_door=Front door,camera.deck=Deck
+```
+
+```yaml
+# No Home Assistant cameras on this device.
+action: esphome.office_home_cameras
+data:
+  cameras: none
 ```
 
 ## Show a camera on screen
@@ -1068,7 +1126,8 @@ room's music, so a Music Assistant group is not left.
 
 *string*
 
-The camera entity to show. Does not need to be one of the cameras set with `home_cameras`.
+The camera entity to show. Does not need to be one of the cameras set with `home_cameras`: an
+automation can show any camera Home Assistant has, even on a device set to None.
 
 ### seconds (Required)
 
@@ -1098,7 +1157,8 @@ the top of the Cameras drawer, when there are two cameras or more.
 *string*
 
 The cameras' entity ids, comma separated, in the order they go in: left to right, then down. Empty for
-the first six of the device's list (`home_cameras`, or every camera Home Assistant has). The device's
+the first six of the device's list (`home_cameras`: None, All or These). Cameras named here are
+shown even when they are not on the device's list. The device's
 own camera is not shown in the grid, and only cameras are: Home Assistant's (`camera.`), a Reolink
 recorder's, and go2rtc's streams (`go2rtc:name`).
 
@@ -2307,29 +2367,32 @@ data:
   device: Kitchen
 ```
 
-## Set the screen's contact list
+## Set the phone book
 
 In YAML, refer to this action as `esphome.<node>_phone_contacts`.
 
-Sets the contacts a device with a screen offers to call without a voice command, up to 12. The
-numbers are kept on the device in their own owner-only file, not in Home Assistant.
+Replaces the device's phone book, up to 12 contacts: the screen's Call list, and the names "call Mom"
+said to the device calls ([phone.md](phone.md#calling-a-contact-by-voice)). The setup page sets the same
+list. The numbers are kept on the device in their own owner-only file, not in Home Assistant.
 
 ### contacts (Required)
 
 *string*
 
-A comma-, newline-, or semicolon-separated list of `Name=number` pairs:
+A comma-, newline-, or semicolon-separated list of `Name=number` pairs. Other names for a contact,
+which voice can use and the screen does not show, go after the first, each after a `|`:
 
 ```text
-Alex=15551234567, Sam=15557654321, Kitchen=106
+Mom|Mother=15551234567, Sam=15557654321, Kitchen=106
 ```
 
-An empty value clears the list.
+A name can be used only once in the whole list, whatever its capitals; a list with one used twice is
+refused. An empty value clears the list.
 
 ```yaml
 action: esphome.office_phone_contacts
 data:
-  contacts: "Alex=15551234567, Kitchen=106"
+  contacts: "Mom|Mother=15551234567, Kitchen=106"
 ```
 
 ## Answer a call

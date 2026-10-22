@@ -115,8 +115,17 @@ National Weather Service).
 ## 4. Cameras
 
 With access set up, the Cameras drawer (swipe in from the right edge) lists every camera Home
-Assistant has. To show only some, with friendlier names, use
-[`home_cameras`](actions.md#choose-which-cameras-the-device-shows).
+Assistant has. That is the default (All) for a device never set. To show only some, with friendlier
+names (These), or none of them (None), use the setup page (Connections → Home Assistant cameras) or
+[`home_cameras`](actions.md#choose-which-cameras-the-device-shows). A device that shares a Home
+Assistant with other homes should be set to None or a list, so it does not offer the other homes'
+cameras. An automation calling `home_show_camera` can still show any camera.
+
+The setup page's **Camera list** (Connections) sets the order of the drawer and the grid: the
+cameras by name, one a line, the first at the top. Cameras not in the box go after the others, and an
+empty box puts them back in the usual order. It also has **List this device's own camera**, on by
+default. Turned off, the device's own camera is not in the drawer or the grid, and "show" does not
+find it; an automation can still put it up.
 
 To show a camera when something happens, like the doorbell, call
 [`home_show_camera`](actions.md#show-a-camera-on-screen) from an automation:
@@ -128,18 +137,20 @@ data:
   seconds: 60
 ```
 
-With **Live camera video** on (a switch of the device's in Home Assistant, under its configuration;
-off on a new device), a camera Home Assistant can stream (one that plays live in its own dashboard,
-from an RTSP camera or an integration with a stream) is shown as live video, decoded on the device from
-Home Assistant's HLS stream. Snapshots keep coming until the first moving frame, which takes a few
-seconds, more when Home Assistant still has to start the camera's stream. The picture is a few seconds
-behind the camera: HLS comes in parts a keyframe interval long. Other cameras, and any whose stream
-fails or that the device cannot decode (H.265, or a stream over 1080p), are shown from snapshots, a few
-a second, as with the switch off. A streamed camera's sound, when the view has one, comes from the same
-stream, decoded on the device: as far behind the camera as the picture, where the stream converted by
-Home Assistant and sent back was some twenty seconds. A stream with no sound in it falls back to Home
-Assistant's way. A camera's sub stream (often called *fluent* or *sub*) is the better choice: it is
-sharper than the panel needs anyway, starts sooner and costs less.
+With **Live camera video** on (a switch of the device's in Home Assistant, under its configuration; off
+on a new device), a camera Home Assistant can stream (one that plays live in its own dashboard, from an
+RTSP camera or an integration with a stream) is shown as live video, decoded on the device from Home
+Assistant's HLS stream. Snapshots keep coming until the first moving frame, which takes a few seconds,
+more when Home Assistant still has to start the camera's stream. The picture is a few seconds behind the
+camera: HLS comes in parts a keyframe interval long. Other cameras, and any whose stream fails or that
+the device cannot decode, are shown from snapshots, a few a second, as with the switch off. That's H.265
+on most devices, and any stream over 1080p. The Echo Show 8 2nd gen and the Skylight Calendar play H.265
+cameras live too (on TECHO5's own kernel), both up to 1080p at 30 frames a second, so pick a camera's
+sub stream when its main one is bigger. A streamed camera's sound, when the view has one,
+comes from the same stream, decoded on the device: as far behind the camera as the picture, where the
+stream converted by Home Assistant and sent back was some twenty seconds. A stream with no sound in it
+falls back to Home Assistant's way. A camera's sub stream (often called *fluent* or *sub*) is the better
+choice: it is sharper than the panel needs anyway, starts sooner and costs less.
 
 Where the image's decoder reads RTSP, a camera given an RTSP address for talking through it (below) is
 heard from that address instead: live, a word said at the device comes back out of it through a
@@ -196,6 +207,11 @@ the device, by its name in go2rtc: on the Cameras drawer, and by voice ("show th
 picture comes from go2rtc, and with **Live camera video** on, live video from go2rtc's RTSP port
 (8554), with no camera's own login. Home Assistant is not asked, so they work with it down. Their
 sound is not played yet.
+
+Each stream can have a name of its own on the setup page, like "Doorbell" for `front_door_sub`. That
+name is shown in the drawer and is what "show the doorbell" listens for. Nothing changes in go2rtc,
+so other things that use the stream's name keep working. Left empty, the stream is called by its
+name in go2rtc. Reading go2rtc's list again keeps the names.
 
 A go2rtc with a login takes it in the address, as `http://user:password@host:1984`; the setup page
 does not show the password again, and saving the address as shown keeps it. Saving the address again
@@ -285,8 +301,12 @@ ask for that login too, so set a camera password before you use them; a browser 
 in needs none. **Since v1.2.24:** a Home Assistant Generic Camera, MJPEG camera or recorder that read
 `/camera.jpg` or `/camera.mjpeg` with no login gets "401" until you set a camera password and give it the
 user and password with **Digest** authentication (Basic is not taken). Changing the password ends the
-pages' open streams, and so does closing the lens cover. The device is not found by ONVIF discovery:
-give the recorder its address. ONVIF and the pages are a login digest over plain HTTP, as on most
+pages' open streams, and so does closing the lens cover. The device is not found by ONVIF discovery
+unless you turn on **Camera discovery (ONVIF)**, a switch of the device's in Home Assistant, under its
+configuration: then, while the stream is on, it answers WS-Discovery searches (3702/udp), so Home
+Assistant's ONVIF integration lists it among the discovered devices. The answer tells anyone on your
+network who asks the device's name, model and MAC address, which is why it is off by default; without
+it, give the recorder the device's address. ONVIF and the pages are a login digest over plain HTTP, as on most
 cameras: the password itself is never sent, but anyone who can watch your Wi-Fi traffic could replay a
 captured login to the same page for a few minutes, and could see the pictures anyway. `/screen.png`
 (Screen web access) has no login: if the screen is showing the camera, a screenshot shows it too.
@@ -351,7 +371,8 @@ captured login to the same page for a few minutes, and could see the pictures an
   radio, and the phone's sound stutters or drops while it does (#105).
 - **Bluetooth, the rest of it.** A phone playing to the device has one volume, the device's: its
   volume slider moves the device's volume, and the device's buttons and Home Assistant move the
-  slider (night volume still caps a raise from the phone). Pause and play on the device, by voice or
+  slider (night volume still caps a raise from the phone), unless **Bluetooth sets the volume** is
+  off (below). Pause and play on the device, by voice or
   from Home Assistant, reach the phone over Bluetooth, and so do next and previous on the screen of
   a Show or a Spot; a pause or a play on the phone is followed here, so the song picks up where it
   was paused whichever side plays it again, for half an hour after the pause. A phone takes the
@@ -368,6 +389,18 @@ captured login to the same page for a few minutes, and could see the pictures an
   quiet hours and during a call. **Forget**, under the earbuds or speaker in **Settings >
   Connections** (it asks twice), or the **Bluetooth forget** button in Home Assistant on any device,
   forgets them, so new ones can be paired.
+- **Bluetooth sets the volume (new).** On the Show, the Spot and the Dot, the **Bluetooth sets the
+  volume** switch (the setup page's Connections tab, or Home Assistant) is on by default, as it
+  always was: a phone's or a computer's volume slider is the device's volume. **The device jumps to
+  full volume when a computer plays to it: turn it off.** A Linux computer (PipeWire or PulseAudio)
+  often reports full volume once and then turns its own sound down itself, which took the device to
+  100% and left it there, for Music Assistant afterward too (#245). Off, the device keeps its own
+  volume: the phone's or the computer's slider only makes its own sound quieter, never louder than the
+  device's volume, nothing a phone sends changes the device's volume, and the device's buttons and
+  Home Assistant no longer move the phone's slider. Turning it either way takes effect at once, on
+  a phone that is playing too. Turned off while a phone plays, the phone's slider stays where it was
+  and now turns its own sound down from there; turned on, the phone's slider jumps to the device's
+  volume. Shared with the other devices like the rest of the speaker settings, when sharing is on.
 - **Bluetooth Secure Connections (new).** On the Show, the Spot and the Dot, the **Bluetooth Secure
   Connections** switch (Settings > Connections, the setup page's Connections tab, or Home Assistant)
   is on by default, as it always was. **A phone pairs, then drops after a second or two: turn off
@@ -483,10 +516,14 @@ like "kitchen screen" under its **Voice assistants** settings in Home Assistant.
 ### Clock and home screen
 
 - **Clock format**, **Clock position** and **Date color** (Date color on the Show only). Clock
-  position puts a smaller clock in a bottom corner, so a photo stays in view. Every style goes there
+  position puts a smaller clock at the foot of the screen, in a bottom corner or between them
+  (*Bottom left*, *Bottom center*, *Bottom right*), so a photo stays in view. Every style goes there
   except *Dashboard*, *Agenda* and *World*, which keep the whole screen. On the Spot, Clock position is
   *Center* or *Bottom*: the *Classic*, *Flip*, *LED*, *Sun* and *Glow* styles go small at the foot of
   the circle, and the others stay in the middle. Also in Home Assistant.
+- **Weather position** (on the Show): *Top left*, where the weather has always been, or *Top right*.
+  At the top right, a weather alert's badge sits beside it (the weather shortens to the temperature and
+  its icon to make room) and a Corner timer goes under it. Also in Home Assistant.
 - **Clock style**: how the clock looks all day. *Classic*, *Big*, *Flip*, *LED*, *Analog*, *Words*
   (the time in words), *Sun* (the sun's path from sunrise to sunset), *Dashboard* (the next events
   and the week's weather), *Binary* (the time in lights, one column per digit, counted 1, 2, 4, 8
@@ -529,6 +566,10 @@ like "kitchen screen" under its **Voice assistants** settings in Home Assistant.
 - **Swipe between clock styles**: on by default. Turn it off (setup page, Screen & Photos, or the
   switch in Home Assistant) so a swipe across the clock leaves its style alone. It's off whenever
   **Tap on the clock** is *Nothing*, too.
+- **Swipe for volume**: on by default. Turn it off (setup page, Screen & Photos, or the switch in Home
+  Assistant) so a swipe up or down on the clock, now playing, the weather or the Bluetooth page leaves
+  the volume alone, for a screen that hands keep brushing. The volume buttons still work, and so do
+  the swipe down from the top for Settings and the swipe up from the bottom for the Deck.
 - **World clock places** (setup page, Screen & Photos tab): the World style's places, as time zone
   names with commas between them, like `America/Chicago, Europe/Paris, Asia/Tokyo`. Up to three; the
   Spot shows the first two. Leave it empty for New York, London and Tokyo.
@@ -659,9 +700,11 @@ device's fonts folder over SSH ([Set the SSH authorized keys](actions.md#set-the
 
 - **Presence detection** (Show and Spot, off by default; Settings → Display → Presence, or the
   **Presence detection** switch in Home Assistant): the camera notices somebody moving near the device.
-  Home Assistant gets a **Presence** sensor (occupancy) for automations, and **Screen off when nobody
-  is near** (5 minutes to start with, or Never) puts the screen out once the room has been empty that
-  long and lights it again when somebody comes near. Never at night, and never during a conversation,
+  Home Assistant gets a **Motion** sensor (motion) for automations. It sees movement, not somebody
+  sitting still, and turns off 90 seconds after the last movement. It was named Presence before; on
+  a device already set up its entity ID still ends in `_presence`, so automations keep working.
+  **Screen off when nobody is near** (5 minutes to start with, or Never) puts the screen out once the
+  room has been empty that long and lights it again when somebody comes near. Never at night, and never during a conversation,
   a call, an alarm or with the settings open. Nothing the camera sees is kept or sent: a couple of
   times a second the newest frame is compared with the last as a small grid of brightness, on the
   device. The mute button and the lens shutter stop it, and then the screen is left as it is. On a
@@ -673,13 +716,15 @@ device's fonts folder over SSH ([Set the SSH authorized keys](actions.md#set-the
   it, holding the button mutes like a tap. The 2nd gen Show 5 is not affected.
 - **Person detection** (Show and Spot, off by default; the **Person detection** switch in
   Home Assistant, which works only with Presence detection on): tells a person from anything else
-  that moves, such as a curtain, a pet or the light changing. While Presence has seen movement, a small
-  model looks at the camera's picture twice a second, as 96 by 96 shades of gray, on the device, and
-  Home Assistant gets a **Person** sensor (occupancy). It turns on when the last three looks score 0.6
-  or more on average, where 1 is surely a person, and stays on for a minute after the last time they
-  did. The model is TensorFlow's
-  person detection example: small enough for these processors, and a modest judge. It often misses a
-  person far from the camera or half out of the picture.
+  that moves, such as a curtain, a pet or the light changing, and can see somebody sitting still.
+  While it is on, a small model looks at the middle square of the camera's picture every second and a
+  half, whether anything moved or not, as 96 by 96 shades of gray, on the device, and Home Assistant
+  gets a **Person** sensor (occupancy). It turns on when the last three looks score 0.6 or more on
+  average, where 1 is surely a person, and stays on for a minute after the last time they did.
+  **Person confidence** (diagnostic, 0 to 100%) is that average; it is unknown while the switch is
+  off or the camera is not watching. The model is TensorFlow's person detection example: small
+  enough for these processors, and a modest judge. It often misses a person far from the camera or
+  half out of the picture.
   Nothing it sees is kept or sent.
 - **Gestures** (Show and Spot, off by default; the **Gestures** switch in Home
   Assistant): cover the camera with your palm, hand on or almost on the lens, for half a second to
@@ -901,10 +946,9 @@ yourself ([training-wake-word.md](training-wake-word.md) covers how, other langu
 `echo.json` and `echo.tflite`).
 
 Not every one does: the device runs microWakeWord models with its own small engine, which doesn't
-have every operation ESPHome's does yet. A model built with extra layers, such as `ADD` or
-`AVERAGE_POOL_2D`, is refused when you add it, with the operation named
-([#190](https://github.com/HuskerMinion/techo5/issues/190)). A model that works with ESPHome's
-`micro_wake_word` may still be one of these.
+have every operation ESPHome's does. A model that needs one it lacks is refused when you add it, with
+the operation named ([#190](https://github.com/HuskerMinion/techo5/issues/190)). Models built with
+residual connections or pooling (`ADD`, `AVERAGE_POOL_2D`, `MAX_POOL_2D`) run.
 
 The quickest way is the device's setup page:
 
@@ -920,7 +964,11 @@ The quickest way is the device's setup page:
 Only microWakeWord models are taken (`"type": "micro"` in the `.json`), with a `.tflite` of at most
 1 MB, and up to 20 sent this way. **Remove** takes one sent from the page off the device; the wake
 words that came with the device or from Home Assistant can't be removed there. A wake word the device
-is listening for can't be removed either: pick another one first.
+is listening for can't be removed or sent again either: pick another one first. Neither can the one
+chosen as the [volume down word](#the-volume-down-word) or the [hang-up word](phone.md#a-hang-up-word),
+even while it's off (for being a wake word too, or with no music or call): set **Volume down word** or
+**Hang-up word** to **None** or another word first. The page says "listening for that wake word" in
+each case.
 
 Or, through Home Assistant:
 
@@ -930,6 +978,38 @@ Or, through Home Assistant:
    only shows up after a restart; reloading the device's ESPHome entry is not enough.
 3. Pick the new wake word in the device's **Wake word** list, on the Assist satellite in Home
    Assistant. The device downloads it from Home Assistant and keeps it.
+
+### The volume down word
+
+Music loud enough can drown out the wake word. A word of your own can turn it down with no wake
+word before it, and with the music down the wake word is heard again.
+
+- **Volume down word** (on the device's microphone in Home Assistant) picks it from the wake word
+  models the device has. **None**, the default, is off. Send yours from the setup page first
+  ([A wake word of your own](#a-wake-word-of-your-own)). Home Assistant reads the list as it connects:
+  one sent from the setup page shows up within seconds, but one Home Assistant downloaded (by choosing
+  it as a wake word) only at the next connection, so reload the device's ESPHome entry to see it
+  sooner. One word can't do both: while the word chosen is also a wake word (or has a wake word's
+  phrase), it is off as the volume down word, and it comes back once it isn't.
+- Heard while music plays, it turns the volume down five steps, with the volume chime. Said again, it
+  goes down again. It does nothing during a call, a talk through a camera or a request, or while an
+  alarm or timer rings (say "stop" to end a ring or a request), and nothing with the speaker muted or
+  with only the device's own white noise playing.
+- It is listened for only while music plays, and for ten seconds after, so the gap between two
+  tracks doesn't turn it off. With nothing playing, it costs nothing. If its model goes from the
+  device, the list shows **None** and the word is off, but the choice is kept: send the model again
+  and it comes back. One that fails to load, or fails on the music, is left off: the
+  list still shows it and the device's log says why. It comes back when you choose it again (pick
+  **None**, then the word), when a model is sent or removed, or when the device starts again.
+- **Volume down word threshold** (0.90 to start with) sets how sure it has to be. It gets none of the
+  allowance the other words get while the speaker plays: it is only ever said over music, and it acts
+  at once. At the top of its range, it is off. Its scores don't show in **Last wake score**, and **Keep
+  wake clips** keeps none of it: the device's log has each one (`wake detected` and `wake near miss`,
+  with `slot=103`).
+
+Each time it acts, it fires a [command word event](actions.md#command-word-events). Train it the
+way [Training a wake word of your own](training-wake-word.md) describes, with the device's own music
+recorded as a negative set: that is what it has to tell the word apart from.
 
 ### Wake word clips
 

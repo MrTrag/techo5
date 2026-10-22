@@ -78,6 +78,15 @@ echod: the exact microWakeWord feature front end (echod/internal/lib/mwwfront)
     SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
     EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+echod (dependency, vendored and changed)
+  github.com/zserge/microwakeword — MIT License, Copyright (c) 2025 Serge Zaitsev
+  The wake word engine, kept in echod/third_party/microwakeword: the upstream module at commit
+  bfaf3840114e (v0.0.0-20260330234603-bfaf3840114e), its license in that directory's LICENSE, with
+  TECHO5's changes marked "techo5:" in the code. Its testdata (not shipped in any release): the
+  .tflite models are from https://github.com/kahrendt/micro-wake-word-models, Apache License 2.0
+  (testdata/NOTICE), except add_pool.tflite, which testdata/add_pool.py makes up; the test audio is
+  as distributed in upstream's MIT-licensed repository.
+
 echod (dependency)
   github.com/emiago/diago — Mozilla Public License 2.0
   SIP calls and their media (feature/phone). Used unmodified; its source is at
@@ -168,6 +177,13 @@ Person detection model (embedded in the daemon, Show and Spot)
   tensorflow/lite/micro/models/person_detect.tflite at commit
   aeac6f39e5c7475cea20c54e86d41e3a38312546: an int8 MobileNet v1 trained on the Visual Wake Words
   dataset. Unchanged.
+
+Test pictures, echod/internal/feature/person/testdata (not shipped in any release)
+  person.gray and no_person.gray, TensorFlow Lite Micro's person detection test pictures
+  (tensorflow/lite/micro/examples/person_detection/testdata, https://github.com/tensorflow/tflite-micro
+  at commit cefb91622f507275fc6690f475ccec6650edd076), Copyright The TensorFlow Authors, Apache
+  License 2.0. Changes: converted from BMP to raw 96x96 gray, which the model is checked against; a
+  NOTICE beside them says how.
 
 Wake word models (in the root filesystem, /usr/share/techo5/models)
   okay_nabu, hey_jarvis, hey_mycroft, alexa — Apache License 2.0
@@ -279,6 +295,28 @@ BusyBox, https://busybox.net (GPL-2.0)
   https://busybox.net/downloads/busybox-1.37.0.tar.bz2 with Alpine's build files and patches,
   https://gitlab.alpinelinux.org/alpine/aports/-/tree/3.24-stable/main/busybox. The Skylight's
   installer and bench images say so in a SOURCES file beside it.
+
+FFmpeg, https://ffmpeg.org (LGPL-2.1-or-later)
+  Every root filesystem carries ffmpeg 8.1.2 for the video player and live cameras as
+  /usr/local/bin/techo5-ffmpeg (armv7). The Echo Show 8 2nd gen (athena) and Skylight Calendar root
+  filesystems and stores also carry it as /usr/local/bin/techo5-ffmpeg64 (aarch64, statically linked),
+  with the H.265, VP8 and VP9 decoders added. Both are built under the LGPL only: no --enable-gpl, no
+  --enable-nonfree.
+    - Source: ffmpeg's release tarball, https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz (its SHA-256 is
+      in the build scripts).
+    - Changes: one, to libavformat/rtsp.c, so an RTSP camera's Basic login is ignored rather than
+      answered with the password in the clear. It is a modification of that LGPL source, so it is
+      LGPL-2.1-or-later too. The patch and the configure flags are in tools/linux/build-ffmpeg.sh.
+    - Build: tools/linux/build-ffmpeg.sh (armv7) and tools/linux/build-ffmpeg-arm64.sh (aarch64), and
+      docs/building.md is how to run them. They rebuild the shipped binaries from the source above, and
+      the binaries can be relinked or replaced the same way.
+  The armv7 build uses the root filesystem's own Alpine OpenSSL and zlib libraries. The aarch64 build
+  has these linked into it, all from Alpine Linux v3.24's aarch64 packages, unmodified: musl (MIT
+  License), OpenSSL 3 (Apache License 2.0), zlib (zlib License) and GCC's libgcc (GPL-3.0 with the GCC
+  Runtime Library Exception). Their sources are Alpine's,
+  https://gitlab.alpinelinux.org/alpine/aports/-/tree/3.24-stable. The build prints the versions it
+  used; the first release's were musl 1.2.6-r2, openssl-libs-static 3.5.9-r0, zlib-static 1.3.2-r1
+  and libgcc 15.2.0-r5.
 
 Alpine Linux packages
   The root filesystems and the athena and Skylight stores are built from Alpine Linux v3.24 packages,
