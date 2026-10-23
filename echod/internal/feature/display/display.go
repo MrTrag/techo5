@@ -23,6 +23,7 @@ import (
 	"image"
 	"log/slog"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -111,6 +112,8 @@ const (
 )
 
 type Display struct {
+	boost boost // the cores held while the screen is in use (boost.go)
+
 	// holdsMu makes reading whether holds are wanted and telling the touchscreen one step (applyHolds).
 	holdsMu sync.Mutex
 
@@ -261,6 +264,8 @@ type Display struct {
 	// nightStyle is the red night clock's look.
 	nightStyle *esphome.Select
 	glowLevel  *esphome.Number
+	// warmthSw is Night warmth (night_warmth.go).
+	warmthSw *esphome.Switch
 	// dimmestNum is the Dimmest setting in Home Assistant: how dark auto-brightness goes.
 	dimmestNum *esphome.Number
 	// nightMode is Night mode: Home Assistant turning the night on and off; nightShown what it last said.
@@ -281,6 +286,9 @@ type Display struct {
 	wifi     wifiState
 	wifiOpen bool
 	wifiAt   time.Time
+
+	// camtest is the camera test page (camtest_page.go), while it is up.
+	camtest *camTest
 
 	// quiet is a turn that was a screen command ("go home", "show the deck"): its words and reply
 	// are not shown, so the screen moves at once. radioCue is when Home Assistant last named a
@@ -333,6 +341,7 @@ type Display struct {
 	// what that frame showed, so an unchanged deck isn't drawn again every second.
 	deckOnScreen bool
 	deckDrawn    string
+	tintShown    screen.Tint // the night tint last given to the screen (night_warmth.go)
 
 	// popup is an event popped up on the screen (calendar_popup.go), until popupUntil or a tap;
 	// popupNext is when the calendar is next looked at (what was shown is kept in the config).
@@ -484,6 +493,7 @@ func build() *Display {
 	d.nightHours = nightHoursSelect(d)
 	d.nightStart, d.nightEnd = nightEndSelect(d, true), nightEndSelect(d, false)
 	d.nightStyle = nightStyleSelect(d)
+	d.warmthSw = nightWarmthSwitch(d)
 	d.buildPopupEntities()
 	d.buildLookEntities()
 	d.atNight = atNightSelect(d)
@@ -573,8 +583,13 @@ func (d *Display) skinSel() *esphome.Select { return d.skinSl }
 func (d *Display) clockTapSel() *esphome.Select { return d.clockTap }
 
 func (d *Display) Entities() []esphome.Entity {
-	return append([]esphome.Entity{d.light, d.power, d.roomSw, d.auto, d.clock, d.clockStyleSel, d.clockPos, d.dateCol, d.weatherPos, d.camTime, d.answerTime, d.turnStyle, d.timerStyle, d.skinSl, d.callBtn, d.weatherFx, d.lang, d.strip, d.themeSel, d.lightThemeSel, d.themeModeSel, d.nightHours, d.nightStart, d.nightEnd, d.nightMode, d.atNight, d.nightStyle, d.glowLevel, d.dimmestNum,
+	ents := append([]esphome.Entity{d.light, d.power, d.roomSw, d.auto, d.clock, d.clockStyleSel, d.clockPos, d.dateCol, d.weatherPos, d.camTime, d.answerTime, d.turnStyle, d.timerStyle, d.skinSl, d.callBtn, d.weatherFx, d.warmthSw, d.lang, d.strip, d.themeSel, d.lightThemeSel, d.themeModeSel, d.nightHours, d.nightStart, d.nightEnd, d.nightMode, d.atNight, d.nightStyle, d.glowLevel, d.dimmestNum,
 		d.pop.on, d.pop.lead, d.pop.chime, d.pop.allDay, d.clockTap, d.styleSwipeSw, d.volumeSwipeSw, d.nightTapSw, d.fontSel}, d.lookEnts...)
+	if !screen.CanTint {
+		// Night warmth tints the frame on its way to the panel, which a tablet's screen does not take.
+		ents = slices.DeleteFunc(ents, func(e esphome.Entity) bool { return e == esphome.Entity(d.warmthSw) })
+	}
+	return ents
 }
 
 // Restore lights the panel the way it was left. Before the framebuffer is opened: the backlight is
@@ -607,6 +622,7 @@ func (d *Display) Restore(c config.Config) {
 	d.nightHoursChanged()
 	d.atNight.Set(atNightOptions[atNightIndex()])
 	d.nightStyle.Set(nightStyleOptions[nightStyleIndex()])
+	d.warmthSw.Set(c.Screen.NightWarm)
 	d.popupSettingsChanged()
 	d.lookChanged()
 	d.glowLevel.Set(float32(d.glowSetting()))
@@ -1211,6 +1227,15 @@ func (d *Display) gesture(g touch.Gesture) {
 			swipeVolume(-1)
 		case touch.SwipeRight:
 			bt.SetPairing(false)
+		}
+		d.wake()
+		return
+	}
+
+	// The camera test takes every finger while it is up; only Back means anything.
+	if d.cameraTestUp() {
+		if g.Kind == touch.Tap && d.r != nil {
+			d.cameraTestTap(g.X, g.Y)
 		}
 		d.wake()
 		return
@@ -2280,8 +2305,16 @@ func (d *Display) Close() error {
 // on or the volume is showing, and at once when something changes.
 func (d *Display) Run(ctx context.Context) error {
 	go d.settle(ctx)
+	defer func() {
+		if d.boost.on {
+			d.boost.set(false)
+		}
+	}()
 	for {
 		wait := d.frame()
+		if d.boost.on && wait > boostLinger {
+			wait = boostLinger // a dark panel's next frame may be an hour off: it gives the cores back
+		}
 		if d.videoPainting {
 			// The video's frames, until the frame loop has to look again.
 			d.paintVideo(ctx, wait, d.videoOver)
@@ -2301,13 +2334,16 @@ func (d *Display) Run(ctx context.Context) error {
 
 // frame draws what the moment calls for and says how long until the next one is due.
 func (d *Display) frame() (next time.Duration) {
+	began := time.Now()
 	d.videoPainting, d.vp.dark = false, false
 	d.mu.Lock()
 	on, view, at := d.on, d.view, d.viewAt
 	volume, volAt := d.volume, d.volAt
+	touched := d.touchedAt
 	d.mu.Unlock()
 
 	now := time.Now()
+	d.boost.update(on && (view.Phase != "idle" || now.Sub(touched) < boostLinger))
 
 	d.mu.Lock()
 	d.expireUpdateLocked(now)
@@ -2318,6 +2354,14 @@ func (d *Display) frame() (next time.Duration) {
 	call := phone.Get().State()
 	_, reminding := remind.Get().Showing()
 	night := nightNow(now)
+	if d.dev != nil {
+		// The tint is laid on in Present, so a deck kept as it was would keep the old one: a change
+		// draws it again.
+		if t := d.nightTint(now, night); t != d.tintShown {
+			d.tintShown, d.deckDrawn = t, ""
+			d.dev.SetTint(t)
+		}
+	}
 	if !on && (call.Phase != phone.Idle || (!night && (ring.any() || reminding))) {
 		// A call lights a dark panel, at night to half brightness (relight): its page is how it is
 		// answered. By day a ring and a reminder do too, the ring's page being how it is stopped and a
@@ -2369,11 +2413,11 @@ func (d *Display) frame() (next time.Duration) {
 		on = lit // the night may have just turned the panel back on: this frame is its first
 	}
 	d.mu.Lock()
-	sheetUp, wifiUp := d.sheet, d.wifiOpen
+	sheetUp, wifiUp, camUp := d.sheet, d.wifiOpen, d.camtest != nil
 	updateVisible := d.updateShown(now)
 	d.mu.Unlock()
 	busy := updateVisible || view.Phase != "idle" || call.Phase != phone.Idle || ring.any() || reminding || sheetUp || pinIsOpen() ||
-		d.wakeLight(now) > 0 || d.popupUp() != nil || setup.Get().Waiting() || wifiUp || video.Get().State().Active()
+		d.wakeLight(now) > 0 || d.popupUp() != nil || setup.Get().Waiting() || wifiUp || camUp || video.Get().State().Active()
 	if d.awayTick(now, on, busy, night) {
 		d.mu.Lock()
 		on = d.on
@@ -2528,8 +2572,8 @@ func (d *Display) frame() (next time.Duration) {
 	s.updateMessage = d.updateMessage
 	s.pin = pinNow(now)
 	// The network address page is one of the settings, opened from them and going back to them: the
-	// lock stays open behind it.
-	relockOnClose(s.showSheet || (d.wifiOpen && d.wifi.addr != nil))
+	// lock stays open behind it. So is the camera test.
+	relockOnClose(s.showSheet || (d.wifiOpen && d.wifi.addr != nil) || d.camtest != nil)
 	s.showWifi, s.wifi = d.wifiOpen, d.wifi
 	if d.wifi.addr != nil {
 		// The page's form as it is now: the taps and the change running in the background write it
@@ -2592,6 +2636,7 @@ func (d *Display) frame() (next time.Duration) {
 	s.redStyle = config.Get().Screen.NightClockStyle
 	s.nightDim = d.nightGlow
 	d.mu.Unlock()
+	s.camtest = d.cameraTestView(now)
 	if s.showDrawer && s.drawerTab == drawerCameras {
 		s.cameras = home.Get().Cameras()
 	}
@@ -2743,7 +2788,11 @@ func (d *Display) frame() (next time.Duration) {
 		// Kept while the video is only covered: uncovered, paused, the frame it stopped on is put back.
 		d.dropVideoFrame()
 	}
-	if key := deckFrameKey(s, ring.any(), call.Phase != phone.Idle); key != "" && key == d.deckDrawn {
+	key := deckFrameKey(s, ring.any(), call.Phase != phone.Idle)
+	if rainbowHere(s) && d.r.rainbow.Busy() {
+		key = "" // the Rainbow light still going out over the deck, or its card going away
+	}
+	if key != "" && key == d.deckDrawn {
 		// The deck as it was last drawn, and nothing over it: drawing it again would only cost.
 		d.answerShots()
 		return 2 * time.Second
@@ -2755,6 +2804,13 @@ func (d *Display) frame() (next time.Duration) {
 		// The cue's light breathes and runs over whatever page is up; a page that moves faster (a
 		// photo changing, rain falling) keeps its own pace.
 		defer func() { next = min(next, cueFrame) }()
+	}
+	if rainbowHere(s) && d.r.rainbow.Busy() {
+		// Rainbow moves at the turn screens' pace, and on after the turn while its light goes out. The
+		// pace is from one frame's start to the next's: a frame that took most of it waits only for
+		// the rest, and one that took all of it waits only long enough to let the rest of the device
+		// have the processor for a moment.
+		defer func() { next = min(next, max(rainbowFrame-time.Since(began), rainbowBreath)) }()
 	}
 	unskinned(d.dev, s.redClockFace() || d.r.marked)
 	if err := d.dev.Present(); err != nil {
@@ -2794,9 +2850,9 @@ func (d *Display) frame() (next time.Duration) {
 	if (s.slideshow != nil || s.slideshowScreensaver != nil) && home.Get().SlideshowTransitioning() {
 		return home.SlideshowFrame
 	}
-	if turnShown(s) && !(s.phase == "lingering" && s.eq.quiet) {
-		if s.eq.wave || s.eq.style == "orb" {
-			return waveFrame // ten a second: the orb is a soft glow that needs no more
+	if turnShown(s) && !(s.phase == "lingering" && s.eq.quiet && faceSettled(s.eq)) {
+		if s.eq.wave || s.eq.style == "orb" || s.eq.style == "face" {
+			return waveFrame // ten a second: the orb and the face are soft and need no more
 		}
 		return eqFrame // the bars are moving
 	}

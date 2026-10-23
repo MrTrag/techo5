@@ -341,20 +341,48 @@ recorder:
 
 ## Command word events
 
-Each time the [volume down word](setup.md#the-volume-down-word) acts, it fires
-`esphome.techo5_command` on Home Assistant's bus, with:
+Each time a command word acts (the [volume down word](setup.md#the-volume-down-word), or the [volume
+up or next song word](setup.md#the-volume-up-and-next-song-words)), it fires `esphome.techo5_command`
+on Home Assistant's bus, with:
 
 | Field | |
 |---|---|
-| `command` | What the word did: `volume_down` |
+| `command` | What the word did: `volume_down`, `volume_up` or `next` |
 | `word` | The id of the model that heard it, as on the setup page |
 | `score` | How sure the model was when it acted, `0.50` to `1.00` |
-| `volume` | The volume step it went to, `0` to `30` |
+| `volume` | The volume step it went to, `0` to `30` (`volume_down` and `volume_up` only) |
+| `asked` | `next` only: `true` when the device passed the skip to the sender's controls (Music Assistant, or a phone over AirPlay or Bluetooth), `false` when there was nobody to ask. `true` doesn't promise a skip: a radio stream Music Assistant can't skip, or an AirPlay sender that gave the device no remote control, won't take it |
 | `device` | The device's name |
 
-It acted already: the event says so, for an automation or a dashboard to follow. All values are text,
-and the device needs **Allow the device to perform Home Assistant actions** turned on, as for alarm
-events.
+The volume words have acted already: the event says so, for an automation or a dashboard to follow.
+All values are text, and the device needs **Allow the device to perform Home Assistant actions** turned
+on, as for alarm events.
+
+A `next` with `asked: false` is the one to act on: nobody was asked, so for music Home Assistant plays
+on the device a track at a time, skip on it. `asked: false` also comes for the device's own radio
+stations and for senders it can't ask, such as Spotify Connect, so the automation checks that its queue
+is what's playing first:
+
+```yaml
+triggers:
+  - trigger: event
+    event_type: esphome.techo5_command
+    event_data:
+      command: next
+      asked: "false"
+      device: Kitchen
+conditions:
+  - condition: state
+    entity_id: media_player.kitchen_queue
+    state: playing
+actions:
+  - action: media_player.media_next_track
+    target:
+      entity_id: media_player.kitchen_queue
+```
+
+**Replace `Kitchen` with your device's name, and `media_player.kitchen_queue` with the media player
+that plays the queue.**
 
 ## Show an effect on the ring during a request
 
@@ -625,8 +653,10 @@ actions:
           {%- endif -%}
         {%- endfor -%}
         {{- ns.n -}}
-      h: "{{ nums[0] | int(-1) if nums else -1 }}"
-      m: "{{ nums[1] | int(0) if nums | count > 1 else 0 }}"
+      # Speech-to-text can write 6:45 as "645": one number past 99 is the hour and the minutes.
+      n: "{{ [nums[0] // 100, nums[0] % 100] + nums[1:] if nums and nums[0] >= 100 else nums }}"
+      h: "{{ n[0] | int(-1) if n else -1 }}"
+      m: "{{ n[1] | int(0) if n | count > 1 else 0 }}"
       hh: "{{ h + 12 if pm and h < 12 else (0 if am and h == 12 else h) }}"
   - choose:
       - conditions: "{{ not techo5 }}"
@@ -686,8 +716,10 @@ actions:
           {%- endif -%}
         {%- endfor -%}
         {{- ns.n -}}
-      h: "{{ nums[0] | int(-1) if nums else -1 }}"
-      m: "{{ nums[1] | int(0) if nums | count > 1 else 0 }}"
+      # Speech-to-text can write 6:45 as "645": one number past 99 is the hour and the minutes.
+      n: "{{ [nums[0] // 100, nums[0] % 100] + nums[1:] if nums and nums[0] >= 100 else nums }}"
+      h: "{{ n[0] | int(-1) if n else -1 }}"
+      m: "{{ n[1] | int(0) if n | count > 1 else 0 }}"
       hh: "{{ h + 12 if pm and h < 12 else (0 if am and h == 12 else h) }}"
       # With no AM or PM, "the 6 alarm" matches 6:00 AM and 6:00 PM.
       times: >-
@@ -2213,6 +2245,40 @@ data:
   id: "{{ clips.clips[0].id }}"
   page: 0
 response_variable: audio
+```
+
+## Set the camera stream's login
+
+In YAML, refer to this action as `esphome.<node>_camera_credentials`.
+
+Sets the user name and password a recorder uses for [this device's camera
+stream](setup.md#recording-this-devices-camera) (RTSP and ONVIF), by the same rules as the setup page.
+A new login lets go of whoever is watching with the old one.
+
+> **Good to know**
+>
+> It works only once **Camera login from Home Assistant** (a switch of the device's, under its
+> configuration) is on; it is off by default. Like `ssh_keys`, it is also refused unless Home
+> Assistant's *ESPHome* link to the device has a real encryption key set, so the password never
+> crosses the network in the clear.
+
+### username (Can be empty)
+
+*string*
+
+One line, with no quotes and no colon. Empty is `camera`.
+
+### password (Can be empty)
+
+*string*
+
+12 characters or more, one line, with no quotes. Empty keeps the password set now.
+
+```yaml
+action: esphome.office_camera_credentials
+data:
+  username: frigate
+  password: a-long-password-here
 ```
 
 ## Set the SSH authorized keys

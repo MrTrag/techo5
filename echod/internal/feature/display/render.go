@@ -30,6 +30,7 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/feature/video"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/hass"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/locale"
+	"github.com/HuskerMinion/techo5/echod/internal/lib/rainbow"
 )
 
 // The palette (walnut ground, amber accent, cream text, dim text, ember rules) is in sheet_widgets.go,
@@ -113,6 +114,10 @@ type scene struct {
 	// showWifi is the Wi-Fi pages, over everything but pairing.
 	showWifi bool
 	wifi     wifiState
+
+	// camtest is the camera test page while it is up (camtest_page.go), over the settings and
+	// everything under them.
+	camtest *camTestView
 
 	// radio feeds the drawer's Radio side and the now-playing screen; weather is on the clock when known.
 	radio   home.Radio
@@ -311,6 +316,15 @@ type renderer struct {
 	// wb is the wave turn screen's working memory, made the first time it is drawn.
 	wb *waveBuf
 
+	// rainbow is the Rainbow turn screen, kept between frames, and the page under it, kept while it
+	// does not change (render_rainbow.go).
+	rainbow       rainbow.Screen
+	rainbowPage   *image.RGBA
+	rainbowKey    rainbowPageKey
+	rainbowDrew   rainbowDrew
+	rainbowPageOK bool
+	rainbowReused bool
+
 	// weatherAt is where the home screen's weather was drawn in the frame last drawn, for a tap there
 	// to open the forecast; empty when it was not drawn. Written while drawing, read by the touch
 	// goroutine, so under its own lock.
@@ -493,7 +507,15 @@ func (r *renderer) draw(s scene) {
 	r.videoZones = nil
 	r.zmu.Unlock()
 	// A cue turn goes over the page it was on, the night clock included, when that page is one to be
-	// looked at rather than answered (render_cue.go).
+	// looked at rather than answered (render_cue.go). Rainbow's begins before the page.
+	if rainbowHere(s) {
+		r.rainbowBegin(s)
+		if r.rainbowKept(s) {
+			// The page as it was, its taps as they were: only Rainbow is drawn again.
+			r.turnCue(s)
+			return
+		}
+	}
 	defer r.turnCue(s)
 	r.artDrawn = false
 	r.weatherRight = false
@@ -511,7 +533,7 @@ func (r *renderer) draw(s scene) {
 	// and it stays up while an alarm or a timer rings (a tap on it stops the ring). A call has lifted
 	// the night light and takes the screen; a turn, a camera, an announcement or a reminder is shown in
 	// its place at the night light's level.
-	if s.redClockFace() {
+	if s.redClockFace() && s.camtest == nil {
 		r.redClockPage(s)
 		return
 	}
@@ -580,6 +602,13 @@ func (r *renderer) draw(s scene) {
 		}
 	}()
 
+	if s.camtest != nil {
+		r.cameraTestPage(s)
+		if s.showVolume {
+			r.volumeBar(s)
+		}
+		return
+	}
 	if s.showSheet {
 		r.settingsScreen(s)
 		if s.showVolume {
@@ -648,6 +677,8 @@ func (r *renderer) draw(s scene) {
 			r.wave(s)
 		case s.eq.style == "vu" || s.eq.style == "orb" || s.eq.style == "hal":
 			r.turnVisual(s)
+		case s.eq.style == "face":
+			r.faceTurn(s)
 		default:
 			r.equalizer(s)
 		}

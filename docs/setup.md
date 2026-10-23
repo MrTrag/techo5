@@ -258,7 +258,11 @@ The camera of a Show or a Spot can be recorded like any other camera, by Frigate
 
 1. On the setup page, under **Privacy & Security** → **Camera streaming**, set a password (12
    characters or more) and, if you like, a user name (`camera` unless changed). Save. The password is
-   never shown again; leave the field empty to keep it.
+   never shown again; leave the field empty to keep it. Home Assistant can set the same login with the
+   device's `camera_credentials` action (`username`, `password`), by the same rules, once you turn on
+   **Camera login from Home Assistant**, a switch of the device's under its configuration (off by
+   default), and only while the device has its encryption key, so the password never crosses the
+   network in the clear.
 2. Turn on **Camera streaming**, a switch of the device's in Home Assistant, under its configuration.
 
 It never runs without a password. Turning it off, saving a new login and closing the lens cover each
@@ -509,6 +513,8 @@ like "kitchen screen" under its **Voice assistants** settings in Home Assistant.
   press and hold lights it and opens the ring menu; the night clock comes back, or the screen goes off
   again, after a minute and a half. When the night starts, Night clock is chosen, or the settings or
   the menu close, the Spot's night clock comes up after 10 seconds instead. A Spot with no hours set has a night of 10 PM to 7 AM.
+- **Night warmth** (Show, a switch in Home Assistant, off at first): a warmer, lamp-like white on the
+  screen through the night hours. Not on the Spot or the Panel app.
 - **Night mode** switch in Home Assistant: start or end the night now, from a bedtime automation for
   example. Set Night hours to **Controlled by Home Assistant** to leave the night to the switch alone.
   See [Turning the night on from an automation](actions.md#turning-the-night-on-from-an-automation).
@@ -609,17 +615,26 @@ like "kitchen screen" under its **Voice assistants** settings in Home Assistant.
 - **Turn screen**: how a voice request looks. This one is on the Spot too. **Classic** is the words,
   **Wave** is glowing lines, **Bars** is an LED-style equalizer, **VU meters** are two moving-needle
   meters, **Orb** is a ball of light (cool while it listens, violet while it thinks, warm while it
-  answers) and **HAL 9000** is the computer's red eye, all moving with the voice. **Cue light** leaves
+  answers) and **HAL 9000** is the computer's red eye, all moving with the voice. **Face** is a little
+  face of glowing strokes with the words beside it (under it on the Spot): wide eyes while it listens,
+  a squint and a sideways mouth while it thinks, a mouth moving with the answer, and smiling eyes after
+  ([see it move](screenshots/turn-face.gif)). **Cue light** leaves
   the screen as it is (the clock, the dashboard, the music, the photos, the night clock) and shows the
   request as a light along the top edge instead, with a microphone on it while the device listens: it
   breathes while the device listens, runs while it thinks and stays on while it answers. On the Spot
   it's the rim. **Cue and captions** adds what was heard and the answer as captions at the bottom of
   the screen, up to four lines (three on the Spot), cut with "…" if the answer is longer. They sit
   above the music strip, the Now Playing buttons and the Tessera page's dots rather than over them.
+  **Rainbow** (the Show; not the Spot or the Panel app) is a cue too: a glow of
+  pinks, violets, blues and oranges round the whole edge of the screen that moves with the voice,
+  along the top and bottom only while the device thinks, and what was heard and the answer on a card
+  of frosted glass a little above the middle. A request opens with a gold globe at the right edge and
+  a wave of pink crossing the screen. During night hours it is Cue and captions instead (red over the
+  night clock), so the colors don't light the room.
   The screen under a cue keeps working: a tap there does what it always does, and a tap on the
-  captions puts them away. Stop a request by voice or with the stop word. A page with buttons to
-  answer (a call, a ringing alarm, the settings, a camera) gets neither the light nor captions over
-  it.
+  captions (or Rainbow's card) puts them away. Stop a request by voice or with the stop word. A page
+  with buttons to answer (a call, a ringing alarm, the settings, a camera) gets neither the light nor
+  captions over it.
 - **Timers** (Show; **Timers on the clock** in Home Assistant): how running timers show on the clock.
   **Line** is the soonest under the date with a thin bar, as before. **Ring** is a ring for each (up
   to three) that empties as it runs, and on the Analog style a wedge on the dial from the minute hand
@@ -654,7 +669,7 @@ Assistant.
 **Calendars from Home Assistant.** Every calendar Home Assistant already has is offered here, with
 nothing more to set up on the device: Google Calendar, CalDAV (iCloud and others), Microsoft 365, a
 Remote Calendar, its own Local Calendar, each a `calendar.` entity. Pick them under Settings →
-**Display** → **Calendar** → **Calendars**, or with the
+**General** → **Calendars**, or with the
 [`calendar_sources` action](actions.md#choose-the-calendars-shown). Each device keeps its own list, so a
 desk can show one person's calendar and the kitchen the family's. The device reads them with the
 token from [step 1](#1-give-the-device-access-to-home-assistant); no calendar password is ever on it.
@@ -964,11 +979,11 @@ The quickest way is the device's setup page:
 Only microWakeWord models are taken (`"type": "micro"` in the `.json`), with a `.tflite` of at most
 1 MB, and up to 20 sent this way. **Remove** takes one sent from the page off the device; the wake
 words that came with the device or from Home Assistant can't be removed there. A wake word the device
-is listening for can't be removed or sent again either: pick another one first. Neither can the one
-chosen as the [volume down word](#the-volume-down-word) or the [hang-up word](phone.md#a-hang-up-word),
-even while it's off (for being a wake word too, or with no music or call): set **Volume down word** or
-**Hang-up word** to **None** or another word first. The page says "listening for that wake word" in
-each case.
+is listening for can't be removed or sent again either: pick another one first. Neither can one
+chosen as the [volume down word](#the-volume-down-word), the [volume up or next song
+word](#the-volume-up-and-next-song-words) or the [hang-up word](phone.md#a-hang-up-word), even while
+it's off (for being a wake word too, or with no music or call): set that word's list to **None** or
+another word first. The page says "listening for that wake word" in each case.
 
 Or, through Home Assistant:
 
@@ -1002,14 +1017,41 @@ word before it, and with the music down the wake word is heard again.
   list still shows it and the device's log says why. It comes back when you choose it again (pick
   **None**, then the word), when a model is sent or removed, or when the device starts again.
 - **Volume down word threshold** (0.90 to start with) sets how sure it has to be. It gets none of the
-  allowance the other words get while the speaker plays: it is only ever said over music, and it acts
-  at once. At the top of its range, it is off. Its scores don't show in **Last wake score**, and **Keep
+  allowance the wake words and the stop word get while the speaker plays: it is only ever said over
+  music, and it acts at once (a moment later with the volume up or next song word listening too: see
+  below). At the top of its range, it is off. Its scores don't show in **Last wake score**, and **Keep
   wake clips** keeps none of it: the device's log has each one (`wake detected` and `wake near miss`,
   with `slot=103`).
 
 Each time it acts, it fires a [command word event](actions.md#command-word-events). Train it the
 way [Training a wake word of your own](training-wake-word.md) describes, with the device's own music
 recorded as a negative set: that is what it has to tell the word apart from.
+
+### The volume up and next song words
+
+Two more words act on the music the same way, with no wake word: **Volume up word** turns it up five
+steps, and **Next song word** skips to the next song. Each has its own list and threshold next to
+**Volume down word** on the device's microphone, works as the volume down word does (heard only while
+music plays, never during a call, a talk through a camera, a request or a ring, nothing with the
+speaker muted, no allowance while the speaker plays), and is off until you choose a word.
+
+- **Next song word** asks whoever is sending the music for the next song when the device can ask:
+  Music Assistant, or a phone playing over AirPlay or Bluetooth. With nobody to ask (a client that
+  sends one track at a time, the device's own radio stations, or a sender like Spotify Connect or DLNA that
+  can't be asked) it only fires the [command word event](actions.md#command-word-events), with
+  `asked: false`, and whoever plays the music skips on that.
+- One model can't be two of these: chosen for more than one, it listens only as the first, in the
+  order volume down, volume up, next song. The others keep their choice and listen again once it's
+  free. A wake word can't be one either, as for the volume down word.
+- With more than one of them listening, a word acts a moment later (about half a second): one thing
+  said can reach two of them ("turn it down" scoring for the volume up word too), so the words heard
+  together wait until each has peaked, and only the surest acts. The device's log names the one left
+  out.
+- Each device acts on what it hears by itself. Devices playing together in one Music Assistant or
+  AirPlay group each ask for the next song when they hear the word, so with the next song word on more
+  than one of them, one "next song" can skip more than once. Choose it on one device in the group.
+- Each one loaded is one more model running while music plays. The device's log has their scores
+  with `slot=104` (volume up) and `slot=105` (next song).
 
 ### Wake word clips
 
