@@ -10,6 +10,9 @@ added on top, mostly for training and tuning a "Jarvis" wake word of our own. It
 it is useful to someone, not as a replacement: if you are not sure, use the official releases. Everything
 here has only been tested on the Dot 2nd gen.
 
+For TECHO5 itself, how to install it and everything it does, see
+[TECHO5's own readme](https://github.com/HuskerMinion/techo5#readme).
+
 ## What it adds
 
 - **Two-stage wake word models and a desk scorer.** The model interpreter runs the comparison operators
