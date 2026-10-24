@@ -197,6 +197,30 @@ a camera on the recorder that has no speaker shows Talk too, and says it has no 
 Cameras read straight from a Reolink recorder have no sound on the device, so for those Talk is
 one-way: you are heard at the door, but the visitor is not heard on the device.
 
+### Camera buttons
+
+On the Show and the Spot, a camera's view can have up to four buttons that each run a Home Assistant
+action: **Open gate** on the gate's camera, **Unlock** on the front door's. They sit along the foot of
+the view, above the strip with Talk (on the Spot, stacked above Talk). They open gates and doors, so
+every one asks first: the first tap lights it up with "Tap again: Open gate", and a second tap within
+4 seconds runs it. The button says **Sent** for a moment once it has gone to Home Assistant, or why it
+could not. A tap on a button never closes the view.
+
+Set them on the setup page under **Connections** → **Camera buttons**, one camera a line: the camera's
+entity as the camera list has it (the section lists them), a colon, then the buttons split by commas,
+each `Label=domain.service`, or `Label=domain.service:domain.object` for an action on an entity:
+
+```text
+camera.front_door: Unlock=lock.unlock:lock.front_door, Porch light=light.toggle:light.porch
+go2rtc:gate: Open gate=script.open_gate
+```
+
+A label is 24 characters at most. An empty box takes every button off. An automation can set them with
+[`home_camera_buttons`](actions.md#buttons-on-a-cameras-view). Home Assistant runs the actions as the
+device's own, so they need **Allow the device to perform Home Assistant actions** turned on for the device
+in its ESPHome integration's options; without it Home Assistant refuses them, and says so only in its own
+log. The buttons stay on the device: a settings file neither carries them nor brings any in.
+
 ### Cameras from go2rtc
 
 A [go2rtc](https://github.com/AlexxIT/go2rtc) server, which many homes run beside Home Assistant (or
@@ -716,7 +740,9 @@ device's fonts folder over SSH ([Set the SSH authorized keys](actions.md#set-the
 - **Presence detection** (Show and Spot, off by default; Settings → Display → Presence, or the
   **Presence detection** switch in Home Assistant): the camera notices somebody moving near the device.
   Home Assistant gets a **Motion** sensor (motion) for automations. It sees movement, not somebody
-  sitting still, and turns off 90 seconds after the last movement. It was named Presence before; on
+  sitting still, and turns off 90 seconds after the last movement. **Presence sensitivity** (1 to
+  100, 50 to start with) sets how much has to move: above 50 it also counts smaller changes, so
+  somebody across the room is seen, at the cost of more false triggers. It was named Presence before; on
   a device already set up its entity ID still ends in `_presence`, so automations keep working.
   **Screen off when nobody is near** (5 minutes to start with, or Never) puts the screen out once the
   room has been empty that long and lights it again when somebody comes near. Never at night, and never during a conversation,
