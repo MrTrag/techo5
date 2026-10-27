@@ -50,7 +50,7 @@ For TECHO5 itself, how to install it and everything it does, see
   plays the ordinary sound. Setting `voice_check_url` to `off` in the wake settings turns it off.
 - **The wake word models are not included.** Ours are trained on our own voices. The stock models, and
   any microWakeWord model of your own, work as usual.
-- **How it is kept up to date.** It is merged with each TECHO5 release, the latest being dot-v1.0.32.
+- **How it is kept up to date.** It is merged with each TECHO5 release, the latest being dot-v1.0.37.
   Where TECHO5 does something as well as or better than an addition here, we use TECHO5's and drop ours.
 - **Problems.** If something goes wrong on this build, please raise it here rather than on TECHO5, since
   it may well be one of our changes.
