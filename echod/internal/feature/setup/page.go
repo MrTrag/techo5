@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -57,6 +58,7 @@ func (f *Feature) Run(ctx context.Context) error {
 			return nil
 		case <-t.C:
 		}
+		f.showAsking() // a browser that gave up asking is not still asking in Home Assistant
 		if !f.On() {
 			f.mu.Lock()
 			stale := !f.openedAt.IsZero()
@@ -72,7 +74,8 @@ func (f *Feature) serve(w http.ResponseWriter, r *http.Request) {
 	// Only a browser that has been let in keeps the page open. Anything else on the network can ask
 	// for this path as often as it likes, and the idle time is there to close the page when the
 	// person who opened it has walked away — a scanner or a stale tab must not hold it open for them.
-	if _, in := f.session(r); in {
+	// A view polling on its own is not somebody there either (watching).
+	if _, in := f.session(r); in && !watching[strings.TrimSuffix(r.URL.Path, "/")] {
 		f.used()
 	}
 	switch strings.TrimSuffix(r.URL.Path, "/") {
@@ -106,6 +109,10 @@ func (f *Feature) serve(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	}
 }
+
+// watching is the paths a view left up on the page asks for by itself. Answering them is not the page
+// being used: a tab left watching the scores would otherwise hold the page open for as long as it ran.
+var watching = map[string]bool{"/setup/scores": true}
 
 // diagnostics hands over everything worth having when something is wrong, with the addresses, names,
 // keys and serial numbers already replaced — so that somebody can send it to an issue without
@@ -157,7 +164,11 @@ func (f *Feature) wait(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "post to ask", http.StatusMethodNotAllowed)
 		return
 	}
-	token, ok := f.await()
+	from, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		from = r.RemoteAddr
+	}
+	token, ok := f.awaitFrom(from, web.AwayRequest(r)) // for Home Assistant's let in (remote.go)
 	if !ok {
 		if f.ShutOut() {
 			http.Error(w, "too many tries without a press on the device; try again in a few minutes",
@@ -175,8 +186,9 @@ func (f *Feature) wait(w http.ResponseWriter, r *http.Request) {
 		Name: cookieName, Value: token, Path: "/",
 		HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: int(life / time.Second),
 	})
+	f.showAsking()
 	f.Changed.Emit(struct{}{}) // the device says a browser is asking
-	slog.Info("setup page: a browser is asking to be let in")
+	slog.Info("setup page: a browser is asking to be let in", "from", from)
 	http.Redirect(w, r, "/setup", http.StatusSeeOther)
 }
 
@@ -332,6 +344,10 @@ func (f *Feature) save(w http.ResponseWriter, r *http.Request) {
 		problem = saveDeckPC(r)
 	case "video":
 		problem = saveVideo(r)
+	case "tailscale":
+		problem = saveTailscale(r)
+	case "netbird":
+		problem = saveNetbird(r)
 	case "timezone":
 		zone := strings.TrimSpace(r.PostFormValue("zone"))
 		switch {
@@ -427,6 +443,7 @@ func (f *Feature) settingsPage(ctx context.Context, w http.ResponseWriter, token
 			houseSection(w, token)
 			phoneBookSection(w, token)
 			wakeWordsSection(w, token)
+			scoresSection(w)
 		} else {
 			fmt.Fprint(w, `<h3>Announcements and sounds</h3>`)
 			houseSection(w, token)
@@ -449,6 +466,8 @@ func (f *Feature) settingsPage(ctx context.Context, w http.ResponseWriter, token
 		cameraListSection(w, token)
 		cameraButtonsSection(w, token)
 		doorbellSection(w, token)
+		tailscaleSection(w, token)
+		netbirdSection(w, token)
 		if layout.HasMicrophone() {
 			talkBackSection(w, token) // the microphones to a camera's speaker
 		}

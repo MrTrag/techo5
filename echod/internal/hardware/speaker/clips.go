@@ -77,9 +77,11 @@ var (
 	ClipMuteOff = &Clip{file: "mute_switch_off"}
 
 	// ClipFailure and ClipCanceled have no stock recording: they are notes (tones.go) until the owner
-	// puts one of their own in SoundsDir.
+	// puts one of their own in SoundsDir. ClipAlarm is the owner's alarm sound (#284), the Your own
+	// alarm sound; without one that rings with the default alarm sound.
 	ClipFailure  = &Clip{file: "failure"}
 	ClipCanceled = &Clip{file: "canceled"}
+	ClipAlarm    = &Clip{file: "alarm"}
 
 	// ClipDone is a command carried out (jarvis). No stock recording and no tone in its place: it is
 	// nothing at all until the owner puts done.wav in SoundsDir, and then it plays instead of the

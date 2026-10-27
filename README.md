@@ -79,6 +79,38 @@ How it compares with EchoLocal, EchoMuse, echo-dot-assist, Kiosk Satellite and V
 
 The bigger changes of September and October 2026. Every release lists the rest.
 
+- 🎚️ **Wake word scores, and wakesmith for words of your own** (v1.6.10). The setup page shows
+  each wake word's score as it comes, so you can see how close a word gets in your room and pick a
+  threshold that fits ([#314](https://github.com/HuskerMinion/techo5/pull/314)). To train a word
+  of your own, [wakesmith](https://github.com/HuskerMinion/wakesmith) does it on your own computer
+  from synthetic speech plus real voices: takes you record in the browser and the clips your devices
+  kept. [Training a wake word](#training-a-wake-word-of-your-own)
+- 🎵 **Now Playing follows several players** (v1.6.10). Pick more than one media player, and the
+  screen shows whichever is playing. Also in v1.6.10: the 2nd gen Show 8's JD9365 backlight comes
+  back from off ([#253](https://github.com/HuskerMinion/techo5/issues/253)), reminders speak on a
+  Home Assistant that isn't in English ([#294](https://github.com/HuskerMinion/techo5/issues/294)),
+  and Bluetooth proxy connections need an API encryption key.
+- 🇯🇵 **Japanese, Louder speech and Dim after idle** (v1.6.9). The screen in Japanese
+  ([#270](https://github.com/HuskerMinion/techo5/pull/270)), AirPlay 2 groups that play in step
+  ([#311](https://github.com/HuskerMinion/techo5/pull/311)), a **Louder speech** switch for replies
+  and announcements, **Dim after idle**, and four new skins.
+- 🎵 **AirPlay 2 on every device** (v1.6.8). With the AirPlay switch on, an iPhone can group the
+  device with other AirPlay 2 speakers, like a HomePod or a Sonos. The **AirPlay 2** switch keeps it
+  to classic AirPlay if a group doesn't play in step. Its firewall ports are open only while the
+  AirPlay 2 receiver runs.
+- 🛰️ **NetBird** (v1.6.8). The other way, beside Tailscale, to keep a device in another house in
+  your Home Assistant, with NetBird's own service or your own server. Off until you give it a setup
+  key. [docs/netbird.md](docs/netbird.md)
+- 📶 **Also in v1.6.8.** Home Assistant can connect to Bluetooth devices through a Show, up to three
+  at a time, with the new **Bluetooth proxy connections** switch
+  ([#184](https://github.com/HuskerMinion/techo5/pull/184)). Weekend nights can have their own hours
+  ([#305](https://github.com/HuskerMinion/techo5/issues/305)), and the Skylight's night clock now
+  dims well below its old floor.
+- 🌐 **Reach a device from away** (v1.6.7). An Echo Show, Echo Spot or Skylight can join your
+  Tailscale network, so a device in another house stays in your own Home Assistant, and its setup page
+  can be opened from afar with Remote setup. Off until you give it a key; over the tailnet only Home
+  Assistant's encrypted connection, the setup page while Remote setup is on, and SSH when it's on get
+  in. [docs/tailscale.md](docs/tailscale.md)
 - 🆕 **The Skylight Calendar 15** (v1.3.0). Not an Echo: the 15-inch wall calendar (150-CAL) runs
   TECHO5 on its own 64-bit mainline Linux kernel. Touch, the calendar, photos, dashboards, music and
   the radio, Bluetooth, the light sensor and the clock work. It has no microphone, so there's no wake
@@ -274,8 +306,8 @@ Which to use, how to set it up and what each can do: **[docs/dashboards.md](docs
 - 📡 **DLNA, and FLAC** (v1.0.0). Every device can be a DLNA speaker that music apps and servers play
   to (BubbleUPnP, Jellyfin, Plex, a NAS), off until you turn it on. Streams in FLAC now play on the
   device too, alongside MP3 and WAV. [docs/setup.md](docs/setup.md#5-music)
-- 📲 **AirPlay and Spotify Connect** (v0.9.25). The Show and the Dot can be a speaker other apps
-  play to, under the device's own name: AirPlay from an iPhone, iPad or Mac, and Spotify Connect
+- 📲 **AirPlay and Spotify Connect** (v0.9.25). Every device but the Panel app can be a speaker other
+  apps play to (the Spot since v1.6.8), under the device's own name: AirPlay from an iPhone, iPad or Mac, and Spotify Connect
   from the Spotify app (Premium). Both are off until you turn them on, on the screen, the setup page
   or in Home Assistant, and what they play shows as now playing. Since v1.2.7 the Spotify app's
   slider follows the device's volume, and the device follows the slider. If something does not work,
@@ -395,7 +427,7 @@ Echo Show 8 and the Echo Spot, are in [docs/screenshots](docs/screenshots/README
 | Where your voice goes | Amazon | Your Home Assistant, encrypted |
 | Wake word | "Alexa", processed for Amazon | On the device, two at once: Alexa, Okay Nabu, Hey Jarvis, Hey Mycroft, eight more, or your own. Plus a "stop" word |
 | Screen | Alexa cards and ads | Clock, weather, now playing, Home Assistant dashboards, cameras, timers, alarms, settings |
-| Music | Amazon Music and skills | Home Assistant radio lists with cover art, Music Assistant (Sendspin), Home Assistant media, AirPlay and Spotify Connect (Show and Dot), DLNA, a phone over Bluetooth, sleep sounds made on the device |
+| Music | Amazon Music and skills | Home Assistant radio lists with cover art, Music Assistant (Sendspin), Home Assistant media, AirPlay 2 and Spotify Connect, DLNA, a phone over Bluetooth, sleep sounds made on the device |
 | Timers and alarms | Alexa | Home Assistant timers on screen; alarms that ring without Home Assistant |
 | Camera | Video calls, Drop In | A Home Assistant camera entity, off unless watched; a camera for Frigate or an NVR over RTSP and ONVIF, if you turn it on; presence and gestures, on the device only |
 | Bluetooth | Speaker and phone audio | Audio to earbuds and speakers; Home Assistant Bluetooth proxy |
@@ -432,6 +464,19 @@ If the device's own models don't hear your voice well, Home Assistant's wake wor
 [Wake word on Home Assistant](docs/setup.md#wake-word-on-home-assistant). **Keep wake clips** saves
 what your room really says, so a model you train fits it:
 [Wake word clips](docs/setup.md#wake-word-clips).
+
+### Training a wake word of your own
+
+For a word that isn't in the list, or one that hears your voice better, use
+**[wakesmith](https://github.com/HuskerMinion/wakesmith)**, our wake word trainer. It trains microWakeWord models
+(what TECHO5 runs) and openWakeWord models on your own computer, on an NVIDIA or Intel Arc GPU or the CPU alone, from a page in your browser. It mixes
+synthetic speech with real voices: takes you record in the browser, your device's saved
+[wake word clips](docs/setup.md#wake-word-clips), and Common Voice. Every model is scored on
+recordings it never trained on, so you can compare runs before you pick a cutoff. Load the result on
+the setup page like any other ([A wake word of your own](docs/setup.md#a-wake-word-of-your-own)),
+and the setup page's wake word scores show how it does in your room.
+[docs/training-wake-word.md](docs/training-wake-word.md) is the manual path with microWakeWord's own
+tools.
 
 On my Show 5 it hears me fine from across the room without raising my voice. With music playing I
 have to raise my voice, and sometimes still need to tap the screen or a button to get it to hear me.
@@ -514,7 +559,8 @@ the backup. Every step: **[docs/install-skylight.md](docs/install-skylight.md)**
 - [docs/building.md](docs/building.md): building it yourself: where every input comes from
   (`tools/fetch-inputs.py`), and the daemon, kernel, boot image and root filesystem builds, for each OS.
 - [tools/linux/README.md](tools/linux/README.md): the image tooling in detail.
-- [docs/training-wake-word.md](docs/training-wake-word.md): training a wake word of your own, in any language.
+- [docs/training-wake-word.md](docs/training-wake-word.md): training a wake word of your own, in any language,
+  by hand; [wakesmith](https://github.com/HuskerMinion/wakesmith) does it from a page in your browser.
 - [CONTRIBUTING.md](CONTRIBUTING.md): reporting problems, trying a build on your device, and pull requests.
 
 ## Sister projects

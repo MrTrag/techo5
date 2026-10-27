@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/HuskerMinion/techo5/echod/internal/config"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/wakeword"
 	"github.com/HuskerMinion/techo5/echod/internal/hardware/mic"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/safe"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/wake"
@@ -91,6 +92,9 @@ type Engine struct {
 
 	// quiet is the microphones being cut: the backends are dropped while it holds. See Quiet.
 	quiet bool
+
+	// board is what the words have scored lately, for the setup page (board.go).
+	board board
 
 	// Threshold is asked for every score, so a change in Home Assistant takes effect at once. It is
 	// per slot because the models disagree on scale.
@@ -292,6 +296,7 @@ func (e *Engine) reset() {
 	for i := range e.slots {
 		e.slots[i] = slot{}
 	}
+	e.board.forgetAll()
 }
 
 // build makes an engine of one kind. A test replaces it with one that needs no model files.
@@ -334,6 +339,7 @@ func (e *Engine) Use(n int, m wake.Model) error {
 	old := e.slots[n]
 	e.slots[n] = slot{model: m, loaded: true}
 	e.drop(old)
+	e.board.forget(n)
 
 	slog.Info("wake word loaded", "slot", n+1, "phrase", m.Phrase, "id", m.ID, "engine", m.Kind)
 	return nil
@@ -354,6 +360,7 @@ func (e *Engine) Clear(n int) {
 	old := e.slots[n]
 	e.slots[n] = slot{}
 	e.drop(old)
+	e.board.forget(n)
 }
 
 // drop lets go of what a slot was using: the model, unless another slot still wants it, and then the
@@ -419,6 +426,18 @@ func (e *Engine) Crossing(n int) float64 {
 		return 0
 	}
 	return e.slots[n].crossing
+}
+
+// Margin is how far a slot's latest detection crossed over the cutoff it was judged against, so that words
+// with cutoffs of their own can be compared by how surely each was heard.
+func (e *Engine) Margin(n int) float64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if n < 0 || n >= len(e.slots) {
+		return 0
+	}
+	return e.slots[n].crossing - e.slots[n].crossCutoff
 }
 
 // Ready reports whether a slot has scored, and so whether its wake word can be heard yet. A slot with
@@ -543,6 +562,7 @@ func (e *Engine) score(frame []int16, source *mic.Source) {
 		if !s.scored {
 			s.scored = true
 			slog.Info("wake word ready", "slot", i+1, "id", s.model.ID)
+			e.board.event(wakeword.ScoreEvent{At: now, Slot: i + 1, What: "ready", ID: s.model.ID})
 			if e.OnReady != nil {
 				n := i
 				safe.Go("wake word ready", func() { e.OnReady(n) })
@@ -560,8 +580,10 @@ func (e *Engine) dropFailed() {
 			for i := range e.slots {
 				if s := e.slots[i]; s.loaded && s.model.Kind == k && s.model.ID == id {
 					slog.Error("wake word taken out of its slot: its model failed", "slot", i+1, "id", id)
+					e.board.event(wakeword.ScoreEvent{At: time.Now(), Slot: i + 1, What: "dropped", ID: id})
 					e.slots[i] = slot{}
 					e.drop(s)
+					e.board.forget(i)
 					if e.OnDropped != nil {
 						n, id := i, id
 						safe.Go("wake word dropped", func() { e.OnDropped(n, id) })
@@ -578,6 +600,8 @@ func (e *Engine) judge(n int, s *slot, score float64, now time.Time, source *mic
 	if e.Threshold != nil {
 		cutoff = e.Threshold(n)
 	}
+	// Every score, the held back ones too, for somebody watching on the setup page.
+	e.board.heard(n, score, now, now.Before(s.quiet))
 
 	// Every judged frame goes in the trace, before any of the reasons below not to act on it, so the
 	// trace covers the same frames the microphone's history does.
@@ -609,6 +633,16 @@ func (e *Engine) judge(n int, s *slot, score float64, now time.Time, source *mic
 		}
 		slog.Info(what, "slot", n+1, "id", s.model.ID, "peak", s.peak,
 			"crossing", s.crossing, "cutoff", s.crossCutoff, "dropped", source.Dropped())
+		// The scores view says what the log says: only a word that opened a turn is "detected".
+		ev := "detected"
+		switch {
+		case s.shadow:
+			ev = "shadowed"
+		case s.ignored:
+			ev = "other room"
+		}
+		e.board.event(wakeword.ScoreEvent{At: now, Slot: n + 1, What: ev, ID: s.model.ID, Peak: s.peak,
+			Crossing: s.crossing, Cutoff: s.crossCutoff})
 		// A shadowed slot or a word from another room opened nothing, so neither is a wake's score (nor,
 		// since Keep wake clips hangs off OnScored, a wake clip).
 		if e.OnScored != nil && !s.shadow && !s.ignored {
@@ -630,6 +664,8 @@ func (e *Engine) judge(n int, s *slot, score float64, now time.Time, source *mic
 			shadow := e.shadowed(n)
 			slog.Info("wake near miss", "slot", n+1, "id", s.model.ID, "peak", s.peak,
 				"cutoff", cutoff, "shadow", shadow, "dropped", source.Dropped())
+			e.board.event(wakeword.ScoreEvent{At: now, Slot: n + 1, What: "near miss", ID: s.model.ID, Peak: s.peak,
+				Cutoff: cutoff})
 			if e.OnNearMiss != nil && !shadow {
 				i, peak := n, s.peak
 				safe.Go("wake near miss", func() { e.OnNearMiss(i, peak) })
@@ -743,6 +779,8 @@ func (e *Engine) candidate(n int, s *slot, score, cutoff float64, now time.Time)
 	s.candidate = false
 	s.askedUntil = now.Add(Refractory)
 	slog.Info("wake candidate", "slot", n+1, "id", s.model.ID, "peak", peak, "asked_from", bound, "cutoff", cutoff)
+	e.board.event(wakeword.ScoreEvent{At: now, Slot: n + 1, What: "unsure", ID: s.model.ID, Peak: peak, AskedFrom: bound,
+		Cutoff: cutoff})
 	if e.OnCandidate != nil {
 		safe.Go("wake candidate", func() { e.OnCandidate(n, peak) })
 	}
@@ -776,6 +814,13 @@ func (e *Engine) Settle(d time.Duration, spared ...int) {
 // The slots are kept. What is dropped is the engines under them, which is where both the work and
 // the streaming state live, so coming back is the same cold start as a wake word freshly chosen
 // rather than a window holding audio from before the mute and audio from after it, spliced.
+// Quieted is whether the engines are down for a cut microphone (Quiet).
+func (e *Engine) Quieted() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.quiet
+}
+
 func (e *Engine) Quiet(on bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -790,9 +835,10 @@ func (e *Engine) Quiet(on bool) {
 			b.close()
 			delete(e.backends, k)
 		}
-		// An utterance cut off by the mute is not asked about after it.
-		for i := range e.slots {
-			e.slots[i].candidate = false
+		// The new backend will be cold. Keep the choice of model, but none of
+		// the old backend's readiness, utterance, or refractory state.
+		for i, s := range e.slots {
+			e.slots[i] = slot{model: s.model, loaded: s.loaded}
 		}
 		slog.Info("wake words stopped: the microphones are cut")
 		return
