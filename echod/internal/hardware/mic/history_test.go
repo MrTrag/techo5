@@ -131,7 +131,7 @@ func BenchmarkHistorySubscription(b *testing.B) {
 	for _, d := range []time.Duration{0, History, Confirming} {
 		b.Run(fmt.Sprint(d), func(b *testing.B) {
 			s := testSource()
-			s.history.add(make([]int16, historySamples))
+			s.history.add(make([]int16, historySamples), 0) // silence: its level before leveling is 0
 			b.ReportAllocs()
 			b.ResetTimer()
 			for b.Loop() {
