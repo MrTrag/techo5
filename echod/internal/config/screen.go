@@ -50,6 +50,10 @@ type Screen struct {
 	// NightWarm turns the screen's white to a lamp's through the night (screen.Tint).
 	NightWarm bool `json:"night_warm,omitempty"`
 
+	// AdaptiveBacklight turns a Show's backlight down on dark content and draws its pixels brighter by
+	// as much, so the picture is the same for less light (screen's lift).
+	AdaptiveBacklight bool `json:"adaptive_backlight,omitempty"`
+
 	// NightLightLevel is how bright the night light is, 1 to 10; none is the panel's own default.
 	NightLightLevel int `json:"night_light_level,omitempty"`
 
@@ -113,6 +117,13 @@ type Screen struct {
 	// WeatherPosition is where the home screen's weather sits: empty for the top left, "top-right"
 	// (display/clock_layout.go). The Show's only.
 	WeatherPosition string `json:"weather_position,omitempty"`
+	// GlanceChipSize is the size of the glance strip's text on the clock page: empty for Automatic (the
+	// small face, the tiny one when that fits more chips), "small" or "tiny" to keep to one
+	// (display/render_glance.go).
+	GlanceChipSize string `json:"glance_chip_size,omitempty"`
+	// GlanceWithMusic is where the glance chips go while the music strip is up: empty to hide them, as
+	// they always did, or "above" for a row over the strip (display/render.go).
+	GlanceWithMusic string `json:"glance_with_music,omitempty"`
 
 	// ClockStyle is how the home screen's clock looks all day: empty for the classic face, or "big",
 	// "flip", "led", "analog", "words", "sun", "dashboard", "binary", "world", "agenda", "glow", "nixie",
@@ -187,7 +198,18 @@ type Screen struct {
 	// Font is the font the screen's words are drawn in: empty for Go, the screen's own, or one of the
 	// others lib/fonts offers ("inter", "comicneue", ...). One this build does not have is Go.
 	Font string `json:"font,omitempty"`
+
+	// TextSize is how large the screen's words are drawn, in percent of the size the layout gives them;
+	// 0 for the device's own (display.textSize). The boxes they sit in keep their size.
+	TextSize int `json:"text_size,omitempty"`
 }
+
+// The text sizes TextSize may be other than 0: a size from a newer build or a hand-edited file is held
+// to them rather than drawing words too small to read or too big for any box.
+const (
+	TextSizeLeast = 50
+	TextSizeMost  = 200
+)
 
 // DefaultTheme is the palette a new device comes up in.
 const DefaultTheme = "Ember"
@@ -302,6 +324,10 @@ func (w ScreenWriter) NightWarm(v bool) error {
 	return w.st.Update(func(c *Config) { c.Screen.NightWarm = v })
 }
 
+func (w ScreenWriter) AdaptiveBacklight(v bool) error {
+	return w.st.Update(func(c *Config) { c.Screen.AdaptiveBacklight = v })
+}
+
 // AtNight sets both at once: the night light, and whether it is the red clock. NightDark is cleared.
 func (w ScreenWriter) AtNight(light, red bool) error {
 	return w.AtNightDark(light, red, false)
@@ -365,6 +391,17 @@ func (w ScreenWriter) Font(v string) error {
 	return w.st.Update(func(c *Config) { c.Screen.Font = v })
 }
 
+// TextSize saves the size of the screen's words in percent, held to TextSizeLeast..TextSizeMost; 0 or
+// less goes back to the device's own.
+func (w ScreenWriter) TextSize(v int) error {
+	if v > 0 {
+		v = min(max(v, TextSizeLeast), TextSizeMost)
+	} else {
+		v = 0
+	}
+	return w.st.Update(func(c *Config) { c.Screen.TextSize = v })
+}
+
 func (w ScreenWriter) ClockStyle(v string) error {
 	return w.st.Update(func(c *Config) { c.Screen.ClockStyle = v })
 }
@@ -380,6 +417,14 @@ func (w ScreenWriter) DateColor(v string) error {
 
 func (w ScreenWriter) WeatherPosition(v string) error {
 	return w.st.Update(func(c *Config) { c.Screen.WeatherPosition = v })
+}
+
+func (w ScreenWriter) GlanceChipSize(v string) error {
+	return w.st.Update(func(c *Config) { c.Screen.GlanceChipSize = v })
+}
+
+func (w ScreenWriter) GlanceWithMusic(v string) error {
+	return w.st.Update(func(c *Config) { c.Screen.GlanceWithMusic = v })
 }
 
 func (w ScreenWriter) DimAfterMinutes(v int) error {

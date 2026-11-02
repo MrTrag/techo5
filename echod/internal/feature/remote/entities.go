@@ -22,15 +22,18 @@ var readOnly = []string{
 	"airplay", "airplay_2", "spotify_connect", "dlna", "dlna_video", "video", "sendspin", "bluetooth_proxy",
 	"bluetooth_proxy_connections",
 	// Listening, watching and keeping.
-	"mic_mute", "intercom_drop_in", "talk_back", "camera_live", "keep_wake_clips", "keep_recordings_1",
+	"mic_mute", "intercom_drop_in", "talk_back", "record_takes", "camera_live", "keep_wake_clips", "keep_recordings_1",
 	"keep_recordings_2", "presence", "presence_detection", "gestures", "wake_word_on_home_assistant",
 	"confirm_wake_with_home_assistant",
+	// The words of a request kept off Home Assistant's history (Send voice text).
+	"send_voice_text",
 	// When the microphones open: a press that starts listening, and how readily a word or a sound does.
-	"wake_assistant_1", "wake_assistant_2", "wake_threshold_1", "wake_threshold_2", "confirm_threshold",
+	"wake_assistant_1", "wake_assistant_2", "wake_threshold_1", "wake_threshold_2",
+	"wake_playing_threshold_1", "wake_playing_threshold_2", "confirm_threshold",
 	"max_listen_1", "max_listen_2",
 	// New uses of the microphones and the camera: measuring the room, listening for claps, a finger held
 	// on the clock, serving the camera, and which device answers a wake word.
-	"ambient_noise_sensor", "clap_gesture", "clock_hold_gesture", "camera_streaming", "camera_login_from_ha",
+	"ambient_noise_sensor", "clap_gesture", "clap_sensitivity", "clock_hold_gesture", "camera_streaming", "camera_login_from_ha",
 	"nearest_device_answers", "person_detection",
 	// Taking settings from the other devices.
 	"settings_sharing",

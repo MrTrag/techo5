@@ -142,6 +142,9 @@ type Player struct {
 	// Spotify Connect), for the screen, with the name of the track it belongs to.
 	recvTrack atomic.Value // receivedTrack
 
+	// nextTitle is what the next play_media is to be named, and when (title.go); nil for nothing.
+	nextTitle atomic.Pointer[pendingTitle]
+
 	// lastExt is the last track a remote named, kept when it stops naming one: Music Assistant clears
 	// the track just before it says it stopped, so what was playing has to come from here. Only just
 	// before: a name kept longer is whatever played hours ago, and a stream that never named its track
@@ -777,10 +780,12 @@ func (p *Player) command(c esphome.MediaCommand) {
 			// (overlay.go). Not a track: it is not what the room chose, so it is not what the screen or the
 			// last-station memory is told is playing.
 		default:
+			// Taken before ours, which drops a title nothing used: this is what it was for.
+			title := p.nextTitle.Swap(nil).fresh()
 			p.ours()
 			// Home Assistant converts what it sends to what the device plays; one it did not is not
 			// handed on to the music library, which would be given Home Assistant's own address.
-			p.stream.PlayOnly(c.MediaURL)
+			p.stream.PlayTitled(c.MediaURL, title)
 			p.OnPlay.Emit(c.MediaURL)
 		}
 	}
@@ -1146,6 +1151,7 @@ func (c *claim) playing() bool {
 // that could not be turned off. The remote's track is what the room hears now; this device's is over.
 func (p *Player) External() uint64 {
 	p.remoteLast.Store(true)
+	p.nextTitle.Store(nil)
 	n := p.remote.take()
 	p.stream.Stop()
 	p.refresh()
@@ -1180,6 +1186,21 @@ func (p *Player) RemoteGone() {
 // what the screen asks before it says what the room is playing.
 func (p *Player) ExternalPlaying() bool { return p.remote.playing() }
 
+// ExternalShowing is whether a remote holding the speaker has something for a screen to show: it is
+// playing, or has said nothing yet, or it is paused or stopped with its track still named. Music
+// Assistant goes on holding the speaker after its queue is emptied, with no track named and nothing
+// playing, and the page and the strip then have nothing left to offer (#150).
+func (p *Player) ExternalShowing() bool {
+	if !p.remote.playing() {
+		return false
+	}
+	if playing, _ := p.CarriedState(); playing {
+		return true
+	}
+	t, _ := p.extTrack.Load().(remoteTrack)
+	return t.Title != ""
+}
+
 // Carried reports whether what the room is hearing is somebody else's: a remote holds the speaker and is
 // the thing playing.
 //
@@ -1208,9 +1229,17 @@ func (p *Player) ExternalTrack(title, artist, album string) {
 	p.extTrack.Store(remoteTrack{Title: title, Artist: artist, Album: album})
 	if title != "" {
 		p.lastExt.Store(lastTrack{remoteTrack: remoteTrack{Title: title, Artist: artist, Album: album}})
-	} else if l, _ := p.lastExt.Load().(lastTrack); l.Title != "" && l.clearedAt.IsZero() {
-		l.clearedAt = time.Now()
-		p.lastExt.Store(l)
+	} else {
+		if l, _ := p.lastExt.Load().(lastTrack); l.Title != "" && l.clearedAt.IsZero() {
+			l.clearedAt = time.Now()
+			p.lastExt.Store(l)
+		}
+		// Music Assistant keeps a stopped queue's track named, and clears it once the queue is emptied:
+		// a track held from a pause is over then (#150). The clear that comes with a pause comes within
+		// lastFor of its hold (after it, for a pause from the screen), so it leaves that alone.
+		if h, _ := p.held.Load().(heldTrack); !h.at.IsZero() && time.Since(h.at) > lastFor {
+			p.held.Store(heldTrack{})
+		}
 	}
 	p.refresh()
 }
@@ -1537,6 +1566,8 @@ func (p *Player) PlayURLChecked(url string, within time.Duration) error {
 // with the house has to leave the group before anything of its own starts, or the house goes with it.
 func (p *Player) ours() {
 	p.remoteLast.Store(false)
+	// A title is for the next play_media; anything else starting first was not it (title.go).
+	p.nextTitle.Store(nil)
 	if p.remote.playing() {
 		p.OnTakeOver.Emit(struct{}{})
 	}

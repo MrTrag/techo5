@@ -56,6 +56,7 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/feature/presence"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/remind"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/setup"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/takes"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/talkback"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/timer"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/video"
@@ -65,6 +66,7 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/hardware/camera"
 	"github.com/HuskerMinion/techo5/echod/internal/hardware/screen"
 	"github.com/HuskerMinion/techo5/echod/internal/hardware/touch"
+	"github.com/HuskerMinion/techo5/echod/internal/lib/bootreason"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/fonts"
 	"github.com/HuskerMinion/techo5/echod/internal/service"
 )
@@ -143,6 +145,8 @@ type Display struct {
 	clockPos *esphome.Select
 	// fontSel is Screen font, the font of every word the screen draws (font.go).
 	fontSel *esphome.Select
+	// textSizeSel is Screen text size, how large those words are drawn (text_size.go).
+	textSizeSel *esphome.Select
 	// styleNamed is the clock style a swipe turned to, said on the clock until styleNamedUntil.
 	styleNamed      string
 	styleNamedUntil time.Time
@@ -335,6 +339,7 @@ type Display struct {
 	videoOver     image.Rectangle
 	vp            videoPainter
 	vask          askLatch
+	pask          askLatch // the setup page's asking, drawn (pageAsk)
 	videoLit      uint64
 
 	// notifyLit is the last notification that lit the face, once per notification like videoLit.
@@ -379,6 +384,7 @@ func build() *Display {
 	d.clockStyleSel = clockStyleSelect(d)
 	d.clockPos = clockPositionSelect(d.wake)
 	d.fontSel = fontSelect(d)
+	d.textSizeSel = textSizeSelect(d)
 	setup.SetScreen(&setup.ScreenChoices{Styles: clockStyleOptions(), Current: clockStyleIndex, Choose: d.setClockStyle,
 		Fonts: fonts.Names(), FontNow: fontIndex, ChooseFont: d.setFont,
 		OwnFonts: ownFonts, AddFont: d.addOwnFont, RemoveFont: d.removeOwnFont, MaxFont: fonts.MaxOwnFile,
@@ -460,7 +466,7 @@ func (d *Display) timerStyleSel() *esphome.Select { return nil }
 func (d *Display) skinSel() *esphome.Select { return d.skinSl }
 
 func (d *Display) Entities() []esphome.Entity {
-	return []esphome.Entity{d.light, d.power, d.roomSw, d.auto, d.clock, d.clockStyleSel, d.clockPos, d.camTime, d.answerTime, d.turnStyle, d.skinSl, d.callBtn, d.weatherFx, d.muteRing, d.lang, d.styleSwipeSw, d.volumeSwipeSw, d.fontSel,
+	return []esphome.Entity{d.light, d.power, d.roomSw, d.auto, d.clock, d.clockStyleSel, d.clockPos, d.camTime, d.answerTime, d.turnStyle, d.skinSl, d.callBtn, d.weatherFx, d.muteRing, d.lang, d.styleSwipeSw, d.volumeSwipeSw, d.fontSel, d.textSizeSel,
 		d.nightHours, d.nightStart, d.nightEnd, d.weekendStart, d.weekendEnd, d.nightMode, d.atNight, d.nightStyle, d.glowLevel}
 }
 
@@ -472,6 +478,7 @@ func (d *Display) Restore(c config.Config) {
 	d.clockStyleSel.Set(clockStyles[clockStyleIndex()].label)
 	d.clockPos.Set(clockPositions[clockPositionIndex()].label)
 	d.fontSel.Set(fonts.Names()[fontIndex()])
+	d.textSizeSel.Set(textSizeOptions()[textSizeIndex()])
 	d.camTime.Set(cameraTimes[cameraTimeIndex()].label)
 	d.answerTime.Set(answerTimes[answerTimeIndex()].label)
 	d.turnStyle.Set(turnStyles[turnStyleIndex()].label)
@@ -748,11 +755,25 @@ func (d *Display) gesture(g touch.Gesture) {
 	if d.callGesture(g) || d.ringGesture(g) || d.pinGesture(g) {
 		return
 	}
-	// A browser asking to be let in: its face takes every tap, and only the two answers decide.
-	if setup.Get().Waiting() {
+	// The setup page asking something of whoever is at the device: a browser to be let in, or takes of
+	// a word to start, and Stop, where Start was, while they record. Its face takes every tap, and only
+	// the answers on the face that was drawn decide, once it has been up long enough to have been read
+	// (pageAsk), since the yes is in the same place on each of them.
+	if asking, c := setup.Get().Asking(), takes.Get().Card(); asking != "" || c.Up() {
 		if g.Kind == touch.Tap {
-			if allow, answered := askTapSpot(g.Y); answered {
-				answerSetup(allow)
+			drawn, settled := d.pask.answerable(time.Now())
+			yes, answered := askTapSpot(g.Y)
+			switch {
+			case !settled || !answered:
+			case asking != "":
+				if drawn == letInKey(asking) {
+					answerSetup(yes, asking)
+				}
+			case drawn != takesKey(c):
+			case c.Phase == takes.Armed:
+				answerTakes(yes, c.ID)
+			case yes:
+				takes.Get().Stop()
 			}
 		}
 		d.wake()
@@ -1266,8 +1287,10 @@ func (d *Display) locked(f func()) {
 
 // restartDevice reboots; the slot store and the daemon's state are on disk already.
 func restartDevice() {
+	bootreason.Mark(bootreason.Restart)
 	syscall.Sync()
 	if err := syscall.Reboot(syscall.LINUX_REBOOT_CMD_RESTART); err != nil {
+		bootreason.Unmark()
 		slog.Error("restart failed", "err", err)
 	}
 }
@@ -1453,7 +1476,7 @@ func (d *Display) frame() (next time.Duration) {
 	_, reminding := remind.Get().Showing()
 	vs := video.Get().State()
 	busy := view.Phase != "idle" || sheetOpen || ringingNow(now).any() || phone.Get().Busy() || pinIsOpen() ||
-		sunriseProgress(now) > 0 || setup.Get().Waiting() || reminding || vs.Active()
+		sunriseProgress(now) > 0 || asksAtDevice() || reminding || vs.Active()
 	if d.awayTick(now, on, busy, nightNow(now)) {
 		d.mu.Lock()
 		on = d.on
@@ -1522,6 +1545,7 @@ func (d *Display) frame() (next time.Duration) {
 	if cueOn() {
 		s.cue, s.phase, s.heard, s.reply = cueTurn(s.phase, s.heard, s.reply, captionsOn())
 	}
+	s.said = voice.Spoken(s.reply, now)
 	if equalizerOn() && (s.phase == "listening" || s.phase == "thinking" || s.phase == "replying" || s.phase == "lingering") {
 		s.eq = eqFor(s.phase, nightNow(now), now)
 		s.eq.wave = waveOn()
@@ -1634,6 +1658,12 @@ func (d *Display) frame() (next time.Duration) {
 	// still standing in it. It was set only on the idle page once, and the press could not be given
 	// without leaving settings first.
 	s.setupAsking = setup.Get().Waiting()
+	// Takes of a word asked for there are the same kind of face, and wait their turn behind a browser
+	// asking to be let in.
+	if !s.setupAsking {
+		s.takes = takes.Get().Card()
+		s.setupAsking = s.takes.Up()
+	}
 	s.announceReady = config.Get().Home.HouseWord != ""
 	s.announceRecording = announce.Get().Recording()
 	s.announcePeers = len(announce.Peers())

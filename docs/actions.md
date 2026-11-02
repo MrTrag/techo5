@@ -294,12 +294,14 @@ Assistant's bus, with:
 | Field | |
 |---|---|
 | `ended` | `answered`, `no_speech` (nothing said, or only what speech-to-text writes for noise), `canceled` (stopped, interrupted, cut off by another sound, or answered by another device), or `error` |
+| `reason` | Only when `ended` is `canceled`: `stopped` (the button, the stop word or Home Assistant ended it), `interrupted` (the wake word again, once it was thinking or answering), `cut_off` (another sound took the speaker from the reply), or `answered_elsewhere` (another device heard the wake word first, which is the nearest device feature working) |
 | `error` | Only when `ended` is `error`: Home Assistant's error code, like `stt-stream-failed`, or `timeout` when the pipeline took longer than the slot allows |
 | `trigger` | What opened it: `wake_word`, `button`, `follow_up` (listening again after a reply), or `home_assistant` (an announcement that asked for an answer) |
 | `wake_word` | The slot's wake word. It picked the pipeline, so it is there for a button or follow-up too |
+| `wake_score` | Only on a turn a wake word opened: the highest score the word reached on the device, as `Last wake score` shows it (for a wake Home Assistant confirmed, the device's score under the threshold). Logged beside `heard`, it shows how close mistaken wakes come to the threshold |
 | `slot` | The wake word slot, `1` or `2` |
-| `heard` | What speech-to-text heard, up to 1000 characters |
-| `reply` | The reply's text, up to 1000 characters |
+| `heard` | What speech-to-text heard, up to 1000 characters. Left out while the device's **Send voice text** is off |
+| `reply` | The reply's text, up to 1000 characters. Left out while **Send voice text** is off |
 | `listen_ms`, `think_ms`, `reply_ms` | How long each phase took, in milliseconds. A phase the turn never reached is left out |
 | `audio_seconds` | Seconds of recording kept for this turn, when one was |
 | `id` | The turn's id |
@@ -878,6 +880,101 @@ An alarm's `id` from `alarms_list`.
 action: esphome.office_alarm_delete_id
 data:
   id: "{{ listing.alarms[0].id }}"
+```
+
+## Turn an alarm off or on
+
+In YAML, refer to these actions as `esphome.<node>_alarm_turn_off` and `esphome.<node>_alarm_turn_on`.
+
+Switches device alarms off or back on without deleting them, the same as the switch next to an
+alarm on the screen. An alarm that is off keeps its time, days and label and doesn't ring, and
+turning it off drops its snooze. Fails if no alarm matches. To switch one alarm by its `id`, use
+[`alarm_turn_off_id` and `alarm_turn_on_id`](#turn-an-alarm-off-or-on-by-its-id).
+
+### time
+
+*string*
+
+Same formats as `alarm_set`'s `time`. Every alarm at that time is switched (reminders are left alone).
+
+### label (Can be empty)
+
+*string*
+
+Only switch alarms at that time whose label matches (case-insensitive). Leave it blank for every
+alarm at that time.
+
+```yaml
+action: esphome.office_alarm_turn_off
+data:
+  time: "6:45 am"
+  label: Wake up
+```
+
+```yaml
+action: esphome.office_alarm_turn_on
+data:
+  time: "6:45 am"
+  label: ""
+```
+
+## Turn an alarm off or on by its id
+
+In YAML, refer to these actions as `esphome.<node>_alarm_turn_off_id` and
+`esphome.<node>_alarm_turn_on_id`.
+
+The same as [`alarm_turn_off` and `alarm_turn_on`](#turn-an-alarm-off-or-on), for the one alarm an
+`id` names. Fails if no alarm has that id.
+
+### id
+
+*string*
+
+An alarm's `id` from `alarms_list`.
+
+```yaml
+action: esphome.office_alarm_turn_on_id
+data:
+  id: "{{ listing.alarms[0].id }}"
+```
+
+## Turn every alarm off for a while
+
+The **Alarms on** switch (`switch.<node>_alarms_on`) turns all of a device's alarms off at once, for
+a trip, and back on when you're home. Each alarm keeps its own switch, so turning it back on brings
+back the ones that were on. While it's off, no alarm rings, including Home Assistant helpers the
+device follows, and snoozes are dropped. Reminders still go off. The same switch is at the top of
+Alarms & Timers on the screen when there's more than one alarm. Setting a new alarm, or switching one
+on, while it's off turns it back on, so the alarm you just asked for rings.
+
+```yaml
+# Leaving for a few days: no alarms on the bedroom device.
+- action: switch.turn_off
+  target:
+    entity_id: switch.bedroom_echo_alarms_on
+```
+
+## Do something before the next alarm
+
+The **Next scheduled alarm** sensor (`sensor.<node>_next_scheduled_alarm`) is when the next alarm is
+set for, as a timestamp. Unlike **Next alarm**, it doesn't follow a snooze, and it leaves out
+reminders. It's empty when no alarm is coming, or when **Alarms on** is off. A time trigger with an
+offset runs an automation before it:
+
+```yaml
+alias: Bedroom lights up before the alarm
+triggers:
+  - trigger: time
+    at:
+      entity_id: sensor.bedroom_echo_next_scheduled_alarm
+      offset: "-00:30:00"
+actions:
+  - action: light.turn_on
+    target:
+      entity_id: light.bedroom
+    data:
+      brightness_pct: 30
+      transition: 1800
 ```
 
 ## List alarms and timers
@@ -1964,6 +2061,56 @@ action: esphome.office_stop_video
 data: {}
 ```
 
+## Name what plays next
+
+In YAML, refer to this action as `esphome.<node>_media_title`.
+
+Names the next `media_player.play_media` on the device's media player, for the player screen and the
+**Now playing** sensors. Home Assistant's `play_media` sends only the address, so without it the screen
+names the device's own playback as the radio, with the last station's song, or not at all. A recording
+off an answering machine, say, then shows as "Message from Alex", "today 14:12", "Answering machine".
+
+- It names only the next `play_media` that is not an announcement, once: the one after it has no name
+  again. A station, a phone over Bluetooth or Music Assistant starting first drops the name unused.
+- The name waits 60 seconds for its `play_media`, so call this right before it. One that comes later
+  is not named, nor is anything after it.
+- The name stays for as long as that track is on the player, paused too (`media_player.media_stop`
+  pauses), and goes when it ends, is stopped for good or something else plays.
+- Without it, `play_media` is named as before.
+
+### title (Required)
+
+*string*
+
+The name, shown large. `""` names nothing and drops a name given before.
+
+### subtitle (Can be empty)
+
+*string*
+
+A second line under it, such as when it was recorded.
+
+### source (Can be empty)
+
+*string*
+
+Where it comes from, shown where "Radio" or "Bluetooth" would be. `""` shows the screen's own word for
+it ("Playback"); the **Now playing source** sensor reads `Playback`.
+
+```yaml
+- action: esphome.office_media_title
+  data:
+    title: "Message from Alex"
+    subtitle: "today 14:12"
+    source: "Answering machine"
+- action: media_player.play_media
+  target:
+    entity_id: media_player.office
+  data:
+    media_content_id: "media-source://media_source/local/message.wav"
+    media_content_type: music
+```
+
 ## Choose the weather shown on the idle screen
 
 In YAML, refer to this action as `esphome.<node>_home_weather`.
@@ -1993,7 +2140,9 @@ Sets the glance strip: Home Assistant entities shown as chips (a pill with the e
 short line) along the foot of the clock page, each only while it has something to say. The Echo Show
 only; the Spot and the Dot don't have it. The list persists and the device follows the entities itself, so a chip comes and goes with its
 entity's state and nothing has to be sent again. A value that leaves the chips as they were
-does not redraw the screen.
+does not redraw the screen. The text size of the chips is the Glance chip size setting, on the screen
+and in Home Assistant: Automatic, Small or Tiny. While the music strip is up the chips are hidden,
+unless Chips while music plays is set to Above the strip.
 
 What each entity shows:
 
@@ -2106,6 +2255,38 @@ data:
   field: station
   speaker_field: speaker
   speaker: media_player.office
+```
+
+## Name the station that plays next
+
+In YAML, refer to this action as `esphome.<node>_media_station`.
+
+Tells the device that the next `media_player.play_media`, within a minute, is a radio station, by
+its name. Home Assistant sends every stream through its own converter, which keeps neither the
+station's address nor its name, so a station started by a voice command or an automation shows as
+"Radio" with no logo. Named this way, it shows as one tapped on the Radio page does: the station's
+name and logo, and the song where the station tells it.
+
+- The name is looked up on Radio Browser, as for a tapped station, so give the name the station goes
+  by there.
+- It names only the next `play_media`; one that comes more than a minute later is not named.
+- `""` drops a name not yet used.
+
+### name (Required)
+
+*string*
+
+The station's name.
+
+```yaml
+- action: esphome.office_media_station
+  data:
+    name: "SWR3"
+- action: media_player.play_media
+  target: { entity_id: media_player.office }
+  data:
+    media_content_id: "media-source://radio_browser/<stationuuid>"
+    media_content_type: music
 ```
 
 ## Play rain sounds by voice

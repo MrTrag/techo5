@@ -374,7 +374,11 @@ func KeepOwn(c *Config, from Config) {
 	c.Wake.KeepClips = from.Wake.KeepClips
 	c.Presence.On, c.Presence.Gestures = from.Presence.On, from.Presence.Gestures
 	c.Presence.Person = from.Presence.Person
+	// AirPlay sets the volume moves no door: only the rest of streaming, which is what listens on the network,
+	// is the device's own.
+	setsVolume := c.Streaming.AirPlaySetsVolume
 	c.Streaming = from.Streaming
+	c.Streaming.AirPlaySetsVolume = setsVolume
 	c.Video.On, c.Video.DLNA = from.Video.On, from.Video.DLNA
 	c.Video.Allowed = slices.Clone(from.Video.Allowed)
 	c.Home.CameraLive = from.Home.CameraLive
@@ -408,6 +412,7 @@ func KeepOwn(c *Config, from Config) {
 	// a secret, kept by KeepSecrets). The remote API's switch too: a restore never opens a door.
 	c.Microphone.Noise = from.Microphone.Noise
 	c.Microphone.Claps = from.Microphone.Claps
+	c.Microphone.ClapSense = from.Microphone.ClapSense
 	c.CamStream = from.CamStream
 	c.Remote.On = from.Remote.On
 	// Being on a tailnet is this device's: a restore never turns Tailscale or NetBird on or off.

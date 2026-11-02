@@ -101,6 +101,9 @@ const (
 	evCandidate                    // a wake the device was not sure of (event.slot, event.peak)
 	evWatch                        // something a stream to Home Assistant depends on may have changed
 	evRunStart                     // Home Assistant opened a run
+	evAnnouncing                   // an announcement that asks for an answer is being said (event.text)
+	evAnnounced                    // and was cut off, so no answer follows
+	evScored                       // the peak a wake word reached (event.slot, event.peak)
 )
 
 type event struct {
@@ -128,8 +131,12 @@ type event struct {
 	// (WokeAt): what was said meanwhile is in the history, and the turn sends that much more of it.
 	waited time.Duration
 
-	// peak is an evCandidate's score.
+	// peak is an evCandidate's or an evScored's score.
 	peak float64
+
+	// spoken is an evReplyText whose words have already been said: realtime voice has them only once
+	// the answer is over.
+	spoken bool
 }
 
 // conversation runs one turn at a time: microphone audio up, pipeline events back, spoken reply out.
@@ -224,6 +231,9 @@ type conversation struct {
 	// turn measures the one that is open and reports it when it closes. Nil while idle, and every
 	// method on it tolerates that, so the phases do not each have to check.
 	turn *activity.Turn
+
+	// scores matches a wake word's peak to the turn it opened (wakescore.go).
+	scores wakeScores
 
 	// pending is a turn owed once the current one has finished closing, nil when none.
 	//
@@ -486,10 +496,26 @@ func (c *conversation) handle(e event) {
 	c.consider()
 }
 
+// dropQuestion takes an announced question off the screen when no turn is there to answer it.
+func (c *conversation) dropQuestion() {
+	if c.phase == phaseIdle && c.shown.Phase == phaseReplying.String() {
+		c.shown.Phase = phaseIdle.String()
+		Changed.Emit(c.shown)
+	}
+}
+
 func (c *conversation) turnEvent(e event) {
 	switch e.kind {
+	case evScored:
+		c.scored(e.slot, e.peak, e.at)
+
 	case evStart:
-		c.start(nextTurn{slot: e.slot, woke: e.woke, asked: e.asked, at: e.at, waited: e.waited})
+		// A turn that could not open (no pipeline, the microphones on a camera call) leaves no answer
+		// to follow an announced question, so the question goes as a cut-off one does. One only put off
+		// (a wake word run or a mistaken turn still closing) opens in a moment: the question stays.
+		if !c.start(nextTurn{slot: e.slot, woke: e.woke, asked: e.asked, at: e.at, waited: e.waited}) && c.pending == nil {
+			c.dropQuestion()
+		}
 
 	case evSpeaking:
 		if c.followUp && c.phase == phaseListening {
@@ -510,6 +536,17 @@ func (c *conversation) turnEvent(e event) {
 		if c.phase != phaseIdle {
 			c.lookHere = true
 		}
+
+	case evAnnouncing:
+		// A question from Home Assistant (start_conversation) is on the screen as a reply would be,
+		// while it is said; the turn that answers it opens after it. Not over a turn of its own.
+		if c.phase == phaseIdle {
+			c.shown = State{Phase: phaseReplying.String(), Reply: e.text}
+			Changed.Emit(c.shown)
+		}
+
+	case evAnnounced:
+		c.dropQuestion()
 
 	case evEffect:
 		c.effectPosted.Store(false)
@@ -532,7 +569,7 @@ func (c *conversation) turnEvent(e event) {
 			c.lookHere = true
 		}
 		if e.text != "" {
-			slog.Info("heard", "slot", c.slot+1, "text", e.text)
+			slog.Info("heard", "slot", c.slot+1, "text", activity.Said(e.text))
 			c.log.Heard(e.text)
 			c.shown.Heard = e.text
 			Changed.Emit(c.shown)
@@ -541,10 +578,10 @@ func (c *conversation) turnEvent(e event) {
 		// "snooze for ten minutes" are acted on here, whatever it goes on to answer.
 		if ring.IsSounding() {
 			if stopsRing(e.text) {
-				slog.Info("heard a stop over a ring, ending it", "text", e.text)
+				slog.Info("heard a stop over a ring, ending it", "text", activity.Said(e.text))
 				ring.End()
 			} else if minutes, ok := ring.SnoozeAsked(e.text); ok {
-				slog.Info("heard a snooze over a ring", "text", e.text, "minutes", minutes)
+				slog.Info("heard a snooze over a ring", "text", activity.Said(e.text), "minutes", minutes)
 				ring.SnoozeFor(minutes)
 			}
 		}
@@ -590,10 +627,11 @@ func (c *conversation) turnEvent(e event) {
 		if c.phase == phaseIdle {
 			return
 		}
-		slog.Info("replying", "slot", c.slot+1, "text", e.text)
+		slog.Info("replying", "slot", c.slot+1, "text", activity.Said(e.text))
 		c.log.Replied(e.text)
 		c.turn.Replying(e.text)
 		c.shown.Reply = e.text
+		replyArrived(time.Now(), e.spoken)
 		Changed.Emit(c.shown)
 		if c.phase == phaseListening {
 			c.think()
@@ -701,6 +739,7 @@ func (c *conversation) turnEvent(e event) {
 		}
 		slog.Info("the reply was cut off by another sound", "slot", c.slot+1)
 		c.clearPending()
+		c.turn.Cancels(activity.CutOff)
 		c.idle("cut off", activity.Canceled)
 
 	case evError:
@@ -711,6 +750,7 @@ func (c *conversation) turnEvent(e event) {
 		if e.code == errDuplicate {
 			slog.Info("another device answered first", "slot", c.slot+1, "message", e.msg)
 			c.clearPending()
+			c.turn.Cancels(activity.AnsweredElsewhere)
 			c.idle("answered elsewhere", activity.Canceled)
 			c.leds.Busy().Flash(led.WorkElsewhere, yieldFlash)
 			return
@@ -749,6 +789,7 @@ func (c *conversation) turnEvent(e event) {
 			return
 		}
 		slog.Info("canceled", "phase", c.phase, "slot", c.slot+1, "sounding", sounding)
+		c.turn.Cancels(activity.Stopped)
 		c.idle("canceled", activity.Canceled)
 		feedback.Canceled()
 
@@ -843,6 +884,7 @@ func (c *conversation) start(n nextTurn) bool {
 		// Held back before the turn ends, so that ending it does not hand the speaker back to a track
 		// for the moment it takes the next turn to open.
 		c.pending = &nextTurn{slot: slot, woke: n.woke, asked: n.asked, at: n.at}
+		c.turn.Cancels(activity.Interrupted)
 		c.idle("interrupted", activity.Canceled)
 
 		// The stopped run has yet to close, and its last events are still on their way.
@@ -851,10 +893,11 @@ func (c *conversation) start(n nextTurn) bool {
 	}
 	c.clearPending()
 
-	// The microphones are going out of a camera (feature/talkback): no turn opens on them, however
-	// it was asked for - a wake word, the button, Home Assistant's announcement, or a follow-up.
+	// The microphones are going out of a camera (feature/talkback) or into takes of a word
+	// (feature/takes): no turn opens on them, however it was asked for - a wake word, the button,
+	// Home Assistant's announcement, or a follow-up.
 	if micTaken() {
-		slog.Info("turn not started: the microphones are talking through a camera", "follow_up", n.followUp)
+		slog.Info("turn not started: the microphones are taken", "by", heldBy(), "follow_up", n.followUp)
 		return false
 	}
 
@@ -930,6 +973,9 @@ func (c *conversation) start(n nextTurn) bool {
 		c.log.Woke(phrase)
 	}
 	c.turn = c.log.Begin(slot+1, phrase, n.trigger())
+	if n.woke && !n.continued {
+		c.wakeOpened(slot, n.at)
+	}
 	recording.Get().Opens(c.turn.ID(), slot, history, loud)
 	be := c.be
 	if !n.continued {
@@ -990,6 +1036,14 @@ func (c *conversation) listenFor(n nextTurn) time.Duration {
 		}
 	}
 	return wakeword.MaxListen(n.slot)
+}
+
+// endpointSettings is endpoint.Default with the pause set on the device (End of speech pause): a
+// window is a tenth of a second, as the setting is.
+func endpointSettings() endpoint.Settings {
+	s := endpoint.Default
+	s.Quiet = config.Get().Microphone.EndPauseTenths()
+	return s
 }
 
 // deviceEnds is whether the device hearing the speaker stop ends a turn on be: always where nobody else
@@ -1195,8 +1249,10 @@ func (c *conversation) startPending() {
 	next := c.pending
 	c.clearPending()
 
-	if next != nil {
-		c.start(*next)
+	if next != nil && !c.start(*next) && c.pending == nil {
+		// The turn put off could not open after all (muted by now, no pipeline): an announced question
+		// waiting for it goes, as it does when a turn cannot open at once.
+		c.dropQuestion()
 	}
 }
 
@@ -1430,16 +1486,25 @@ func (c *conversation) stream(ctx context.Context, be backend, slot int, followU
 	//
 	// The direct pipeline and realtime voice have nobody else to decide (deviceEnds).
 	acts := deviceEnds(be, followUp)
-	ep := endpoint.New(endpoint.Default)
+	ep := endpoint.New(endpointSettings())
 	var sent int
 	var endpointAt float64
 	see := func(frame []int16) {
 		sent += len(frame)
 		if endpointAt == 0 && ep.Feed(frame) {
 			endpointAt = float64(sent) / float64(mic.Rate)
+			// What the decision was made on, not just that it was made: the loudest window of the
+			// turn (usually the wake word), the level a window had to fall below to count as quiet,
+			// and how many windows counted as speech. A turn cut while someone was still talking
+			// shows a peak set by the wake word and a request too soft to reach off of it.
+			peak, off, speech := ep.Heard()
 			slog.Info("end of speech heard here", "slot", slot+1, "acted", acts,
 				"spoke_s", math.Round(float64(ep.EndedAt())/float64(mic.Rate)*10)/10,
-				"at_s", math.Round(endpointAt*10)/10)
+				"at_s", math.Round(endpointAt*10)/10,
+				"peak", math.Round(peak),
+				"off", math.Round(off),
+				"speech", speech,
+				"quiet_needed", ep.Settings().Quiet)
 			if acts {
 				c.post(event{kind: evSpokeEnd, text: id})
 			}

@@ -16,6 +16,9 @@ func saved(slot int) config.WakeWord { return config.Get().Wake.Slot(slot) }
 // Threshold is the score a slot's detection has to reach.
 func Threshold(slot int) float64 { return saved(slot).Threshold }
 
+// PlayingThreshold is the cutoff while the echo canceller is active, per wake word.
+func PlayingThreshold(slot int) float64 { return saved(slot).PlayingThresholdAt() }
+
 // Shadow reports whether a slot's wake word is watched rather than acted on: see config.WakeWord.
 func Shadow(slot int) bool { return saved(slot).Shadow }
 

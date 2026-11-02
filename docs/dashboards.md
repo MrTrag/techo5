@@ -39,6 +39,10 @@ setup page's **Screen & Photos** tab has the same settings, except which dashboa
 - **Dashboard tiles** (Show only, drawn only): *Normal*; *Large*, taller tiles across the whole
   width; or *Fill the screen*, which lays a view of up to nine tiles out over the whole page, like
   four lights in a 2×2 grid. A view with anything other than tiles on it is drawn *Large*.
+- **Dashboard tile layout** (Show only, drawn only): *Side by side*, a tile's icon beside its name and
+  state; or *Name below*, a smaller icon and the state along the top and the name under them, across
+  the tile's whole width. Name below tiles are a little taller, and a long name has more room, which
+  suits a large **Text size**. It works with every size of **Dashboard tiles**.
 - **Dashboard without its header** (streamed only): hides Home Assistant's top bar, which on a small
   screen takes a real slice of it. It works on your dashboards and on the built-in pages (Energy,
   History, Logbook and the rest), with nothing to install and no change to the dashboards themselves,
@@ -79,7 +83,9 @@ Each device has its own settings, so the kitchen and a bedroom can show differen
 - **Tap** a tile or a row to do what it says: lights, switches and fans toggle, covers open or close,
   players play or pause, scenes and scripts run, a card's own tap action does what it is set to.
 - **Slide** a finger along a light, cover, thermostat or media player to set its brightness,
-  position, temperature or volume. The tile fills as you slide, and it is set when you let go.
+  position, temperature or volume. The tile fills as you slide, and it is set when you let go. A tile
+  you can slide has a track along its foot, with a bar on it up to the level; a light that is off keeps
+  the empty track.
 - **Tap a thermostat** whose card sets no tap of its own:
   - on the Show (a long press too), for a sheet over the page: the temperature where it is, the one
     it is set to with a step down and up (the low and the high of a range in heat/cool), its modes,
@@ -101,7 +107,7 @@ Each device has its own settings, so the kitchen and a bedroom can show differen
 
 | Home Assistant card | On the device |
 |---|---|
-| Tile, button, entity, light, thermostat, and the Mushroom entity cards | A tile: icon, name, state, tap; a slider for lights, covers, thermostats and media players |
+| Tile, button, entity, light, thermostat, and the Mushroom entity cards | A tile: icon, name, state, tap; a slider for lights, covers, thermostats and media players. A name too long for its tile is drawn smaller, then on two lines, and only what still does not fit is cut short with …. Under a heading (or a Glance or Entities card with a title, for its own tiles or rows), a name Home Assistant gives the entity is shown without the heading in front of it: under *Master Bedroom*, "Master Bedroom ceiling light" is "Ceiling light". A name the card gives is shown as it is |
 | Entities | A card of rows, with a switch for anything on or off |
 | Glance, Mushroom chips | Tiles |
 | Heading, Mushroom title | A heading |
@@ -235,9 +241,10 @@ On the page:
   over RTSP (**Live camera video** on, and go2rtc's stream or a picture address on the setup page; see
   [Cameras](setup.md#4-cameras)), the tile plays it live too, at a few frames a second. Until the first
   picture comes, and for a camera tile not set to show the camera, it is an icon and a name. Tap it to
-  put the camera up on its own. The device says `own_pictures` in its **Screen features**, which is
-  what has the add-on offer cameras for it; an add-on that does not know the word yet offers them only
-  to its own boards that draw pictures, and turns a layout with a camera down.
+  put the camera up on its own. The device says `own_pictures` in its **Screen features**, the word for
+  a screen that fetches its cameras' pictures itself. Tessera doesn't take that word yet: it offers
+  cameras only to its own boards that draw pictures, and turns a layout with a camera down
+  ([#356](https://github.com/HuskerMinion/techo5/issues/356)).
 - A weather tile two cells wide or two rows high shows the forecast: days side by side, or one a line
   on a tile one cell wide.
 - Bigger tiles show the controls Tessera gives them (the tile's **Controls** in the editor): a
