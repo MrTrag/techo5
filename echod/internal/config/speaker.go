@@ -30,6 +30,14 @@ type Speaker struct {
 	// on, so a restart inside the same hours does not turn down a device somebody turned up since.
 	NightOf string `json:"night_of,omitempty"`
 
+	// VoiceOffset and CallOffset are how far the assistant's voice (replies, announcements and the
+	// device's spoken words, never music) and a call's audio (the intercom and the phone) sit from the
+	// volume, in volume steps: negative is quieter, positive louder, zero the volume itself, which is
+	// what a device that never set them plays at. A raise stops at the night volume through quiet hours,
+	// and a muted or zero volume keeps both silent (speaker.LaneStep).
+	VoiceOffset int `json:"voice_offset,omitempty"`
+	CallOffset  int `json:"call_offset,omitempty"`
+
 	// Bass and Treble are the listener's own shelves in dB, zero for the tuning as the vendor left
 	// it. They apply only while the tuning is on, since they are a stage of it (lib/asp/tone.go).
 	Bass   float64 `json:"bass,omitempty"`
@@ -59,6 +67,10 @@ type Speaker struct {
 	// LouderSpeech compresses replies and announcements on their way to the speaker, so the quiet
 	// parts of words are heard (media.Louder, #304). Off by default.
 	LouderSpeech bool `json:"louder_speech,omitempty"`
+
+	// ClearerSpeech takes the tuning's low-band lift down while replies and announcements play
+	// (speaker.Player.SetClearerSpeech, techo5-dot#25). Off by default.
+	ClearerSpeech bool `json:"clearer_speech,omitempty"`
 
 	// SoundsMoved is whether the wake sounds have been moved to Home Assistant's: once, for a device
 	// saved when Chirp was the default, and only for a word still on it (config.Load).
@@ -176,6 +188,10 @@ func (w SpeakerWriter) LouderSpeech(v bool) error {
 	return w.st.Update(func(c *Config) { c.Speaker.LouderSpeech = v })
 }
 
+func (w SpeakerWriter) ClearerSpeech(v bool) error {
+	return w.st.Update(func(c *Config) { c.Speaker.ClearerSpeech = v })
+}
+
 func (w SpeakerWriter) ClassicSounds(v bool) error {
 	return w.st.Update(func(c *Config) { c.Speaker.ClassicSounds = v })
 }
@@ -240,3 +256,16 @@ func (r Resampling) Label() string {
 	}
 	return string(r)
 }
+
+// VoiceOffset saves how far the assistant's voice sits from the volume, clamped to the range of steps.
+func (w SpeakerWriter) VoiceOffset(v int) error {
+	return w.st.Update(func(c *Config) { c.Speaker.VoiceOffset = ClampOffset(v) })
+}
+
+// CallOffset saves how far a call's audio sits from the volume, clamped to the range of steps.
+func (w SpeakerWriter) CallOffset(v int) error {
+	return w.st.Update(func(c *Config) { c.Speaker.CallOffset = ClampOffset(v) })
+}
+
+// ClampOffset keeps an offset from the volume within one volume range either way.
+func ClampOffset(v int) int { return max(-VolumeSteps, min(v, VolumeSteps)) }

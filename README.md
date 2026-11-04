@@ -79,6 +79,11 @@ How it compares with EchoLocal, EchoMuse, echo-dot-assist, Kiosk Satellite and V
 
 The bigger changes of September to November 2026. Every release lists the rest.
 
+- 🌧️ **Rain on the glass, and a news update by voice** (v1.6.22). Rain on the weather page and
+  the weather art gathers on the glass and runs down, and lightning strikes at random with a new bolt
+  each time. The direct assistant plays a news update when asked. **Wi-Fi quiet hours** keeps the device
+  off the Wi-Fi at night ([#391](https://github.com/HuskerMinion/techo5/pull/391)), and a repeating alarm
+  can skip one morning from its wake-up light ([#360](https://github.com/HuskerMinion/techo5/pull/360)).
 - 📊 **Wake scores, a privacy switch and new diagnostics** (v1.6.21). Voice request events carry
   the wake word's score and why a request was canceled ([#381](https://github.com/HuskerMinion/techo5/issues/381)),
   and **Send voice text** keeps what you say out of Home Assistant
@@ -442,7 +447,7 @@ slot system, phone calls, and a minimal Alpine root filesystem in place of Andro
 | 🐧 **Real Linux, no Android** | The Show boots straight into a minimal Alpine Linux root filesystem. No Android framework, no Google services, no app store: one daemon drives the microphones, speaker, screen, camera and radios directly. |
 | 🚫 **No Alexa, no Amazon account, no Amazon cloud** | Your voice goes only to *your* Home Assistant, over its encrypted ESPHome API. The Show reaches the internet just for what you use: update checks against this repo, network time, radio streams with their song and cover lookups, the rain radar map, and in the U.S. the National Weather Service's weather alerts. Voice and control keep working with the internet down, as long as your Home Assistant pipeline is local. |
 | 🎙️ **Two wake words, two assistants** | microWakeWord runs on the device and listens for two wake words at once, each with its own Home Assistant assistant: "Okay Nabu" for a local one and "Hey Jarvis" for a cloud one, say. Each has its own sensitivity, sounds, ring and follow-up. Twelve words come with it ("Alexa", "Okay Nabu", "Hey Jarvis", "Hey Mycroft", "Computer" and more), and you can add your own. Say "stop", with no wake word, to stop an alarm, an answer or the music. Echo cancellation keeps it listening over music. [docs/setup.md](docs/setup.md#two-wake-words-two-assistants) |
-| 🧠 **Voice without Home Assistant, if you want** | Instead of Assist, the device can use your own speech servers (Wyoming: faster-whisper and Piper) and a chat model (llama.cpp, Ollama or anything OpenAI-style). It sets timers and alarms, plays the radio and Music Assistant, changes the volume and calls other devices, and can look things up with SearXNG. Or answer a wake word with a realtime voice at OpenAI, xAI or Gemini, with your own key. [docs/setup.md](docs/setup.md#voice-without-home-assistant) |
+| 🧠 **Voice without Home Assistant, if you want** | Instead of Assist, the device can use your own speech servers (Wyoming: faster-whisper and Piper) and a chat model (llama.cpp, Ollama or anything OpenAI-style). It sets timers and alarms, plays the radio, the news update you ask for (Fox, NPR, ABC or your own) and Music Assistant, changes the volume and calls other devices, and can look things up with SearXNG. Or answer a wake word with a realtime voice at OpenAI, xAI or Gemini, with your own key. [docs/setup.md](docs/setup.md#voice-without-home-assistant) |
 | 🔐 **Secure by default** | SSH is keys-only and off until you turn it on; keys arrive only through Home Assistant. The camera and screen web pages start closed, and a firewall lets in nothing on Wi-Fi but what the device serves. No password logins, not even in rescue. |
 | 🔄 **Updates that can't brick it** | Signed releases install over the air from Home Assistant's update card into the spare of two root filesystem slots, boot on trial, and fall back on their own if the new one doesn't settle. Follow the stable or the dev channel, and let it install on its own between 2 and 5 AM if you like. |
 | 📺 **A screen that's actually useful** | Clock and weather, the conversation as it happens, a glance strip of chips from Home Assistant along the foot of the clock, a calendar, now playing with song, cover art and lyrics, your Home Assistant dashboards, forecasts, a live rain radar, the National Weather Service's alerts (in the U.S.), live cameras from Home Assistant or go2rtc, up to six at once, notifications, timers and alarms, Wi-Fi setup, 13 themes, ten fonts, ten languages (five with the whole screen translated, Spanish part of it, and Dutch, Portuguese and Russian the clock and weather), and 15 clock styles you swipe between. Auto-brightness follows the room's light. |
@@ -604,7 +609,8 @@ v1.0.1 needs the new boot image so a quick tap to unmute no longer leaves the ca
 **Echo Show 8 2nd gen (2021, `athena`)** installs differently. There's no LineageOS for it: after
 the saiyaku-athena unlock, `tools/install-athena.py` puts TECHO5's own 64-bit mainline kernel and the
 system on it from TWRP, backing up every partition first. Three of the screen panels Amazon used are
-tested on that kernel; the installer checks yours, and others install with `--force-panel`. Every step:
+tested on that kernel; the installer checks yours, and others install with `--force-panel`. An opt-in
+boot layer falls back to the other slot by itself if a new kernel doesn't start. Every step:
 **[docs/install-athena.md](docs/install-athena.md)**. The story and the hardware:
 [TECHO5 ATHENA](https://github.com/HuskerMinion/techo5-athena).
 
@@ -619,7 +625,7 @@ the backup. Every step: **[docs/install-skylight.md](docs/install-skylight.md)**
 
 | Layer | What |
 |---|---|
-| Boot | Amazon's LK, unlocked with amonet; the LineageOS 4.9 kernel rebuilt with Bluetooth; a rescue initramfs that picks a slot. On the 2nd gen Show 8: saiyaku-athena and TECHO5's own Linux 6.18 kernel ([source](tools/linux/athena/kernel)). On the Skylight Calendar 15: its stock U-Boot and TECHO5's own Linux 6.18 kernel ([source](tools/linux/skylight/kernel)) |
+| Boot | Amazon's LK, unlocked with amonet; the LineageOS 4.9 kernel rebuilt with Bluetooth; a rescue initramfs that picks a slot. On the 2nd gen Show 8: saiyaku-athena and TECHO5's own Linux 6.18 kernel ([source](tools/linux/athena/kernel)), with an opt-in U-Boot boot layer that gives each slot its own kernel. On the Skylight Calendar 15: its stock U-Boot and TECHO5's own Linux 6.18 kernel ([source](tools/linux/skylight/kernel)) |
 | System | Alpine Linux armv7 in two root filesystem slots, read-only, with a trial-and-commit boot counter |
 | Daemon | `echod`, one Go binary: audio, wake word, echo cancellation, screen renderer, touch, camera ISP, Bluetooth, updates |
 | Home Assistant | The native ESPHome API: voice satellite, media player, camera, update entity, dozens of settings |
@@ -659,6 +665,9 @@ table are photos from Wikimedia Commons; who took each one, and its license, is 
 - **saiyaku-athena** ([R0rt1z2](https://github.com/R0rt1z2) with bengris32 and FieryFlames
   (jackmthws); thanks to nuno407 for the META mode idea): the unlock for the 2nd gen Echo Show 8,
   [on XDA](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-show-8-2nd-gen-2021-athena.4804958/).
+- [u-boot-amazon-echo](https://github.com/nuno407/u-boot-amazon-echo) ([@nuno407](https://github.com/nuno407)):
+  the A/B layer for U-Boot behind the 2nd gen Show 8's opt-in boot layer, and its installer support
+  ([#340](https://github.com/HuskerMinion/techo5/pull/340)).
 - The mainline Linux kernel, and everyone who brought the MT8183 into it for its Chromebooks: the
   2nd gen Show 8's kernel is built on their work.
 - [vpavlin/mt8183-camera](https://github.com/vpavlin/mt8183-camera) (Václav Pavlín): cameras on MT8183

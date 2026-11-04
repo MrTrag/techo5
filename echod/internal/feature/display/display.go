@@ -36,6 +36,7 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/feature/alarm"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/announce"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/assistant"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/babymon"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/btaudio"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/camstream"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/dashboard"
@@ -164,6 +165,8 @@ type Display struct {
 	volumeSwipeSw *esphome.Switch
 	// nightTapSw is Tap lifts the night light (night_tap_show.go).
 	nightTapSw *esphome.Switch
+	// nightInfoSw is Night clock shows Next up and notifications (night_info.go).
+	nightInfoSw *esphome.Switch
 	// weatherFx is the weather page's sky moving, on or off (weatherfx.go).
 	weatherFx *esphome.Switch
 	lang      *esphome.Select
@@ -224,6 +227,7 @@ type Display struct {
 	dashColor     *dashboard.LightColor // the color sheet, while it is up
 	dashMedia     *mediaSheet           // the media sheet, while it is up
 	dashClimate   *climateSheet         // the thermostat sheet, while it is up
+	dashFan       *fanSheet             // the fan sheet, while it is up
 	sheetSent     sliderSent            // what a sheet's slider last sent, while a finger moves it
 	dashHolds     bool                  // the drawn dashboard is up, and wants a finger held still reported
 	clockHolds    bool                  // the plain clock is up and Hold on the clock is on (gesture_hold.go)
@@ -494,7 +498,7 @@ func build() *Display {
 	d.clockStyleSel = clockStyleSelect(d)
 	d.fontSel = fontSelect(d)
 	d.textSizeSel = textSizeSelect(d)
-	setup.SetScreen(&setup.ScreenChoices{Styles: clockStyleOptions(), Current: clockStyleIndex, Choose: d.setClockStyle,
+	setup.SetScreen(&setup.ScreenChoices{Todo: true, Styles: clockStyleOptions(), Current: clockStyleIndex, Choose: d.setClockStyle,
 		Fonts: fonts.Names(), FontNow: fontIndex, ChooseFont: d.setFont,
 		OwnFonts: ownFonts, AddFont: d.addOwnFont, RemoveFont: d.removeOwnFont, MaxFont: fonts.MaxOwnFile,
 		Taps: clockTapOptions(), TapNow: clockTapIndex, ChooseTap: func(i int) { setClockTap(d.clockTap, i) }, Places: maxWorld,
@@ -513,6 +517,7 @@ func build() *Display {
 	d.styleSwipeSw = styleSwipeSwitch()
 	d.volumeSwipeSw = volumeSwipeSwitch()
 	d.nightTapSw = nightTapSwitch(d)
+	d.nightInfoSw = nightInfoSwitch(d)
 	d.weatherFx = weatherAnimationSwitch(d.wake)
 	d.strip = stripSelect(d.wake)
 	d.themeSel, d.lightThemeSel = themeSelect(false, d.wake), themeSelect(true, d.wake)
@@ -571,6 +576,10 @@ func build() *Display {
 		d.relight(true) // a dark panel keeps a little light while the camera is watched (watchedLight)
 		d.wake()
 	})
+	babymon.Get().Changed.Listen(func(struct{}) {
+		d.relight(true) // and while the room is listened to: the mark that says so has to be seen
+		d.wake()
+	})
 	security.Get().Changed.Listen(func(struct{}) { d.wake() })
 	talkback.Get().Changed.Listen(func(struct{}) { d.wake() })
 	alarm.Get().Changed.Listen(func(struct{}) { d.wake() })
@@ -617,7 +626,7 @@ func (d *Display) clockTapSel() *esphome.Select { return d.clockTap }
 
 func (d *Display) Entities() []esphome.Entity {
 	ents := append([]esphome.Entity{d.light, d.power, d.roomSw, d.auto, d.clock, d.clockStyleSel, d.clockPos, d.dateCol, d.weatherPos, d.glanceSz, d.glanceMus, d.camTime, cameraFitSel, cameraBandsSel, cameraShadeSel, d.answerTime, d.turnStyle, d.timerStyle, d.skinSl, d.callBtn, d.weatherFx, d.warmthSw, d.lang, d.strip, d.themeSel, d.lightThemeSel, d.themeModeSel, d.nightHours, d.nightStart, d.nightEnd, d.weekendStart, d.weekendEnd, d.nightMode, d.atNight, d.nightStyle, d.glowLevel, d.dimmestNum, d.idleDimSel,
-		d.pop.on, d.pop.lead, d.pop.chime, d.pop.allDay, d.clockTap, d.styleSwipeSw, d.volumeSwipeSw, d.nightTapSw, d.fontSel, d.textSizeSel}, d.lookEnts...)
+		d.pop.on, d.pop.lead, d.pop.chime, d.pop.allDay, d.pop.shown, d.pop.popping, d.clockTap, d.styleSwipeSw, d.volumeSwipeSw, d.nightTapSw, d.nightInfoSw, d.fontSel, d.textSizeSel}, d.lookEnts...)
 	if !screen.CanTint {
 		// Night warmth tints the frame on its way to the panel, which a tablet's screen does not take.
 		ents = slices.DeleteFunc(ents, func(e esphome.Entity) bool { return e == esphome.Entity(d.warmthSw) })
@@ -656,6 +665,7 @@ func (d *Display) Restore(c config.Config) {
 	d.styleSwipeSw.Set(!c.Screen.NoStyleSwipe)
 	d.volumeSwipeSw.Set(!c.Screen.NoVolumeSwipe)
 	d.nightTapSw.Set(c.Screen.NightTapLifts)
+	d.nightInfoSw.Set(c.Screen.NightInfo)
 	setWeatherAnimation(d.weatherFx, !c.Screen.WeatherStill)
 	d.strip.Set(stripOptions[stripIndex()])
 	d.themeModeSel.Set(themeModesHere()[themeModeIndex()].label)
@@ -768,7 +778,7 @@ func (d *Display) relight(jump bool) {
 	if p := d.wakeLight(time.Now()); p > 0 && d.on {
 		target = float64(d.ceiling) * screen.BacklightMax / 100 * sunriseLevel(p)
 	}
-	target = watchedLight(target, d.on, camstream.Watching(), float64(glowSteps[0]))
+	target = watchedLight(target, d.on, watched(), float64(glowSteps[0]))
 	if jump || d.level == 0 {
 		d.level = target
 	} else {
@@ -1035,7 +1045,10 @@ func (d *Display) gesture(g touch.Gesture) {
 		return
 	}
 	d.mu.Unlock()
-	slog.Info("touch", "gesture", g.String())
+	if g.Kind != touch.Drag {
+		// Not each step of a finger dragging the map or a dashboard: those come many a second.
+		slog.Info("touch", "gesture", g.String())
+	}
 	// A notification that came up at night waits for a touch (releaseNotice), but not for one that
 	// stops a ring: that one is for the alarm. The touch that releases it only releases: whoever
 	// touched the screen has not seen the card yet, so it is not a tap on anything.
@@ -1402,6 +1415,12 @@ func (d *Display) gesture(g touch.Gesture) {
 		// what a hand put on an answer to clear it means.
 		if !weatherUp && d.answerUp(time.Now()) {
 			d.clearAnswer()
+			return
+		}
+		// The wake light's page's own button, while the light is coming up before an alarm: a tap on it
+		// leaves that occurrence out, and is the button's whether or not the alarm feature agreed. Only
+		// a button the finished frame drew is one to find, and only while the page is the light's.
+		if idle && !weatherUp && d.sunriseSkipTap(image.Pt(g.X, g.Y), time.Now()) {
 			return
 		}
 		// The wake light's page, held at full after an alarm with nothing ringing: a tap lets it go, as
@@ -2364,6 +2383,7 @@ func (d *Display) Close() error {
 // on or the volume is showing, and at once when something changes.
 func (d *Display) Run(ctx context.Context) error {
 	go d.settle(ctx)
+	go d.watchCalendarLists(ctx)
 	defer func() {
 		if d.boost.on {
 			d.boost.set(false)
@@ -2518,7 +2538,7 @@ func (d *Display) frame() (next time.Duration) {
 		video.Get().Covered(false)
 		d.videoPainting, d.vp.dark, d.videoOver = true, true, image.Rectangle{}
 	}
-	if !on && camstream.Watching() {
+	if !on && watched() {
 		// Dark, with the camera watched over the network: the dot that says so, alone on black (not a
 		// video's last frame), at the panel's lowest light (relight), so the room can tell. Looked at
 		// again until the watching ends.
@@ -2678,7 +2698,7 @@ func (d *Display) frame() (next time.Duration) {
 		}
 		d.mu.Unlock()
 	}
-	s.streaming = camstream.Watching()
+	s.streaming, s.listening = camstream.Watching(), babymon.Listening()
 	s.camera, s.showCamera = home.Get().Camera()
 	s.camera, s.showCamera = d.gateCamera(s.camera, s.showCamera, nightNow(now))
 	s.cameraSound, s.cameraSoundLive = home.Get().CameraSoundOn(), home.Get().CameraSoundLive()
@@ -2698,6 +2718,7 @@ func (d *Display) frame() (next time.Duration) {
 	// A page Home Assistant asked for at night is shown on the night light, not under the red clock.
 	s.redClock = d.nightGlow && config.Get().Screen.NightRed && !d.askedUp(now)
 	s.redStyle = config.Get().Screen.NightClockStyle
+	s.nightInfo = s.redClock && config.Get().Screen.NightInfo
 	s.nightDim = d.nightGlow
 	d.mu.Unlock()
 	s.camtest = d.cameraTestView(now)
@@ -2709,6 +2730,9 @@ func (d *Display) frame() (next time.Duration) {
 		d.mu.Lock()
 		d.callees = s.callees
 		d.mu.Unlock()
+	}
+	if s.showDrawer && s.drawerTab == drawerTodo {
+		s.todo = todoSections()
 	}
 	if (s.showDrawer && s.drawerTab == drawerRadio) || wants {
 		s.radio = home.Get().Radio()
@@ -2827,6 +2851,10 @@ func (d *Display) frame() (next time.Duration) {
 	// The clock's next-up card, only for a frame that draws the clock with an empty glance strip.
 	if boring && s.sunrise == 0 && !s.redClock && len(s.glance) == 0 {
 		s.nextUp = d.nextUp.card(s.style.style(), now)
+	} else if boring && s.nightInfo && len(s.glance) == 0 {
+		// The night clock with Night clock shows Next up and notifications: the card, whatever clock
+		// style the day uses (night_info.go).
+		s.nextUp = d.nextUp.card(nightInfoStyle, now)
 	}
 	if boring && !idleSince.IsZero() && now.Sub(idleSince) >= wait {
 		s.slideshowScreensaver = d.saverSized.of(home.Get().SlideshowScreensaverPhoto(), d.r.w, d.r.h)

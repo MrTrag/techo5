@@ -43,6 +43,7 @@ var shade = color.RGBA{0x00, 0x00, 0x00, 0x90}
 // scene is one frame's worth of facts.
 type scene struct {
 	streaming bool // the camera is being streamed (feature/camstream)
+	listening bool // the room is being listened to in a browser (feature/babymon)
 
 	now     time.Time
 	phase   string  // idle, listening, thinking, replying, lingering
@@ -84,6 +85,7 @@ type scene struct {
 	dashColor   *dashboard.LightColor // the color sheet over the page, while it is up
 	dashMedia   *mediaView            // the media sheet over the page, while it is up
 	dashClimate *climateView          // the thermostat sheet over the page, while it is up
+	dashFan     *fanView              // the fan sheet over the page, while it is up
 	// The Tessera layout, when that is the dashboard: whether Tessera screen is on, and the page shown.
 	tessera  tessera.View
 	tessOn   bool
@@ -170,6 +172,9 @@ type scene struct {
 	// redClock is the night light as the red clock alone, in redStyle (render_night.go).
 	redClock bool
 	redStyle string
+	// nightInfo adds the Next up card, the glance chips and a notification to the red clock, drawn in the
+	// night's palette (render_night_info.go).
+	nightInfo bool
 
 	// demo puts placeholders in for the owner's details, for screenshots that will be published.
 	demo bool
@@ -201,6 +206,9 @@ type scene struct {
 	// callees are who the drawer's Call tab offers; callButton is the clock's Call button showing.
 	callees    []phone.Callee
 	callButton bool
+
+	// todo are the lists the drawer's To-do tab shows (todo.go).
+	todo []todoSection
 
 	// sky is the forecast page's weather moving (weatherfx.go), fxNone for a still one.
 	sky skyFx
@@ -285,8 +293,10 @@ type scene struct {
 // renderer draws scenes onto one canvas. Faces are made once: parsing a font is cheap, but
 // building a face at each size is not something to do per frame.
 type renderer struct {
-	paint        // the canvas, its size, and the settings screen's tap zones
-	climateParts // the thermostat sheet's, where it was last drawn (climate_sheet.go)
+	nightBuf     *image.RGBA // the night layer kept between frames (nightLayerFor)
+	paint                    // the canvas, its size, and the settings screen's tap zones
+	climateParts             // the thermostat sheet's, where it was last drawn (climate_sheet.go)
+	fanParts                 // the fan sheet's, where it was last drawn (fan_sheet.go)
 	// glow is the Glow style's images, kept between frames (glow.go).
 	glow glowBuffers
 	// nixie is the Nixie style's tubes, kept between frames (nixie.go).
@@ -329,6 +339,15 @@ type renderer struct {
 
 	// wb is the wave turn screen's working memory, made the first time it is drawn.
 	wb *waveBuf
+
+	// skipDrawn and skipDrawnOffer are the light before an alarm's button as the frame in hand draws
+	// it, by the drawing goroutine alone; skipAt and skipShown are the finished frame's, what a finger
+	// acts on, under skipMu (sunrise_skip.go).
+	skipMu         sync.Mutex
+	skipDrawn      image.Rectangle
+	skipDrawnOffer skipOffer
+	skipAt         image.Rectangle
+	skipShown      skipOffer
 
 	// rainbow is the Rainbow turn screen, kept between frames, and the page under it, kept while it
 	// does not change (render_rainbow.go).
@@ -506,6 +525,11 @@ func (r *renderer) useFont() {
 func (r *renderer) draw(s scene) {
 	r.useFont()
 	r.marked, r.footAt, r.lcarsDrawn = false, 0, false
+	// The button offered by the frame before is not this frame's, whatever this one does: every return
+	// below, the early ones of a video and of Rainbow's kept page alike, publishes the frame as it was
+	// drawn (publishSkip, registered before the overlays' own defers so it runs after them).
+	r.skipDrawn, r.skipDrawnOffer = image.Rectangle{}, skipOffer{}
+	defer r.publishSkip(s)
 	defer r.streamingDot(s)  // over everything, the update overlay included: deferred first, drawn last
 	defer r.updateOverlay(s) // Draw update overlay at the end of frame using defer
 

@@ -124,6 +124,8 @@ func categoryRows(sv sheetView) (rows []settingRow, note string) {
 					rows = append(rows, settingRow{id: "nightglow", label: tr("night_clock_brightness"), sub: tr("shown_as_you_change_it_at_night"),
 						kind: ctlStepper, value: fmt.Sprintf(tr("level_of"), glowLevelSet(), len(glowSteps))})
 				}
+				rows = append(rows, settingRow{id: "nightinfo", label: tr("night_clock_next_up_and_alerts"),
+					sub: tr("dim_red_and_no_brighter"), kind: ctlToggle, on: config.Get().Screen.NightInfo})
 			}
 			if hasNightTap && config.Get().Screen.NightLight {
 				rows = append(rows, settingRow{id: "nighttap", label: tr("tap_lifts_the_night_light"),
@@ -203,6 +205,8 @@ func categoryRows(sv sheetView) (rows []settingRow, note string) {
 		// The speaker first, then each group under its name: what is changed most near the top.
 		rows := []settingRow{
 			{id: "volume", label: tr("volume"), kind: ctlStepper, value: fmt.Sprintf(tr("level_of"), st.volume, sheetVolumeSteps)},
+			{id: "voicevol", label: tr("ui_voice_volume"), sub: tr("replies_and_announcements"), kind: ctlStepper, value: offsetText(config.Get().Speaker.VoiceOffset)},
+			{id: "callvol", label: tr("ui_call_volume"), sub: tr("ui_steps_from_the_volume"), kind: ctlStepper, value: offsetText(config.Get().Speaker.CallOffset)},
 			{id: "bass", label: tr("bass"), sub: toneSub(), kind: ctlStepper, value: toneValue(config.Get().Speaker.Bass)},
 			{id: "treble", label: tr("treble"), kind: ctlStepper, value: toneValue(config.Get().Speaker.Treble)},
 		}
@@ -260,6 +264,15 @@ func categoryRows(sv sheetView) (rows []settingRow, note string) {
 		return generalRows(sv), ""
 	}
 	return nil, ""
+}
+
+// btStatus is what the Bluetooth audio feature says it is doing, in the screen's language when it is
+// the plain "Not connected" it starts out with; its other lines are about a pairing and stay as sent.
+func btStatus(s string) string {
+	if s == "Not connected" {
+		return tr("not_connected")
+	}
+	return s
 }
 
 // withStreaming adds AirPlay and Spotify Connect to the Sound card's rows, where the device has them
@@ -338,6 +351,8 @@ func securityRows(sv sheetView) []settingRow {
 	if layout.HasMicrophone() {
 		rows = append(rows, settingRow{id: "takes", label: tr("record_takes_of_a_word"), sub: tr("on_the_setup_page_started_here"),
 			kind: ctlToggle, on: sec.Takes})
+		rows = append(rows, settingRow{id: "baby", label: tr("baby_monitor"), sub: tr("room_sound_in_a_browser_with_the_link"),
+			kind: ctlToggle, on: sec.Baby})
 	}
 	return append(rows,
 		setupRow(st.demo),
@@ -370,7 +385,7 @@ func generalRows(sv sheetView) []settingRow {
 		settingRow{id: "weather", label: tr("weather"), sub: tr("shown_with_the_clock"), kind: ctlChoice, value: st.weather, button: tr("ui_show")},
 		settingRow{id: "timezone", label: tr("time_zone"), sub: zoneSub(), kind: ctlChoice, value: zoneValue()},
 		settingRow{id: "screenlang", label: tr("screen_language"), sub: tr("its_dates_its_weather_and_what_it_listens_for"),
-			kind: ctlChoice, value: langOptions[langIndex()]},
+			kind: ctlChoice, value: langLabels()[langIndex()]},
 		updates,
 		settingRow{label: tr("about"), kind: ctlValue, value: deviceModel + " · slot " + st.slot},
 		restart,
@@ -406,16 +421,16 @@ func connectionRows(sv sheetView) []settingRow {
 	case !bt.Available:
 		rows = append(rows, settingRow{label: tr("bluetooth_audio"), sub: tr("not_available_on_this_build"), kind: ctlValue})
 	case bt.Connected != "":
-		rows = append(rows, settingRow{id: "bt", label: bt.Connected, sub: cmpOr(bt.Status, tr("ui_bluetooth_audio_connected")), kind: ctlButton, button: tr("ui_disconnect")})
+		rows = append(rows, settingRow{id: "bt", label: bt.Connected, sub: cmpOr(btStatus(bt.Status), tr("ui_bluetooth_audio_connected")), kind: ctlButton, button: tr("ui_disconnect")})
 	case bt.Remembered != "":
 		// What it is doing, while it does something; otherwise plainly not connected.
 		row := settingRow{id: "bt", label: bt.Remembered, sub: tr("bluetooth_audio"), kind: ctlButton, value: tr("not_connected"), button: tr("connect")}
 		if bt.Status != "" {
-			row.sub, row.value = bt.Status, ""
+			row.sub, row.value = btStatus(bt.Status), ""
 		}
 		rows = append(rows, row)
 	default:
-		rows = append(rows, settingRow{label: tr("bluetooth_audio"), sub: cmpOr(bt.Status, tr("ui_earbuds_or_a_speaker")), kind: ctlValue, value: tr("ui_none_yet")})
+		rows = append(rows, settingRow{label: tr("bluetooth_audio"), sub: cmpOr(btStatus(bt.Status), tr("ui_earbuds_or_a_speaker")), kind: ctlValue, value: tr("ui_none_yet")})
 	}
 	if name := cmpOr(bt.Connected, bt.Remembered); bt.Available && name != "" {
 		rows = append(rows, forgetRow(sv, name))
@@ -767,7 +782,7 @@ func pickerForRaw(id string, sv sheetView) (pickerView, bool) {
 		p := followPicker(sv.st.demo)
 		return p, len(p.opts) > 0
 	case "screenlang":
-		return pickerView{title: tr("screen_language"), opts: langOptions, cur: langIndex()}, true
+		return pickerView{title: tr("screen_language"), opts: langLabels(), cur: langIndex()}, true
 	case "newtimer":
 		return pickerView{title: tr("new_timer"), opts: timerLabels(), cur: -1}, true
 	case "sleep":
@@ -1122,6 +1137,8 @@ func (d *Display) rowTap(id string, p part, opt int) {
 		home.Get().SetCameraSound(!home.CameraSound())
 	case "lyrics":
 		safe.Go("lyrics from the screen", func() { home.Get().SetLyricsOn(!home.LyricsOn()) })
+	case "nightinfo":
+		d.setNightInfo(!config.Get().Screen.NightInfo)
 	case "nighttap":
 		d.setNightTapLifts(!config.Get().Screen.NightTapLifts)
 	case "roomlights":
@@ -1142,6 +1159,22 @@ func (d *Display) rowTap(id string, p part, opt int) {
 			media.Get().Adjust(-1)
 		case partPlus:
 			media.Get().Adjust(+1)
+		}
+	case "voicevol":
+		n := media.Get().VoiceOffset()
+		switch p {
+		case partMinus:
+			media.Get().SetVoiceOffset(n - 1)
+		case partPlus:
+			media.Get().SetVoiceOffset(n + 1)
+		}
+	case "callvol":
+		n := media.Get().CallOffset()
+		switch p {
+		case partMinus:
+			media.Get().SetCallOffset(n - 1)
+		case partPlus:
+			media.Get().SetCallOffset(n + 1)
 		}
 	case "mic":
 		mute.Get().Flip()
@@ -1226,6 +1259,8 @@ func (d *Display) rowTap(id string, p part, opt int) {
 		security.Get().SetTalkBack(!config.Get().Security.TalkBack)
 	case "takes":
 		security.Get().SetTakes(!config.Get().Security.Takes)
+	case "baby":
+		security.Get().SetBaby(!config.Get().Security.Baby)
 	case "airplay":
 		streaming.Get().SetAirPlay(!config.Get().Streaming.AirPlay)
 	case "airplay2":

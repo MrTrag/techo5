@@ -286,6 +286,8 @@ type conversation struct {
 	// not asked about every couple of seconds, and starts again from a wake that was real.
 	nextConfirm time.Time
 	confirmGap  time.Duration
+	// unheard is how many wakes in a row Home Assistant was asked about and did not hear (unheardWarn).
+	unheard int
 
 	// busyAt is the last time the microphones were seen to be somebody else's, while confirming is on.
 	// What is asked about includes the two seconds before the wake, which must not be a call's.
@@ -648,7 +650,7 @@ func (c *conversation) turnEvent(e event) {
 		// The turn has to be claimed before the audio arrives: Home Assistant closes the run as soon
 		// as it has handed over the text, and a turn still only thinking would take that as the end
 		// and go idle, discarding everything that followed.
-		if c.phase != phaseIdle && !c.reply.own && wakeword.Delivery(c.slot) == config.DeliveryStream {
+		if c.phase != phaseIdle && !c.reply.own && wakeword.Delivery(c.slot) == config.DeliveryStream && replyPlayer() == "" {
 			c.speak("")
 		}
 
@@ -663,7 +665,8 @@ func (c *conversation) turnEvent(e event) {
 		if c.phase == phaseIdle || c.reply.own {
 			return
 		}
-		if wakeword.Delivery(c.slot) == config.DeliveryStream {
+		// A player chosen for replies needs the url, whatever the slot's setting is.
+		if wakeword.Delivery(c.slot) == config.DeliveryStream && replyPlayer() == "" {
 			return
 		}
 		c.speak(e.url)
@@ -1064,6 +1067,9 @@ func (c *conversation) think() {
 	c.stopStreaming()
 	c.enter(phaseThinking)
 	c.arm(wakeword.MaxThink(c.slot))
+	if !config.Quiet() {
+		speaker.Sound().Chime(speaker.ListenEndSound())
+	}
 
 	c.showPhase(wakeword.ThinkingEffect(c.slot))
 }
@@ -1081,6 +1087,9 @@ func (c *conversation) speak(url string) {
 	c.respond(r, func(ctx context.Context, p *speaker.Player, playing func()) error {
 		if r.stream != nil {
 			return r.stream.play(ctx, p, playing)
+		}
+		if c.playElsewhere(ctx, url, playing) {
+			return nil
 		}
 		return c.play(ctx, url, playing, phone.RepliesIntoCall())
 	})
@@ -1460,17 +1469,92 @@ func (c *conversation) stopStreaming() {
 func (c *conversation) stream(ctx context.Context, be backend, slot int, followUp, continued bool, id, named string, waited time.Duration) {
 	frames, pre, unlisten := c.source.ListenHistory("turn", mic.History+waited)
 	defer unlisten()
+	hold := holdsForTone(slot, followUp)
+	slog.Info("turn: wake sound", "tone", wakeword.Tones(slot, followUp), "held", hold, "history_ms", len(pre)*1000/mic.Rate)
+	c.pump(ctx, be, slot, followUp, continued, hold, id, named, pre, frames)
+}
 
+// holdsForTone is whether a turn keeps the microphones from its wake sound, as it did before the
+// echo canceller was trusted with it. The canceller removes the sound, so with it on the microphones
+// stay open and the words that follow the wake word are sent. With it off nothing takes the sound out
+// of the microphones, a speaker a few centimeters from them is loud, and the turn waits out the sound
+// and sends no history, which holds the wake word and the sound rather than the request.
+func holdsForTone(slot int, followUp bool) bool {
+	return wakeword.Tones(slot, followUp) && !config.Get().Microphone.Cancel
+}
+
+// clock is the time the turn's wake sound is measured by; a test replaces it.
+var clock = time.Now
+
+// saidQuiet is how long nothing near the speaker's level has to be heard, after the wake sound, before
+// a request heard inside the sound is taken as the whole of it, in windows: longer than the pause of
+// someone who waited for the sound and then thought what to ask.
+const saidQuiet = 30
+
+// saidOff is how far below the loudest window inside the sound a window after it still counts as
+// someone talking, for saidCheck: well under the detector's own Off, since that loudest window is
+// often the end of the wake word or what the canceller left of the sound, and a request from across
+// the room is far softer than either. A room's own noise is softer again.
+const saidOff = 0.1
+
+// saidCheck ends a turn whose request was said inside the wake sound (pump). Off is the level a window
+// after the sound has to reach to count as someone talking, from what was heard inside it; zero when
+// nothing was, and it never ends anything.
+type saidCheck struct {
+	off, peak float64
+
+	sum   float64 // squares in the window being filled
+	n     int
+	quiet int // windows in a row below off
+}
+
+// watch takes what follows the sound and reports whether the request was already said.
+func (s *saidCheck) watch(frame []int16) bool {
+	if s.off == 0 {
+		return false
+	}
+	for _, v := range frame {
+		s.sum += float64(v) * float64(v)
+		s.n++
+		if s.n < endpoint.Window {
+			continue
+		}
+		rms := math.Sqrt(s.sum / endpoint.Window)
+		s.sum, s.n = 0, 0
+		if rms >= s.off {
+			s.quiet = 0
+			continue
+		}
+		if s.quiet++; s.quiet >= saidQuiet {
+			slog.Info("turn: request heard inside the wake sound", "peak", math.Round(s.peak))
+			s.off = 0
+			return true
+		}
+	}
+	return false
+}
+
+// toneEnds is how long after a turn opens its wake sound is loud enough to matter to the microphones.
+// named is the named wake sound that played, if one did (jarvis), which is a good deal longer than a
+// tone.
+func toneEnds(slot int, followUp bool, named string) time.Duration {
+	return wakeword.ChimeLengthNamed(slot, followUp, named) + speaker.HardwareTail
+}
+
+// pump sends the history and then the frames to the backend until it is told to stop. hold is
+// holdsForTone.
+func (c *conversation) pump(ctx context.Context, be backend, slot int, followUp, continued, hold bool, id, named string, pre []int16, frames <-chan []int16) {
 	buf := make([]byte, 0, mic.FrameSamples*2)
 
 	// Send what was already said before this turn began. The wake word can only be recognized after
 	// it has been spoken, and people run straight on into the request, so the opening words exist only
 	// in the microphone's history. History and subscription share one capture boundary.
 	//
-	// A slot that chimes does not send it: whoever is talking waits for the tone, so the history holds
-	// the wake word rather than the request, and the tone itself is louder at the array than they are.
-	// That is as true of a wake Home Assistant's engine heard.
-	if wakeword.Tones(slot, followUp) {
+	// With a tone and no echo canceller it is not sent: whoever is talking waits for the tone, so the
+	// history holds the wake word rather than the request, and the tone itself is louder at the array
+	// than they are (holdsForTone). With the canceller the tone is taken out of what is sent, and the
+	// history reaches back to the end of the wake word whether or not there is one.
+	if hold {
 		pre = nil
 	}
 
@@ -1489,9 +1573,41 @@ func (c *conversation) stream(ctx context.Context, be backend, slot int, followU
 	ep := endpoint.New(endpointSettings())
 	var sent int
 	var endpointAt float64
+	// A tone that is not held back plays into the stream, and its fade is what the canceller leaves.
+	// The detector measures against the loudest thing it hears, so it would take that for the speaker
+	// and end the turn on the quiet after it; and the wake word at the front of the history, with the
+	// pause people leave for the tone, would do the same. It starts listening once the tone is done,
+	// and what is sent before then is only for speech recognition.
+	//
+	// A request said in one breath fits inside that time, though, so the detector still watches until
+	// then, counting speech but unable to end the turn. When the sound is over a fresh one takes over
+	// either way: the end of the wake word and the sound alone count as speech, and keeping them would
+	// end the turn in the pause of someone waiting for the sound. If the watching one heard speech, the
+	// turn also ends once nothing near it has been heard for saidQuiet: a request said inside the
+	// sound, or running just past it, that the fresh detector heard too little of to decide on.
+	var deafUntil time.Time
+	if tone := wakeword.Tones(slot, followUp); tone && !hold {
+		deafUntil = clock().Add(toneEnds(slot, followUp, named))
+		ep.Hold(true)
+	}
+	watching := !deafUntil.IsZero()
+	var said saidCheck
 	see := func(frame []int16) {
 		sent += len(frame)
-		if endpointAt == 0 && ep.Feed(frame) {
+		if watching && !clock().Before(deafUntil) {
+			watching = false
+			// After a wake word only: a follow-up opens on the reply's own tail and its sound, which are
+			// not a request.
+			if peak, _, speech := ep.Heard(); speech >= ep.Settings().Speech && !followUp {
+				said = saidCheck{off: saidOff * peak, peak: peak}
+			}
+			ep = endpoint.New(endpointSettings())
+		}
+		ended := ep.Feed(frame)
+		if !watching && said.watch(frame) {
+			ended = true
+		}
+		if endpointAt == 0 && ended {
 			endpointAt = float64(sent) / float64(mic.Rate)
 			// What the decision was made on, not just that it was made: the loudest window of the
 			// turn (usually the wake word), the level a window had to fall below to count as quiet,
@@ -1523,20 +1639,19 @@ func (c *conversation) stream(ctx context.Context, be backend, slot int, followU
 		for _, s := range pre {
 			buf = append(buf, byte(s), byte(s>>8))
 		}
-		recording.Get().Frame(buf)
-
+		// Not recorded: the recording opened on the microphone's two seconds, and this is the end of them.
 		c.sendAudio(be, buf)
 		slog.Debug("sent audio history", "ms", len(pre)*1000/mic.Rate)
 	}
 
 	// What the microphone actually sends is the input to speech recognition, and a quiet or clipped
 	// stream explains a bad transcript better than anything downstream does.
-	// The tone plays as the turn opens and is louder at the array than a talker across the room, so
-	// nothing is sent while it is sounding. What the speaker still has queued says when that is, and
-	// hardwareTail is what the driver holds after the queue runs out.
+	// Without the canceller the tone plays as the turn opens and is louder at the array than a talker
+	// across the room, so nothing is sent while it is sounding. What the speaker still has queued says
+	// when that is, and hardwareTail is what the driver holds after the queue runs out.
 	var sounding time.Time
-	if wakeword.Tones(slot, followUp) {
-		sounding = time.Now().Add(wakeword.ChimeLengthNamed(slot, followUp, named) + speaker.HardwareTail)
+	if hold {
+		sounding = time.Now().Add(toneEnds(slot, followUp, named))
 	}
 	var held int
 

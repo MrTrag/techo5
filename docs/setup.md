@@ -458,8 +458,12 @@ captured login to the same page for a few minutes, and could see the pictures an
   reach those devices. With it on, Home Assistant may route any such device through this one
   whenever it hears it best, and many BLE devices take one connection only, so leave it off unless a
   device needs it. Connections end when Home Assistant disconnects or either switch is turned off.
-  Scanning pauses for the second or two a connection takes. Pairing (bonding) and clearing the cache
-  from Home Assistant are not offered; devices that authenticate in their own protocol work. Tried on
+  Pairing is supported too: a device that must be bonded before it works, such as a Philips Hue
+  Bluetooth bulb, can be paired and unpaired from Home Assistant through the device, with no code to
+  enter. Only that device is bonded or forgotten; the phones and speakers paired to the device are not
+  touched. Cache clearing is not supported.
+  Scanning pauses for the second or two a connection takes. Pairing is offered, as above;
+  clearing the cache from Home Assistant is not. Devices that authenticate in their own protocol work. Tried on
   a Spot with a Boneco H400 through the Boneco integration; the Show has not made an LE connection yet.
 - **Bluetooth, the rest of it.** A phone playing to the device has one volume, the device's: its
   volume slider moves the device's volume, and the device's buttons and Home Assistant move the
@@ -499,9 +503,9 @@ captured login to the same page for a few minutes, and could see the pictures an
   Bluetooth Secure Connections.** Some newer phones do that with it on (a POCO F8 Pro on Android 16,
   #183); with it off they pair the older way and stay. What it costs: a phone set to pair
   only with Secure Connections cannot pair at all, and Low Energy pairing falls back to the older,
-  weaker kind too. The device itself pairs only over classic Bluetooth (speakers, earbuds and phones
-  playing to it), and the Bluetooth proxy never pairs, its connections included, so nothing of
-  the device's own uses LE pairing. Changing it turns Bluetooth off and on again: whatever is connected drops for a moment and
+  weaker kind too. The device's own pairings (speakers, earbuds and phones playing to it) are
+  classic Bluetooth only, so none of them uses LE pairing. The Bluetooth proxy's pairing of other
+  devices at Home Assistant's request is separate and not affected. Changing it turns Bluetooth off and on again: whatever is connected drops for a moment and
   may need connecting again. It is this device's own, never shared with the other devices or carried
   by a settings file. The 2nd gen Show 8 on TECHO5's own kernel has it off already, and no switch.
 - **Radio.** The Radio drawer and its favorites are set with
@@ -549,9 +553,29 @@ captured login to the same page for a few minutes, and could see the pictures an
 - **Sleep timer** (Settings > Sound, or the **Sleep timer** select in Home Assistant): whatever is
   playing stops after 15 minutes to 2 hours. Nothing rings when it does. It isn't kept over a
   restart, so a device that restarts in the night comes back quiet.
+- **Clearer speech** (a switch in Home Assistant, off by default): while a reply or an announcement
+  plays, the speaker's tuning takes its bass lift down, so words come through with less boom. Music
+  keeps the full tuning. It needs **Speaker EQ** on. On a Dot 2nd generation it can also let you use
+  **Speaker gain** for louder replies without the bass distorting.
 - **Bass and treble** (Settings > Sound, or **Bass** and **Treble** in Home Assistant): -6 to +6 dB
   each. They change the speaker's own tuning, so they need **Speaker EQ** on, a switch in Home
   Assistant that is on unless you turn it off.
+- **LED ring** (Echo Dot 2nd and 3rd generation and Echo 2nd generation): a light in Home Assistant,
+  under the device's configuration. Assist leaves it alone unless you expose it (**Settings → Voice
+  assistants → Expose**), so "lights on" in its room doesn't light the ring too. A Home Assistant that
+  already had it exposed keeps it that way until you change it there.
+- **Light ring that follows the music** (Echo Dot 2nd and 3rd generation and Echo 2nd generation, in
+  Home Assistant): choose **Follows the Music** in **Ring follows the room**, the same select that
+  lights the ring from the sound of the room. While music plays (music, radio, AirPlay, Spotify or
+  Sendspin) the ring gets brighter and dimmer with the level, the bass, middle and treble each light a
+  third of the ring, and every beat swells the light and moves the colors on a step. The colors are a
+  calm run of blue, teal, violet and magenta. It listens to what the device plays, not to the
+  microphones, so it follows the music at any volume, and the assistant's replies, alarms and the
+  wake sound do not move it. When nothing plays the ring is dark and shows what it would otherwise:
+  the **LED ring** light as you set it, or nothing. Its brightness follows the **LED ring** light's
+  brightness, so turn that down for a dimmer ring; with that light off it shows at full. A
+  conversation, a muted microphone, a timer or an error covers it as they cover the other choices,
+  and it comes back afterward. The listening takes little of the processor, and **None** stops it.
 
 ## 6. The screen
 
@@ -607,11 +631,30 @@ like "kitchen screen" under its **Voice assistants** settings in Home Assistant.
   press and hold lights it and opens the ring menu; the night clock comes back, or the screen goes off
   again, after a minute and a half. When the night starts, Night clock is chosen, or the settings or
   the menu close, the Spot's night clock comes up after 10 seconds instead. A Spot with no hours set has a night of 10 PM to 7 AM.
+- **Night clock shows Next up and notifications** (a switch in Home Assistant and a row under Display, off
+  at first; it applies when **At night** is the clock alone): by default the night clock is the time
+  alone and a notification waits for the first touch. With the switch on, a Show's night clock also
+  carries the **Next up** card, or the glance chips when there are any, along the foot, and a
+  notification sent at night is drawn on it at once and tapped away as usual. Everything is drawn in the
+  night clock's dim red and the screen never gets brighter than the night light, so nothing lights the
+  room. A picture notification still waits for a touch. A Spot has no Next up card or glance chips, so
+  there the switch covers notifications only: the card takes the round face in dim red, and a tap puts it
+  away and leaves the night clock.
 - **Night warmth** (Show, a switch in Home Assistant, off at first): a warmer, lamp-like white on the
   screen through the night hours. Not on the Spot or the Panel app.
 - **Night mode** switch in Home Assistant: start or end the night now, from a bedtime automation for
   example. Set Night hours to **Controlled by Home Assistant** to leave the night to the switch alone.
   See [Turning the night on from an automation](actions.md#turning-the-night-on-from-an-automation).
+- **Wi-Fi quiet hours** (a switch in Home Assistant, off at first), with **Wi-Fi quiet hours start**
+  and **Wi-Fi quiet hours end** (01:00 to 07:00 until set): for a home that turns its access point
+  off at night. The device leaves the Wi-Fi as the hours start and joins again as they end, instead of
+  joining another network it knows or searching all night. Meanwhile Home Assistant can't reach it and
+  nothing that needs the network works, but alarms and timers set on the device still ring. These
+  hours are separate from Night hours. A device restarted during them, or whose clock isn't set yet,
+  stays on the Wi-Fi. Turned on during the hours, it leaves the Wi-Fi at once, and Home Assistant can't
+  turn it off again until they end: change it on the device's screen or setup page instead. Not in the
+  Panel app, whose Wi-Fi is the tablet's. The device's remote API can read these three settings but not
+  change them, and a settings file neither carries them nor brings them in.
 
 ### Clock and home screen
 
@@ -808,6 +851,12 @@ Assistant.
   of the month.
 - **Next up on the clock**: the next event at the foot of the clock, with its countdown, when the
   glance strip has nothing else to show. A tap opens its day.
+- **Next up within**: how far ahead the next event on the clock looks, and the one after it: *Today
+  or 12 hours* (the default: an event that is on, starts any time today or starts within 12 hours),
+  or *1 hour*, *3 hours*, *6 hours* or *12 hours*. An event that is already on always counts.
+- **Dashboard events**: which events the Dashboard clock style lists: *Coming week* (the default) or
+  *Today only*. With nothing left today, the list says "Nothing else today" (or "Nothing today" on a
+  day that had no events at all).
 - **Weather in the calendar**: the forecast on the days.
 
 **Calendars from Home Assistant.** Every calendar Home Assistant already has is offered here, with
@@ -831,6 +880,28 @@ it had been chosen there.
 With more than one calendar, the chips over the month turn a calendar off or on for this screen:
 its events leave every view, the clock and its event pop-ups. With many calendars, "+N" opens a list
 of them all. That choice stays on the device: it isn't shared or saved in a settings file.
+
+### To-do and shopping lists
+
+The Show, the Skylight and the Panel app can show Home Assistant's to-do lists: the Shopping List
+integration, Local To-do, Google Tasks, Todoist, anything that makes a `todo.` entity. They are off
+until you choose lists. Pick them on the setup page's **Weather & Calendar** tab, under **To-do
+lists**, or with the [`todo_lists` action](actions.md#choose-the-to-do-lists-shown). Each device keeps
+its own, so the kitchen can show the shopping list and a desk the chores.
+
+Once a list is chosen the drawer (swipe in from the right edge) has a **To-do** tab: each list is a
+heading with its open items under it. A tap on an item marks it done in Home Assistant, and it leaves
+the list. Items already done aren't shown. The tab reads each list from Home Assistant with the token
+from [step 1](#1-give-the-device-access-to-home-assistant), reads it again when Home Assistant says it
+changed, and at least once a minute while it is open. The
+[`todo_show` action](actions.md#show-the-to-do-lists) opens it from an automation.
+
+By voice, with Home Assistant's Assist, "add milk to the shopping list" already works: Assist handles
+its lists itself, and nothing here is needed. With the
+[voice assistant without Home Assistant](#voice-without-home-assistant) the device has the same two
+requests of its own, for the lists chosen here: "add milk to the shopping list", and "what's on the
+shopping list". Name the list as Home Assistant does ("shopping" finds "Shopping List"); with one list
+chosen the name can be left out.
 
 ### Fonts of your own
 
@@ -998,6 +1069,27 @@ night volume turns it down, and during quiet hours it cannot turn the device up 
 The Music Assistant volume slider cannot turn the device up past the night volume during quiet hours
 either, but it does not move when night volume turns the device down.
 
+### Voice volume and call volume
+
+The device's **volume** is what the buttons and Home Assistant's media player move, and it is what music
+plays at. Two more levels sit beside it, as steps from the volume (the same 30 steps), so a home can have
+quiet replies over loud music, or the other way round.
+
+- **Voice volume** is for the assistant: replies, announcements (`tts.speak` and the announce action) and
+  what the device says. Never music, and not a camera's own sound, which plays at the volume.
+- **Call volume** is for the intercom and phone calls.
+
+Both are set in Settings → **Sound** on the device, on the setup page (Sound & Voice) and as number
+entities in Home Assistant. **0 is the same as the volume**, which is how a device plays that never
+touched them, so nothing changes until you do. -5 is five steps quieter than the volume, 5 is five steps
+louder. They move with the volume: turn the music up and the replies and calls go up with it, keeping
+the gap. A muted device, or one at volume 0, is silent. In quiet hours a raise stops at the night volume
+(or where the volume already is, if somebody turned it up past that); lowering is never held back. A
+call volume of -30 makes calls inaudible, so keep it above that where calls matter. They are saved over
+a restart, are in a settings file, and are not shared between devices, since how loud a room wants them
+depends on the room. Music stays on the volume itself. Alarms and
+timers keep their own **Ring volume**.
+
 ### Two wake words, two assistants
 
 The device listens for two wake words at once, and each one starts its own voice assistant. Use one
@@ -1103,6 +1195,30 @@ last notification sensor, a mail or feed sensor, a text helper, a calendar. Home
 to the model with the rest of the house when it reads the house's state, which this device does not
 treat as outside words. Do not expose such entities to Assist.
 
+### Replies on another speaker
+
+By default the assistant's replies come out of this device. Under **Replies play on** (Settings, Sound,
+Voice) you can type a Home Assistant media player instead, like `media_player.kitchen_dot`, for a room
+with a better speaker. Each reply is then sent to that player as an announcement, so music there is
+turned down while it speaks and carries on afterwards. The device uses its own Home Assistant access
+for this. Leave the box empty to go back to this device. Anything that is not a `media_player.` id is
+refused.
+
+What goes and what stays:
+
+- Replies from Home Assistant's voice assistant go to the player.
+- The built-in assistant ([Voice without Home Assistant](#voice-without-home-assistant)) and
+  [realtime voice](#realtime-voice) make their audio on this device and have no address to hand over,
+  so their replies stay on this device.
+- This device's own sounds stay on it too: the wake sound, timers, alarms and announcements.
+- If Home Assistant or the player does not take a reply, that reply plays on this device, and the log
+  says so once until it works again.
+
+Listening again after a reply: this device cannot hear when another speaker finishes. It waits for the
+length of the reply plus two seconds, then listens, so a question gets its answer without the wake
+word. If the player is in the same room it may hear the end of the reply: turn continued conversation
+off for that wake word. Saying "stop" silences this device, not the other player.
+
 ### Voice without Home Assistant
 
 The device can answer with no Home Assistant at all: your own speech servers and a chat model of
@@ -1117,16 +1233,17 @@ answer to a text-to-speech server, then out of the speaker as any answer is.
 
 What the model can do is the device's own: start, list and cancel timers; set, list and delete
 alarms and reminders; stop what is ringing or playing; set the volume; find, play and keep radio
-stations; play music from Music Assistant, once one is set up on the device; call another device in
-the house; read the device's calendars and the weather, here or somewhere else; and put the
-forecast, the rain map or the calendar on the screen. It remembers the conversation for five minutes,
+stations; play a news update; play music from Music Assistant, once one is set up on the device; call another device in
+the house; read the device's calendars and the weather, here or somewhere else; add to and read
+the device's [to-do lists](#to-do-and-shopping-lists); and put the forecast, the rain map or the
+calendar on the screen. It remembers the conversation for five minutes,
 for a follow-up. The town set under **Where this device is** goes into what the model is told, so
 its answers and web searches are about your town unless you name another place.
 
 With a [SearXNG](https://github.com/searxng/searxng) server's address it can also look things up on
 the web, like scores, news or opening hours, and read the pages it finds. SearXNG needs its JSON
-format turned on (`search.formats` in its `settings.yml`). Once a request has read the web or a
-calendar, nothing in that request can change anything, so words from outside can't make it act.
+format turned on (`search.formats` in its `settings.yml`). Once a request has read the web, a
+calendar or a to-do list, nothing in that request can change anything, so words from outside can't make it act.
 
 To set it up, open the setup page, **Sound & Voice**, **Voice assistant**:
 
@@ -1140,8 +1257,14 @@ To set it up, open the setup page, **Sound & Voice**, **Voice assistant**:
    too: a [page reader](../tools/page-reader/README.md)'s address. A page is read through it when it
    has almost no text as it comes (it fills itself in with scripts, like a store's hours) or the site
    answers with an error, as some do to anything that is not a browser.
-5. **Anything the assistant should know**: a name, a tone, or what the house wants it to know.
-6. **Save**. All three servers are needed, or the page says so and keeps what you had.
+5. **News updates**, if you want your own. Asked for the news, the assistant plays the newest
+   episode of a short news podcast, one that is put out again every hour or so: "play the Fox news
+   update", "play NPR News Now", "what's the news". ABC News Update, Fox News Hourly Update and NPR
+   News Now are built in. Add others one a line, a name and then the podcast's feed address, like
+   `City Radio https://example.com/news.xml`. The first one you add is the one played when no
+   source is named; with none added, the assistant asks which.
+6. **Anything the assistant should know**: a name, a tone, or what the house wants it to know.
+7. **Save**. All three servers are needed, or the page says so and keeps what you had.
 
 Every wake word is answered this way then, except one set for [realtime voice](#realtime-voice).
 **Answered by** *Home Assistant* puts it back on Assist.
@@ -1386,6 +1509,20 @@ or within a few seconds of the setup page closing, and a download still running 
 come to your browser over the setup page, on your own network without encryption. They are your own
 voices: keep them on your own machine.
 
+### Recent voice requests
+
+The last 10 voice requests the device took are listed on the setup page, under **Sound & Voice**, after
+**Record takes of a word**, on a device with microphones. Newest first, each line shows the time, which
+assistant (slot) answered, the wake word's score, what was heard, the reply, how it ended (completed,
+stopped, interrupted, cut_off or answered_elsewhere, or no_speech or error), and how long listening,
+thinking and replying took, where the device has those times. Refresh brings it up to date, and Clear
+empties it.
+
+It is kept only in memory: never written to storage, never in the diagnostics download, never sent
+anywhere, and gone when the device restarts. It is filled from the same place as the
+`esphome.techo5_voice` event, so it matches it, and it follows **Send voice text**: with that off, the
+words are not kept here either, and the lines say so. A device without microphones doesn't have it.
+
 ### Wake word on Home Assistant
 
 The device listens for the wake word itself. Two switches on the device in Home Assistant let Home
@@ -1400,8 +1537,9 @@ Voice assistants). Home Assistant listens for one wake word per voice assistant.
 - **Wake word on Home Assistant**: while the device is idle, it sends its microphone audio to Home
   Assistant all the time, and Home Assistant's engine listens for the wake word too. It uses the first
   voice assistant's wake word. When Home Assistant hears it, the device chimes and the request goes on
-  as usual, with no extra delay. Wait for the chime before you speak, as with the device's own wake
-  word. The device's own wake words still work alongside: a wake the device hears itself first closes
+  as usual, with no extra delay. You can speak right after the wake word, without waiting for the
+  chime, as with the device's own wake word. The device's own wake words still work alongside: a wake
+  the device hears itself first closes
   the stream, which can add up to about a second before the chime, and a word both hear opens one
   request. After a request, an announcement or a question from Home Assistant, the stream starts again
   on its own.
@@ -1435,6 +1573,11 @@ What to know before turning them on:
   engine), the device goes back to listening for itself and tries Home Assistant again later.
 - Confirm does nothing while Wake word on Home Assistant is on, since Home Assistant is already
   listening.
+- **If Home Assistant never confirms a wake**, check the wake word in each voice assistant (**Settings →
+  Voice assistants**). One saved with an older version of the engine can have an ID the engine no
+  longer lists, such as `hey_jarvis_v0.1` where it now lists `hey_jarvis`. Home Assistant shows no
+  error for it and answers no to every check. Pick the wake word again from the list. After 10 checks
+  in a row that Home Assistant didn't hear, the device's log says so.
 
 ### The nearest device answers
 
@@ -1449,6 +1592,7 @@ phrase, 16 characters or more: anything on the network that hears the devices ca
 fits. The house word is case-sensitive: it has to match exactly, capitals included. When another device refuses this one's
 announcements for having a different word, the setup page names it next to the house word for an
 hour, and the log says so.
+With the switch on and no house word, the setup page and the device's log say it is doing nothing.
 
 How clearly is how far the wake word stood out from that device's own room, so a device with hotter
 microphones or in a louder room does not win for that alone. Nothing you say during the wait is
@@ -1492,18 +1636,39 @@ Or copy a WAVE file named for the sound into the device's sounds folder over SSH
 | `timer_finished.wav` | a finished timer, and the Home Assistant alarm sound |
 | `alarm.wav` | an alarm, where **Alarm sound** is **Your own** (without one it rings with the Home Assistant sound) |
 | `mute_switch_on.wav`, `mute_switch_off.wav` | muting and unmuting the microphones |
+| `listening_ended.wav` | the moment the device stops listening and waits for the answer (silent without one) |
+| `button_press.wav` | a button held (the mute button's hold) |
+| `volume_change.wav` | each press of volume up or down |
+| `bluetooth_connected.wav` | a Bluetooth device connecting |
+| `drop_in.wav` | the chime before a Drop In opens a room's microphones |
 
 The timer and mute files play where **Home Assistant sounds** is on, and an alarm set to the
 Home Assistant sound plays `timer_finished.wav` either way. A file has to be 16-bit, at
 48 kHz, mono or stereo, and at most 10 seconds long. It plays at the level it was recorded at, as the
-stock sounds do. Keep the wake sound short: the device listens for the request only once the wake
-sound fades, so a long one cuts off the first words. The wake word is not acted on while the unmute
+stock sounds do. The microphones stay open while the wake sound plays, and echo cancellation takes most
+of the sound out of what is sent, so words said straight after the wake word are kept. Some of a loud or
+long wake sound can still reach speech-to-text, mostly in the first request after a restart, before the
+canceller has learned the speaker, so a short, quiet wake sound works best. If you turn **Microphone
+echo cancellation** off, the device goes back to waiting for the wake sound to fade before it listens,
+and a long one then cuts off the first words. The wake word is not acted on while the unmute
 sound plays and for a moment after, so the device does not take its own sound for the word: a long
 `mute_switch_off.wav` keeps it deaf for as long. ffmpeg converts anything else:
 
 ```sh
 ffmpeg -i chime.flac -ac 1 -ar 48000 -c:a pcm_s16le wake_word_triggered.wav
 ```
+
+The volume, button, Bluetooth, listening-ended and Drop In sounds are quick, so they may be at most
+2 seconds long; the others keep 10 seconds. A sound that is too long is refused with the reason.
+The wake sound is the one for **Wake sound: Home Assistant** on each assistant; the built-in tones
+(chirp, ding, rise) stay as they are.
+
+**Sound packs** keep all of this together. **Save sound pack** (under **Sounds of your own**)
+downloads one `sounds.soundpack` file holding every sound of your own, and **Load sound pack** puts
+the sounds from such a file on a device. A pack holds sounds only: no settings and nothing private. Loading
+checks every sound the way an upload is checked, and refuses the whole pack if anything is wrong
+or if it holds anything else (other file types, folders, paths, or more than 12 MB). The sounds a
+pack does not hold stay as they are.
 
 A new or changed file plays the next time its sound does, with no restart, and deleting it brings the
 stock sound back. A file the device cannot play leaves the stock sound playing, and the log says why.
@@ -1549,6 +1714,14 @@ the light is held keeps it off until that light is over or the next alarm rings.
 brightness** (percent) and **Wake light color** (like `#ff9b1a`, empty while off) show it in Home
 Assistant, for room lights to follow; see [docs/actions.md](actions.md#follow-the-wake-light).
 
+**Skip** on the light's page, on a Show, leaves that one occurrence out while the light is coming up
+before a normal repeating alarm: the alarm keeps its on/off and its days, and its next morning is its
+usual one. A light-only alarm is not offered it — its light is all it is — and neither is a one-off,
+a reminder or a silent alarm. The press is answered on the device by a card that names the alarm and
+says what came of it and which moment it was about, shown at night as soon as the press releases it;
+Home Assistant hears nothing of that card, which is the device's own. The skip stays through a restart,
+isn't saved in a settings file, and goes when the alarm is deleted.
+
 **Light only** in an alarm's editor (and on the setup page) makes it a wake light and nothing more:
 the light comes up as above, and at the alarm's time there is no sound and nothing to dismiss; the
 night ends instead, so the screen is back as by day until the night hours next start. The light
@@ -1584,6 +1757,39 @@ and **Delay and sum** read a steady room lower than **Center mic** does, and **B
 on some devices) leans toward the loudest thing in the room. Set both first, then watch the sensor
 for a day to learn your room's quiet and loud readings. Sound from another speaker in the room
 counts, like any other noise.
+
+### The baby monitor
+
+**Baby monitor** (a switch under Privacy & Security on a Show's or a Spot's screen, and in Home
+Assistant on every device with microphones; off on a new device) plays the room's sound, live, in a
+browser on your home network. It is for listening to a nursery or a sickroom from a phone in the next
+room. A Skylight Calendar has no microphone and does not offer it.
+
+**Who can hear.** Only a browser that has the link, on your own network. Turn the switch on and the
+setup page shows the link under Privacy & Security, **Baby monitor**: this device's address and `/baby`,
+with a long random key in it (128 random bits, which nobody can guess). Open it on a phone or computer
+and tap **Tap to listen** (a browser plays sound only after a tap). It works in Safari on an iPhone, in
+Chrome and in Firefox, with no app, but only while the page is open on the screen: a phone that locks
+or a tab left for another stops the sound. To listen through the night, keep the screen on and the
+phone charging, or use a computer or tablet that stays awake. Back on the page, the sound comes back by
+itself. Keep the link private, as you would a password: anyone who has it
+can listen while the switch is on. **New link** on the setup page replaces the key, ends everyone
+listening and stops the old link working. The link is on your network without encryption, as the setup
+page is, so use it on a network you trust. Up to three browsers can listen at once. With the switch
+off, the monitor's pages are not there, and an open page is cut off. The key is kept while the switch
+is off, so a link you saved still works when you turn it on again.
+
+**What shows it.** While anyone listens, a Show or a Spot draws an amber dot at the top of the screen
+(a dark screen keeps its dimmest light to show it), a Dot pulses its light ring amber, and Home
+Assistant has a **Baby monitor listening now** sensor, so an automation can tell you. The **mute**
+stops the sound at once, ends the listeners, and the page says the microphones are muted; an open
+page starts again by itself a few seconds after you unmute. Voice keeps working while someone listens.
+
+**The sound.** It is what the wake word hears, after echo cancellation and leveling, at 16 kHz mono,
+a fraction of a second behind the room (the page keeps about a fifth of a second in hand). On an
+iPhone, turn the ringer switch on and the volume up, or the browser plays nothing. The remote API cannot see or change the switch, and a saved settings file,
+settings sharing and the diagnostics download neither carry it nor change it. After a restart it comes
+back as you left it.
 
 ## 8. Settings lock
 
@@ -1646,7 +1852,7 @@ address the file changes, old and new, and names what will need entering again, 
 links and paired computers that only the device the file came from has.
 
 A restore never opens a door on the device or has it listen or watch. Its privacy switches (SSH, the
-camera and screen pages, talking through cameras, recording takes of a word), AirPlay, Spotify
+camera and screen pages, talking through cameras, recording takes of a word, the baby monitor), AirPlay, Spotify
 Connect, DLNA, Sendspin, the
 Bluetooth proxy, video and the addresses allowed to send it video, the diagnostics settings, Drop
 In, sending the room to Home Assistant's wake word engine (streaming or confirming), keeping wake
@@ -1716,7 +1922,7 @@ screen) says so and is left alone, and so does one with sharing off.
 For scripts and tools that are not Home Assistant. It reads what the device is and what its settings
 say, changes its everyday settings, and follows its log as it is written. It never changes a privacy or
 security setting (SSH, the camera and screen pages, the setup page, Drop In, talking through cameras,
-recording takes of a word, presence and gestures, sending the room to Home Assistant, keeping clips, calls, Bluetooth pairing and
+recording takes of a word, the baby monitor, presence and gestures, sending the room to Home Assistant, keeping clips, calls, Bluetooth pairing and
 the proxy, AirPlay, Spotify Connect, DLNA, video, Sendspin, the settings lock, updates, restarts, camera
 streaming, the ambient noise sensor, the clap gesture, hold on the clock, nearest device answers, or the
 API itself): those it can read, not change. It never runs Home Assistant actions, and it carries none
@@ -1798,3 +2004,14 @@ in Home Assistant opens it), go to **General** and press
 **Download diagnostics**. It holds the last of the device's log, its recent wake word detections and
 near misses, and what it is set to. Addresses, network names, keys and
 serial numbers are replaced before you get it, but give it a read before you post it.
+
+To watch the log as it happens, press **Follow the log live** next to it. The page shows the last few hundred
+lines, newest at the bottom, then each new line as the device writes it. **Pause** stops the page scrolling
+(lines that come meanwhile are held and shown when you press **Follow**), the menu hides everything below a
+level (info, warnings, errors only), the box keeps only lines with the text you type, and **Download** saves
+what is shown. It needs a browser that has been let in with a press on the device, like the rest of the setup
+page, and it stops when the page closes. Two browsers can follow at once. A line is cleaned the same way as in
+the diagnostics download before it leaves the device; names of rooms and devices can still show, so look
+before you share it. The log is kept in memory only (the last 500 lines), and a browser that cannot keep up
+misses lines rather than slowing the device. The words of voice requests are hidden here as they are in the
+log itself unless **Send voice text** is on; the text of an announcement you send the device is shown.

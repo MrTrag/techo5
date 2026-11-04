@@ -165,6 +165,17 @@ func CancelSound() []Note { return ownOr(ClipCanceled, ToneCancel) }
 // Nothing stands in for it: without a recording the spoken reply plays as any other does.
 func DoneSound() (Note, bool) { return ClipDone.ownNote() }
 
+// VolumeSound is the click a volume change makes, ButtonSound a button held, BTConnectSound a
+// Bluetooth device connecting, and DropInSound the chime that comes before a Drop In: each the owner's
+// recording where there is one, else its notes. ListenEndSound is silent unless there is one.
+func VolumeSound() []Note    { return ownOr(ClipVolume, ToneVolume) }
+func ButtonSound() []Note    { return ownOr(ClipButton, ToneMuteHold) }
+func BTConnectSound() []Note { return ownOr(ClipBTConnect, ToneBTConnect) }
+func ListenEndSound() []Note { return ownOr(ClipListenEnd, nil) }
+func DropInSound() []Note {
+	return ownOr(ClipDropIn, []Note{{Freq: 880, Ms: 160}, {Freq: 0, Ms: 70}, {Freq: 1100, Ms: 220}})
+}
+
 func ownOr(c *Clip, notes []Note) []Note {
 	if n, ok := c.ownNote(); ok {
 		return []Note{n}

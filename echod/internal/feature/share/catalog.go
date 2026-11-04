@@ -33,13 +33,13 @@ type group struct {
 // sensitivity), and how readily a stop word stops something (stop and cancel off, or stopping at every
 // sound), as the remote API holds them. The signs that the device is listening or muted (wake tones and
 // effects, the follow-up tone, the mute light's brightness), which another device must never be able to
-// turn off, and quiet hours, which silence the wake tone. How loud an alarm rings, which another device
+// turn off, and quiet hours, which silence the wake tone. How loud an alarm rings, and how far replies and calls sit from the volume, which another device
 // could turn down to nothing; severe weather alerts, which it could turn off. Do not disturb for
 // the intercom, which blocks calls. Which photos and calendar events a screen shows (a shared room's
 // screen showing one person's). Which outside service is told where the house is or what is playing (the
 // weather, the rain map, lyrics). The test in component/all keeps them off (neverShared).
 var groups = []group{
-	{"Speaker", []string{"bass", "treble", "speaker_eq", "night_volume", "home_assistant_sounds", "louder_speech",
+	{"Speaker", []string{"bass", "treble", "speaker_eq", "night_volume", "home_assistant_sounds", "louder_speech", "clearer_speech",
 		"media_duck_level", "duck_on_near_miss", "bluetooth_sets_volume", "airplay_sets_volume"}},
 	{"Voice: first wake word", []string{"thinking_effect_1", "replying_effect_1", "reply_delivery_1",
 		"reply_buffer_1", "max_think_1"}},
@@ -53,12 +53,12 @@ var groups = []group{
 		"screen_ignores_room_lights"}},
 	{"Night", []string{"screen_at_night", "screen_night_start", "screen_night_end", "screen_night_hours",
 		"screen_weekend_night_start", "screen_weekend_night_end",
-		"screen_night_clock_style", "screen_night_light_level", "screen_night_tap_lifts"}},
+		"screen_night_clock_style", "screen_night_light_level", "screen_night_tap_lifts", "screen_night_info"}},
 	{"Photos", []string{"slideshow_interval", "slideshow_shuffle", "slideshow_subfolders", "slideshow_whole_photo",
 		"slideshow_pairs", "slideshow_caption", "slideshow_weather_art", "slideshow_screensaver_idle",
 		"slideshow_screensaver_overlay"}},
 	{"Calendar", []string{"calendar_opens_on", "calendar_popup_before", "calendar_popup_all_day", "calendar_popup_chime",
-		"calendar_day_timeline", "calendar_coming_up_refined", "calendar_month_details", "calendar_event_icons", "calendar_countdowns", "calendar_week_view", "calendar_chip_size", "calendar_next_up", "calendar_weather", "calendar_week_starts_monday"}},
+		"calendar_day_timeline", "calendar_coming_up_refined", "calendar_month_details", "calendar_event_icons", "calendar_countdowns", "calendar_week_view", "calendar_chip_size", "calendar_next_up", "calendar_dashboard_events", "calendar_next_up_within", "calendar_weather", "calendar_week_starts_monday"}},
 	{"Dashboard", []string{"screen_dashboard_idle", "screen_dashboard_kiosk", "screen_dashboard_return",
 		"screen_dashboard_tiles", "screen_dashboard_layout"}},
 	{"Calls and cameras", []string{"phone_ring_sound", "camera_sound"}},

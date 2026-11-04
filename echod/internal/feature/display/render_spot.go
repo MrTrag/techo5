@@ -91,6 +91,7 @@ type roundScene struct {
 	cue          string  // a turn's phase, when turns are a cue over the face and phase is idle (turn_cue.go)
 	muted        bool
 	mutedSubtle  bool // the muted ring drawn thin and dim (mutering_spot.go)
+	listening    bool // the room is being listened to in a browser (feature/babymon)
 	playing      bool
 	paused       bool
 	volume       int
@@ -222,6 +223,8 @@ type roundScene struct {
 	// else has to be shown.
 	redClock bool
 	redStyle string
+	// nightInfo has a notification shown on the night clock, in the night's tone (render_night_spot.go).
+	nightInfo bool
 
 	// style is what the clock style in force shows beyond the time (clock_style.go).
 	style styleFacts
@@ -244,8 +247,9 @@ type roundScene struct {
 }
 
 type roundRenderer struct {
-	paint                                 // the canvas, and the settings screen's tap zones
-	callDrawn                        bool // the frame last drawn has the Call button on it; for taps
+	nightBuf                         *image.RGBA // the night layer kept between frames (nightLayerFor)
+	paint                                        // the canvas, and the settings screen's tap zones
+	callDrawn                        bool        // the frame last drawn has the Call button on it; for taps
 	clock, title, body, small, label font.Face
 	tiny                             font.Face
 
@@ -295,7 +299,8 @@ type roundRenderer struct {
 }
 
 func newRoundRenderer(dst *image.RGBA) *roundRenderer {
-	r := &roundRenderer{paint: paint{dst: dst, w: side, h: side, round: true}}
+	r := &roundRenderer{paint: paint{dst: dst, w: side, h: side, round: true,
+		rowCard: image.Rect(spotCardLeft, 0, spotCardRight, side)}}
 	k, _ := r.fontChanged()
 	r.makeFaces(k)
 	return r
@@ -329,6 +334,7 @@ func (r *roundRenderer) useFont() {
 
 func (r *roundRenderer) draw(s roundScene) {
 	r.useFont()
+	defer r.listeningDot(s) // over everything, however the frame ends
 	if !(s.menuOpen && s.menuMode == modeWeather && s.radarOn) {
 		r.shapes = alertOverlay{} // kept only while the rain map is up
 	}

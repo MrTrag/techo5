@@ -93,6 +93,8 @@ func (f *Feature) serve(w http.ResponseWriter, r *http.Request) {
 		f.font(w, r)
 	case "/setup/sound":
 		f.sound(w, r)
+	case "/setup/soundpack":
+		f.soundPack(w, r)
 	case "/setup/wakeword":
 		f.wakeWordUpload(w, r)
 	case "/setup/diagnostics.txt":
@@ -112,7 +114,7 @@ func (f *Feature) serve(w http.ResponseWriter, r *http.Request) {
 
 // watching is the paths a view left up on the page asks for by itself. Answering them is not the page
 // being used: a tab left watching the scores would otherwise hold the page open for as long as it ran.
-var watching = map[string]bool{"/setup/scores": true, "/setup/takes/state": true}
+var watching = map[string]bool{"/setup/scores": true, "/setup/takes/state": true, "/setup/log/stream": true}
 
 // diagnostics hands over everything worth having when something is wrong, with the addresses, names,
 // keys and serial numbers already replaced — so that somebody can send it to an issue without
@@ -266,6 +268,8 @@ func (f *Feature) save(w http.ResponseWriter, r *http.Request) {
 		default:
 			problem = saveStations(r)
 		}
+	case "replyplayer":
+		problem = saveReplyPlayer(r.PostFormValue("player"))
 	case "house":
 		problem = saveHouse(r.PostFormValue("word"))
 	case "update-install", "update-check", "update-auto":
@@ -326,6 +330,8 @@ func (f *Feature) save(w http.ResponseWriter, r *http.Request) {
 		problem = removeCalendarLink(r)
 	case "calendar-look":
 		problem = saveCalendarLook(r)
+	case "todo":
+		problem = saveTodo(r)
 	case "adopt":
 		if _, err := api.Get().OpenAdoption(); err != nil {
 			problem = "could not open the device to a Home Assistant: " + err.Error()
@@ -438,6 +444,7 @@ func (f *Feature) settingsPage(ctx context.Context, w http.ResponseWriter, token
 		if layout.HasMicrophone() {
 			fmt.Fprint(w, `<h3>Voice</h3>`)
 			brainSection(w, token)
+			replyPlayerSection(w, token)
 			realtimeSection(w, token)
 			listeningSection(w, token)
 			houseSection(w, token)
@@ -445,6 +452,7 @@ func (f *Feature) settingsPage(ctx context.Context, w http.ResponseWriter, token
 			wakeWordsSection(w, token)
 			scoresSection(w)
 			takesSection(w, token)
+			historySection(w, token)
 		} else {
 			fmt.Fprint(w, `<h3>Announcements and sounds</h3>`)
 			houseSection(w, token)
@@ -486,9 +494,11 @@ func (f *Feature) settingsPage(ctx context.Context, w http.ResponseWriter, token
 		placeSection(w, token)
 		calendarLinksSection(w, token)
 		calendarLookSection(w, token)
+		todoSection(w, token)
 	case "privacy":
 		lockSection(w, token)
 		camStreamSection(w, token)
+		babySection(w, token)
 		privacySection(w)
 		remoteSection(w, token)
 	case "general":
@@ -582,7 +592,8 @@ func privacySection(w http.ResponseWriter) {
 	  software the device runs, and never shows the Home Assistant key. It can let a Home Assistant add
 	  the device for 15 minutes (General), which sets a new key. It can record takes of a word from the
 	  microphones (Sound &amp; Voice) only while Record takes of a word is switched on, and only after a
-	  press on the device for each recording; the takes stay in memory, and come to you over this page.</p></fieldset>`)
+	  press on the device for each recording; the takes stay in memory, and come to you over this page.
+	  It shows the baby monitor's link, and can replace it, but cannot switch the monitor on.</p></fieldset>`)
 }
 
 // wifiSection is the networks: what the device is on, what it remembers, and how to add another.
@@ -652,6 +663,7 @@ func diagnosticsSection(w http.ResponseWriter) {
 	  itself, the last of its log, its recent wake words, and what it is set to.</p>
 	 <p class="note">Addresses, network names, keys and serial numbers are replaced before you get it,
 	  so it can go straight into an issue. Worth a look before you send it all the same.</p>
+	 <p><a href="/setup/log">Follow the log live</a> — the same log, with the same parts replaced, as it is written.</p>
 	 </fieldset>`)
 }
 
@@ -824,7 +836,19 @@ func houseSection(w http.ResponseWriter, token string) {
 	 <p class="note">Make it a long phrase, %d characters or more. What the devices send each other is
 	  signed with it, and anything on the network that hears them can try words until one fits.</p>%s
 	 <p><button type="submit">Save</button></p></form></fieldset>`,
-		html.EscapeString(word), otherWordNote(announce.OtherWords()), longHouseWord, shortWordNote(word))
+		html.EscapeString(word), otherWordNote(announce.OtherWords()), longHouseWord,
+		shortWordNote(word)+nearestWordNote(word, config.Get().Nearest.Enabled()))
+}
+
+// nearestWordNote is the warning for Nearest device answers switched on with no house word, which
+// leaves it doing nothing: the claims the devices send each other are signed with the word.
+func nearestWordNote(word string, nearest bool) string {
+	if word != "" || !nearest {
+		return ""
+	}
+	return `
+	 <p class="note"><strong>Nearest device answers is on, but it does nothing until this device has a
+	  house word.</strong> Set the same word here as on the other devices.</p>`
 }
 
 // otherWordNote names the devices here that refused this one's announcements in the last hour, for

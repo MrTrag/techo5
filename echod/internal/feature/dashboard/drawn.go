@@ -39,12 +39,15 @@ type Tile struct {
 	Adjust *Adjust
 	// Switch draws a row's tap as a switch at its end, for something that is on or off.
 	Switch bool
+	// Color is the card's color, as Home Assistant's tile card takes it: the badge, and the whole
+	// page when the tile is alone on it. Zero (no alpha) for the theme's.
+	Color color.RGBA
 }
 
 // Adjust is a tile's level: what it is now and how far it goes.
 type Adjust struct {
 	Entity   string
-	Kind     string // brightness, position, temperature
+	Kind     string // brightness, position, temperature, speed, volume
 	Value    float64
 	Min, Max float64
 	Step     float64
@@ -91,6 +94,8 @@ type Block struct {
 	// picture a tap of its own.
 	Pictures []Picture
 	Columns  int
+	// Color is a heading's or markdown card's color, used when it is alone on the page. Zero for none.
+	Color color.RGBA
 }
 
 // Section is blocks that stay together, one column wide: a room, a section of a sections view, a card
@@ -488,6 +493,9 @@ func (f *Feature) SetLevel(a Adjust, v float64) {
 	case "temperature":
 		domain, service = "climate", "set_temperature"
 		data["temperature"] = v
+	case "speed":
+		domain, service = "fan", "set_percentage"
+		data["percentage"] = int(v + 0.5)
 	case "volume":
 		domain, service = "media_player", "volume_set"
 		data["volume_level"] = float64(int(v+0.5)) / 100

@@ -1477,6 +1477,44 @@ Emoji aren't drawn: none of the screen's fonts have them, so one shows as an emp
   (`home_show_camera`) is shown over a text card nobody has read; the card shows when the view ends. A
   picture notification replaces the card instead.
 
+### Reading it from across the room
+
+`esphome.<node>_notify_sized` is `notify` with one more argument, `size`. It does everything `notify`
+does; only the card changes.
+
+| `size` | What you get |
+|---|---|
+| `normal` (or `""`, or anything else) | The usual card: three lines of the message. |
+| `large` | A card over most of the screen, with the title and the message in much larger letters. The message wraps over as many lines as fit. |
+| `huge` | A card over nearly all of the screen. The message is set as large as it can be and still fit, in the middle of the card, so a short message such as "Server down" spans most of the screen's width. A longer one gets smaller letters, down to a limit, and ends in "…" past that. |
+
+`size` is a separate action, not a new argument on `notify`, because Home Assistant requires every
+argument on every call: a new argument on `notify` would stop every automation and blueprint that
+doesn't pass it. `notify` and `notify_picture` are unchanged.
+
+The usual card follows **Text size** (Settings, Look; also **Screen text size** in Home Assistant), as
+every word on the screen does. `large` and `huge` always take the largest letters that fit, so Text size
+makes no difference to them.
+
+```yaml
+action: esphome.bedroom_notify_sized
+data:
+  message: "Home server down"
+  title: "Warning"
+  icon: "mdi:server-off"
+  chime: ""
+  speak: ""
+  tag: ""
+  seconds: 0
+  size: huge
+```
+
+As in `notify`, an empty `chime` means the usual chime plays, an empty `speak` means nothing is said,
+and `seconds: 0` keeps it up until somebody taps it.
+
+On a Spot, `large` and `huge` give the message more of the round face and larger letters, and `huge`
+drops the icon. A Dot has no screen and ignores `size`.
+
 ### The event
 
 Each notification fires an `esphome.techo5_notification` event on Home Assistant's bus: once as it
@@ -1577,7 +1615,12 @@ actions:
 
 ## Show a picture notification
 
-In YAML, refer to this action as `esphome.<node>_notify_picture`.
+In YAML, refer to this action as `esphome.<node>_notify_picture`. For larger words over the picture, use
+`esphome.<node>_notify_picture_sized`, which takes the same arguments and then `size`
+(`normal`, `large` or `huge`), set out under [Reading it from across the room](#reading-it-from-across-the-room).
+On a Show the caption bar grows to hold the larger message, up to a third of the screen for `large` and
+more than half for `huge`; the picture shows above it. On a Spot, `size` has no effect on a picture
+notification.
 
 Puts a picture up full screen on this device, with a notification's words over it: a camera's live
 view for a doorbell, a snapshot an automation saved, or any picture Home Assistant or another web
@@ -1809,6 +1852,12 @@ data:
   calendars: calendar.family, calendar.work
 ```
 
+**Reading them back.** Two text sensors in the device's diagnostic entities, **Calendars shown** and
+**Calendars that pop up**, list the calendar entities now chosen, separated by commas, whichever way
+they were set (the screen, the setup page or these actions). They read `none` for an empty list, and a
+list too long for a state (255 characters) is cut at a whole entity and ends with `+N more`. The pop-up
+sensor lists every shown calendar while none is picked. They are read-only.
+
 ## Show the calendar
 
 In YAML, refer to this action as `esphome.<node>_calendar_show`.
@@ -1825,6 +1874,48 @@ General, Calendars). No arguments.
 
 ```yaml
 action: esphome.office_calendar_show
+```
+
+## Choose the to-do lists shown
+
+In YAML, refer to this action as `esphome.<node>_todo_lists`.
+
+Chooses which of Home Assistant's to-do and shopping lists this device shows, on the To-do tab of its
+drawer. Each device keeps its own: the kitchen can show the shopping list and a desk the chores.
+Screen devices only (the Show, the Skylight and the Panel app show the tab). Any `todo.` entity works:
+the Shopping List integration, Local To-do, Google Tasks, Todoist. Off until a list is chosen. Needs
+`home_assistant` set up first. A tap on an item on the tab marks it done in Home Assistant.
+
+With the voice assistant that answers without Home Assistant, the lists chosen here are also the ones
+it adds to and reads out ("add milk to the shopping list"). With Home Assistant's Assist as the voice
+assistant you don't need this for that: Assist handles its lists itself.
+
+### lists (Required)
+
+*string*
+
+To-do list entities, separated by commas, in the order to show them. Empty shows none, and takes the
+To-do tab away.
+
+```yaml
+action: esphome.kitchen_todo_lists
+data:
+  lists: todo.shopping_list, todo.chores
+```
+
+## Show the to-do lists
+
+In YAML, refer to this action as `esphome.<node>_todo_show`.
+
+Opens the drawer on its To-do tab on a Show, Skylight or Panel app, as a swipe in from the right
+edge and a tap on the tab do. A tap on the screen outside the drawer, or its close button, puts it
+away. At night it lights a screen the night has put out, at the night light's level (or at half
+brightness with no night light), and the drawer shows over the red night clock until it is closed. A
+screen somebody turned off stays off. Fails on a device that has no list chosen (choose them with
+`todo_lists`, or on the setup page's Weather & Calendar tab). No arguments.
+
+```yaml
+action: esphome.kitchen_todo_show
 ```
 
 ## Show the forecast or the rain map

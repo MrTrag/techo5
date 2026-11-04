@@ -38,7 +38,8 @@ setup page's **Screen & Photos** tab has the same settings, except which dashboa
   choose. A dashboard Home Assistant put up (`dashboard_show`) stays until it's hidden.
 - **Dashboard tiles** (Show only, drawn only): *Normal*; *Large*, taller tiles across the whole
   width; or *Fill the screen*, which lays a view of up to nine tiles out over the whole page, like
-  four lights in a 2×2 grid. A view with anything other than tiles on it is drawn *Large*.
+  four lights in a 2×2 grid. A view with anything other than tiles on it is drawn *Large*. A view
+  with **one** heading, markdown or tile card on it is a [warning page](#a-warning-page-one-large-card).
 - **Dashboard tile layout** (Show only, drawn only): *Side by side*, a tile's icon beside its name and
   state; or *Name below*, a smaller icon and the state along the top and the name under them, across
   the tile's whole width. Name below tiles are a little taller, and a long name has more room, which
@@ -82,8 +83,9 @@ Each device has its own settings, so the kitchen and a bedroom can show differen
 
 - **Tap** a tile or a row to do what it says: lights, switches and fans toggle, covers open or close,
   players play or pause, scenes and scripts run, a card's own tap action does what it is set to.
-- **Slide** a finger along a light, cover, thermostat or media player to set its brightness,
-  position, temperature or volume. The tile fills as you slide, and it is set when you let go. A tile
+- **Slide** a finger along a light, cover, thermostat, fan or media player to set its brightness,
+  position, temperature, speed or volume. A fan slides only when it can set its speed, and it moves in
+  the steps the fan takes. The tile fills as you slide, and it is set when you let go. A tile
   you can slide has a track along its foot, with a bar on it up to the level; a light that is off keeps
   the empty track.
 - **Tap a thermostat** whose card sets no tap of its own:
@@ -95,6 +97,10 @@ Each device has its own settings, so the kitchen and a bedroom can show differen
     or keeps a range has no one temperature to step.
 - **Long press** (Show only; on the Spot a long press is the ring menu):
   - on a light that has whites or colors, for a sheet of them. The light follows your finger.
+  - on a fan, for a sheet with an on/off switch, its speed (a slider, in the steps the fan takes), its
+    direction (forward or reverse) when it can turn either way, and its preset modes when it has any.
+    Each control is there only when the fan has it. A fan tile whose card sets a tap of its own keeps
+    that tap on a long press.
   - on a media player, for a sheet with its controls, its volume, the speakers it can be grouped
     with, and, with Music Assistant, your favorite playlists and radio stations. The favorites need
     the device's token to belong to a Home Assistant administrator; with any other token the sheet
@@ -107,7 +113,7 @@ Each device has its own settings, so the kitchen and a bedroom can show differen
 
 | Home Assistant card | On the device |
 |---|---|
-| Tile, button, entity, light, thermostat, and the Mushroom entity cards | A tile: icon, name, state, tap; a slider for lights, covers, thermostats and media players. A name too long for its tile is drawn smaller, then on two lines, and only what still does not fit is cut short with …. Under a heading (or a Glance or Entities card with a title, for its own tiles or rows), a name Home Assistant gives the entity is shown without the heading in front of it: under *Master Bedroom*, "Master Bedroom ceiling light" is "Ceiling light". A name the card gives is shown as it is |
+| Tile, button, entity, light, thermostat, and the Mushroom entity cards | A tile: icon, name, state, tap; a slider for lights, covers, thermostats, fans and media players. A name too long for its tile is drawn smaller, then on two lines, and only what still does not fit is cut short with …. Under a heading (or a Glance or Entities card with a title, for its own tiles or rows), a name Home Assistant gives the entity is shown without the heading in front of it: under *Master Bedroom*, "Master Bedroom ceiling light" is "Ceiling light". A name the card gives is shown as it is |
 | Entities | A card of rows, with a switch for anything on or off |
 | Glance, Mushroom chips | Tiles |
 | Heading, Mushroom title | A heading |
@@ -132,6 +138,46 @@ A change you save in Home Assistant's dashboard editor shows on the device withi
 A tap that opens another view keeps the page you tapped on up until the new view and its
 full-screen pictures are ready, for a second and a half at most. The last few pictures are kept, so
 going back to a view you just left draws it at once.
+
+### Card colors
+
+A tile card's `color` (and Mushroom's `icon_color`) is used: Home Assistant's names (`red`, `amber`,
+`deep-orange`, `blue-grey` and the rest of its palette), `var(--red-color)`, `#rgb`, `#rrggbb`, `rgb(r, g, b)`
+or a list of three numbers. It tints the tile's round badge and its icon. As in Home Assistant, a
+sensor shows its color always, while a light, switch, cover or other thing that is on or off shows it
+only while it is on; an unavailable tile never does. `primary`, `accent` and names the device doesn't know
+leave the theme's colors in use.
+
+### A warning page: one large card
+
+With **Dashboard tiles** on *Fill the screen*, a view of exactly one heading, markdown or tile card
+is drawn as a page of that card alone, with its words as large as the screen takes them, so it can be
+read across a room:
+
+- **Heading**: one big line (or a few, for a long one) in bold, with the subtitle under it.
+- **Markdown**: its title, smaller, above its paragraphs; the paragraphs are set as large as they fit.
+- **Tile or entity card** with no slider or switch: the icon, the state in very large letters, and the name under it. If the
+  tile has no state to show, the name is the large line. A tap on the page does what the tile's tap does.
+
+A `color` on the card fills the whole page with it, with white or black words, whichever reads better.
+A heading and a markdown card take `color` the same way (Home Assistant doesn't define one for them;
+the device reads it). With no color, the page uses the theme's. A view with anything more than that one
+card, or any other **Dashboard tiles** setting, is laid out as usual. A single tile that has a slider
+(a light's brightness, a cover's position, a thermostat, a fan's speed) or a switch keeps its usual full-screen tile, so
+the slider and switch still work; only a tile without controls gets the full page.
+
+This takes the place of a separate "drawn text size": the page's words are fitted to the screen's size,
+so **Text size** does not change them. To use it, make a dashboard whose view has just that card, for
+example:
+
+```yaml
+type: markdown
+content: "# HOME SERVER DOWN"
+color: red
+```
+
+For a pop-up that needs no dashboard, see
+[Reading it from across the room](actions.md#reading-it-from-across-the-room).
 
 ### A dashboard for the screen
 
@@ -216,10 +262,12 @@ On the page:
 - The top bar has the page's title, its items from Tessera, and the time.
 - Swipe left or right to go to the next page. The dots along the foot show where you are. A detail
   page has a back arrow at the top left.
-- Tap a tile to do what it's for: lights, switches, fans, input booleans and automations turn on or
+- Tap a tile to do what it's for: lights, switches, fans, input booleans, automations and remotes turn on or
   off; a cover opens, closes or stops; a scene or script runs; a button is pressed; a media player
   plays or pauses (on Music Assistant's player when it is the one playing, as its play/pause key does).
   Sensors show their value and unit, large.
+- A remote's tile turns it on or off. Tessera's remote card, with its activities and keypad, isn't drawn
+  here, and a remote's key set to *Perform action* does nothing on a tap.
 - Tap a thermostat to open its controls: the temperature with − and +, and its modes.
 - Locks: a tap on an unlocked lock locks it. A tap on a locked lock asks first: the tile turns red
   and says *Tap again to unlock*. Tap again within 4 seconds to unlock. If the lock's tile in
@@ -228,7 +276,7 @@ On the page:
   same way: a tap on a closed one, or on its open key, turns the tile red and says *Tap again to open*.
   Tap again within 4 seconds to open it. Closing one takes a single tap.
 - Press and hold a tile to open the same sheets the drawn dashboard has: a light's whites and colors,
-  a thermostat's controls, a media player's controls, volume, Music Assistant favorites and speakers.
+  a thermostat's or a fan's controls, a media player's controls, volume, Music Assistant favorites and speakers.
   The favorites and speakers are read with the device's Home Assistant token, as on the drawn
   dashboard, and the favorites need it to belong to an administrator.
 - Slide a finger along a light to set its brightness, along a fan to set its speed, along a cover to

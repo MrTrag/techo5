@@ -44,6 +44,7 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/feature/alarm"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/announce"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/assistant"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/babymon"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/btaudio"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/camstream"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/doorbell"
@@ -276,6 +277,9 @@ type Display struct {
 	weekendStart, weekendEnd *esphome.Select
 	nightStyle               *esphome.Select
 	glowLevel                *esphome.Number
+	// nightInfoSw is Night clock shows Next up and notifications (night_info.go): on the Spot, the
+	// notification alone.
+	nightInfoSw *esphome.Switch
 	// nightMode is Night mode: Home Assistant turning the night on and off; nightShown what it last said.
 	nightMode  *esphome.Switch
 	nightShown bool
@@ -405,6 +409,7 @@ func build() *Display {
 	d.atNight = atNightSelect(d)
 	d.nightStyle = nightStyleSelect(d)
 	d.glowLevel = glowNumber(d)
+	d.nightInfoSw = nightInfoSwitch(d)
 	d.nightMode = nightModeSwitch(d)
 	d.lang = langSelect()
 	voice.Changed.Listen(d.changed)
@@ -422,6 +427,10 @@ func build() *Display {
 	doorbell.Get().Changed.Listen(func(struct{}) { d.wake() })
 	camstream.Get().Changed.Listen(func(struct{}) {
 		d.relight(true) // a dark face keeps a little light while the camera is watched (watchedLight)
+		d.wake()
+	})
+	babymon.Get().Changed.Listen(func(struct{}) {
+		d.relight(true) // and while the room is listened to: the mark that says so has to be seen
 		d.wake()
 	})
 	d.watchRoom()
@@ -467,7 +476,7 @@ func (d *Display) skinSel() *esphome.Select { return d.skinSl }
 
 func (d *Display) Entities() []esphome.Entity {
 	return []esphome.Entity{d.light, d.power, d.roomSw, d.auto, d.clock, d.clockStyleSel, d.clockPos, d.camTime, d.answerTime, d.turnStyle, d.skinSl, d.callBtn, d.weatherFx, d.muteRing, d.lang, d.styleSwipeSw, d.volumeSwipeSw, d.fontSel, d.textSizeSel,
-		d.nightHours, d.nightStart, d.nightEnd, d.weekendStart, d.weekendEnd, d.nightMode, d.atNight, d.nightStyle, d.glowLevel}
+		d.nightHours, d.nightStart, d.nightEnd, d.weekendStart, d.weekendEnd, d.nightMode, d.atNight, d.nightStyle, d.glowLevel, d.nightInfoSw}
 }
 
 // Restore lights the panel the way it was left.
@@ -492,6 +501,7 @@ func (d *Display) Restore(c config.Config) {
 	d.atNight.Set(atNightOptions[atNightIndex()])
 	d.nightStyle.Set(nightStyleOptions[nightStyleIndex()])
 	d.glowLevel.Set(float32(d.glowSetting()))
+	d.nightInfoSw.Set(c.Screen.NightInfo)
 	d.setAuto(c.Screen.Auto, false)
 	d.apply(c.Screen.On, c.Screen.Brightness, false)
 }
@@ -593,7 +603,7 @@ func (d *Display) relight(jump bool) {
 		full := backlightMin + (screen.BacklightMax-backlightMin)*float64(min(max(d.ceiling, 0), 100))/100
 		target = backlightMin + (full-backlightMin)*sunriseLevel(p)
 	}
-	target = watchedLight(target, d.on, camstream.Watching(), backlightMin)
+	target = watchedLight(target, d.on, watched(), backlightMin)
 	if jump || d.level == 0 {
 		d.level = target
 	} else {
@@ -735,6 +745,13 @@ func (d *Display) gesture(g touch.Gesture) {
 		}
 		if held {
 			d.releaseHeld()
+			d.wake()
+			return
+		}
+		if n, up := notify.Get().Card(); up && g.Kind == touch.Tap && nightInfoOn() {
+			// Night clock shows Next up and notifications: the card on the night clock is tapped away,
+			// and the night light stays.
+			go notify.Get().DismissID(n.ID)
 			d.wake()
 			return
 		}
@@ -1502,6 +1519,7 @@ func (d *Display) frame() (next time.Duration) {
 	d.mu.Lock()
 	on = d.on
 	s.redClock, s.redStyle = d.nightGlow && nightClockOn(), config.Get().Screen.NightClockStyle
+	s.nightInfo = s.redClock && config.Get().Screen.NightInfo
 	d.mu.Unlock()
 	if !on && !video.Get().State().Active() {
 		d.vp.drop() // a video that ended while the panel was dark: its frame goes with it
@@ -1512,7 +1530,7 @@ func (d *Display) frame() (next time.Duration) {
 		video.Get().Covered(false)
 		d.videoPainting, d.vp.dark, d.videoOver = true, true, image.Rectangle{}
 	}
-	if !on && camstream.Watching() {
+	if !on && watched() {
 		// Dark, with the camera watched over the network: its mark, alone on black (not a video's last
 		// frame), at the dimmest light (relight), so the room can tell. Looked at again until the
 		// watching ends.
@@ -1552,6 +1570,7 @@ func (d *Display) frame() (next time.Duration) {
 	}
 	s.muted, _ = mute.Get().Muted()
 	s.mutedSubtle = muteRingSubtle.Load()
+	s.listening = babymon.Listening()
 	// A stream this player is carrying is the room's when it is what is being heard: the face names it,
 	// and says what it is doing, though the audio never passes through this player's own stream. Both,
 	// not just playing: the face tests paused first, so a station left paused underneath would label
