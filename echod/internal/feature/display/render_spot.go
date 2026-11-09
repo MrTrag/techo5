@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"image/draw"
 	"math"
 	"strings"
 	"time"
 
+	"github.com/HuskerMinion/techo5/echod/internal/lib/fonts"
 	"golang.org/x/image/font"
 
 	"github.com/HuskerMinion/techo5/echod/internal/config"
@@ -74,6 +74,10 @@ func (r *roundRenderer) timeLine(now time.Time, baseline int) {
 const ampmEdge = 48
 
 type roundScene struct {
+	// firstRunUp is first run still to do (firstrun_spot.go), and firstRun the step it shows.
+	firstRunUp bool
+	firstRun   firstRunView
+
 	pin pinView // the settings lock's PIN pad (pin.go), over everything but a call or a ring
 	// The dashboard face: whether it is up, how it is shown, and what it shows.
 	showDash   bool
@@ -91,6 +95,7 @@ type roundScene struct {
 	cue          string  // a turn's phase, when turns are a cue over the face and phase is idle (turn_cue.go)
 	muted        bool
 	mutedSubtle  bool // the muted ring drawn thin and dim (mutering_spot.go)
+	noIdleRing   bool // no gray track while nothing else is on the rim (rimdot_spot.go)
 	listening    bool // the room is being listened to in a browser (feature/babymon)
 	playing      bool
 	paused       bool
@@ -123,7 +128,7 @@ type roundScene struct {
 
 	camera     home.CameraView
 	showCamera bool
-	cameraLive bool // the sensor is running
+	cameraLive bool // the camera dot: the sensor is running, or with Only when watched, a picture is going out
 
 	// cameraSound is whether that view has a sound of its own at all, which is when its control is drawn;
 	// cameraSoundLive is whether that sound is playing or on its way, which is what the control says: Mute
@@ -351,7 +356,7 @@ func (r *roundRenderer) draw(s roundScene) {
 	r.zmu.Lock()
 	r.videoZones = nil
 	r.zmu.Unlock()
-	draw.Draw(r.dst, r.dst.Rect, image.NewUniform(colBackground), image.Point{}, draw.Src)
+	fillCanvas(r.dst, colBackground)
 	r.callDrawn, r.artDrawn = false, false
 	r.clearAlertTaps()
 	r.clearCameraSoundTap()
@@ -398,6 +403,10 @@ func (r *roundRenderer) draw(s roundScene) {
 	}
 	if s.showVideoAsk {
 		r.videoAskFace(s)
+		return
+	}
+	if s.firstRunUp {
+		r.firstRunFaceSpot(s.firstRun, s.now)
 		return
 	}
 	// This device taking an announcement, then one that arrived: both take the face, since a circle
@@ -525,6 +534,7 @@ func (r *roundRenderer) rim(s roundScene) {
 		r.arc(rimIn, rimOut, 0, 2*math.Pi*math.Min(math.Max(left, 0), 1), colTimer)
 	case s.style.style() == styleSun && s.style.sunOK && s.phase == "idle" && !s.nowPlaying && !s.showCamera && !s.showDash:
 		r.sunRim(s)
+	case s.noIdleRing: // the rim stays dark
 	default:
 		r.arc(rimIn, rimOut, 0, 2*math.Pi, colTrack)
 	}
@@ -731,7 +741,7 @@ func (r *roundRenderer) triangle(ax, ay, bx, by, cx, cy float64, c color.RGBA) {
 
 // clear paints the canvas the icon ground.
 func (r *roundRenderer) clear() {
-	draw.Draw(r.dst, r.dst.Rect, image.NewUniform(colIconGround), image.Point{}, draw.Src)
+	fillCanvas(r.dst, colIconGround)
 }
 
 // dim darkens the whole canvas by alpha.
@@ -757,7 +767,7 @@ func (r *roundRenderer) text(face font.Face, s string, x, baseline int, c color.
 }
 
 func (r *roundRenderer) width(face font.Face, s string) int {
-	return font.MeasureString(face, s).Round()
+	return fonts.MeasureString(face, s).Round()
 }
 
 // centered2 is centered about x rather than the middle of the panel.

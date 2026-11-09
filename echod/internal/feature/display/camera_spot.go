@@ -5,7 +5,6 @@ package display
 import (
 	"image"
 	"image/color"
-	"image/draw"
 	"math"
 	"strings"
 	"time"
@@ -280,17 +279,17 @@ func (r *roundRenderer) listeningDot(s roundScene) {
 	}
 	x, y := float64(center+26), float64(center-(rimIn+rimOut)/2)
 	r.discAt(x, y, 9, colIconGround)
-	r.discAt(x, y, 6, colRoomHeard)
+	r.discAt(x, y, 6, roomHeard(colRoomHeard))
 }
 
 // watchedDark is the frame of a dark face while the camera is streamed or the room is listened to:
 // black, and the marks.
 func (r *roundRenderer) watchedDark() {
-	draw.Draw(r.dst, r.dst.Rect, image.NewUniform(color.Black), image.Point{}, draw.Src)
+	fillCanvas(r.dst, color.Black)
 	if camstream.Watching() {
 		r.cameraDot()
 	}
-	r.listeningDot(roundScene{listening: babymon.Listening()})
+	r.listeningDot(roundScene{listening: babymon.Shown()})
 }
 
 // cameraIndex is where entity is on the camera list, or 0.

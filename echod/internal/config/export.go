@@ -360,6 +360,10 @@ func KeepOwn(c *Config, from Config) {
 
 	c.Diag = from.Diag
 
+	// Where this device is and whether it has been set up are its own, not a household's settings.
+	c.FirstRun = from.FirstRun
+	c.Home.Area = from.Home.Area
+
 	// What has the microphones or the camera take in the room: listening in, sending it to Home
 	// Assistant, keeping clips of it, watching for people.
 	c.Home.DropIn = from.Home.DropIn
@@ -385,6 +389,8 @@ func KeepOwn(c *Config, from Config) {
 	c.Video.On, c.Video.DLNA = from.Video.On, from.Video.DLNA
 	c.Video.Allowed = slices.Clone(from.Video.Allowed)
 	c.Home.CameraLive = from.Home.CameraLive
+	// The Spot's camera dot is how the room sees the camera running: a file does not make it quieter.
+	c.Screen.CameraDotWatchedOnly = from.Screen.CameraDotWatchedOnly
 	// Which of Home Assistant's cameras the device lists: a file that says All (or is from a build that
 	// had no choice) does not undo None or a list chosen here, so a device that shares a Home Assistant
 	// with other homes is not given every camera in it by a file.
@@ -400,9 +406,16 @@ func KeepOwn(c *Config, from Config) {
 		}
 		// Sending a slot's voice to a company is chosen on the device, never by a file.
 		c.Wake.Words[i].Realtime = i < len(from.Wake.Words) && from.Wake.Words[i].Realtime
+		// So is sending a slot's room audio into a call to a contact.
+		c.Wake.Words[i].CallContact = ""
+		if i < len(from.Wake.Words) {
+			c.Wake.Words[i].CallContact = from.Wake.Words[i].CallContact
+		}
 	}
 	// Hours off the network take the device out of reach: chosen on the device, never by a file.
 	c.WifiQuiet = from.WifiQuiet
+	// Which band a device stays on is about the network it is on and where it stands: its own.
+	c.WifiBand = from.WifiBand
 	// What realtime voice has used today is the device's count.
 	c.Realtime.UsedDay, c.Realtime.UsedSeconds = from.Realtime.UsedDay, from.Realtime.UsedSeconds
 
@@ -410,7 +423,13 @@ func KeepOwn(c *Config, from Config) {
 	// Home Assistant. Neither is a restore's to turn on: Sendspin is on by default, so a file from before
 	// it was turned off would turn it back on.
 	c.Sendspin = from.Sendspin
+	// Snapcast dials out to a server and plays whatever it sends: which server, and whether at all, is the
+	// device's own, not a file's from a device in another house.
+	c.Snapcast = from.Snapcast
 	c.Bluetooth = from.Bluetooth
+	// A wall clock is paired to this device's adapter, and one controller at a time: an address from
+	// another device's file would name a clock this one cannot pair with.
+	c.WallClock = from.WallClock
 
 	// Where this device's replies play is the speaker next to it, not the one next to the device the
 	// file came from.
@@ -421,6 +440,7 @@ func KeepOwn(c *Config, from Config) {
 	// Measuring the room, listening for claps and serving the camera: new uses of the microphones and
 	// the camera, each this device's to turn on. The camera's login goes with it (its password is also
 	// a secret, kept by KeepSecrets). The remote API's switch too: a restore never opens a door.
+	c.Microphone.ASP = from.Microphone.ASP
 	c.Microphone.Noise = from.Microphone.Noise
 	c.Microphone.Claps = from.Microphone.Claps
 	c.Microphone.ClapSense = from.Microphone.ClapSense

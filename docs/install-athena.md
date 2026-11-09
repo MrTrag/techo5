@@ -62,7 +62,7 @@ python3 tools/install-athena.py --dry-run
 It takes the images from the latest release (`--release <tag>` for another one), checked against the
 release's signed manifest: `techo5-system-athena-<version>.img.gz` for `system` and
 `techo5-boot-athena-<version>.img` for `boot`. To install images you built, pass both:
-`--image system.img --boot boot.img`.
+`--image system.img --boot boot.img`. A download that fails its checksum is tried once more; if it fails again, the error says how many bytes arrived, to compare with the size on the release page (fewer means the connection dropped; the same number means antivirus or a proxy changed the file).
 
 What it does, each step checked before the next:
 
@@ -98,6 +98,16 @@ What it does, each step checked before the next:
 
 `--dry-run` does all the checks, reads the speaker tuning and fills the boot image on the computer,
 and writes nothing to the unit.
+
+### Giving it to someone else
+
+Add `--for-someone-else` to install a Show that is going to another person:
+
+```
+python3 tools/install-athena.py --for-someone-else
+```
+
+It asks for no Wi-Fi network, name or key, and writes none. It also clears any name, key and saved network an earlier install left, so the new owner starts fresh. The Show's screen then shows its own setup, so it can be unplugged and given away as it is, and the new owner's Home Assistant can add it with nothing typed. Everything else (backups, image, first boot) is the same. It cannot be used with `--name`, `--wifi` or `--key-file`.
 
 ### Wi-Fi
 

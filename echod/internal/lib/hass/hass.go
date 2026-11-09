@@ -176,11 +176,17 @@ func (c *Client) doContext(ctx context.Context, method, path string, body any) (
 	if err != nil {
 		return nil, err
 	}
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("hass: %s %s: %w", method, path, ErrNotFound)
+	}
 	if resp.StatusCode/100 != 2 {
 		return nil, fmt.Errorf("hass: %s %s: %s", method, path, resp.Status)
 	}
 	return out, nil
 }
+
+// ErrNotFound is Home Assistant saying there is no such thing: for a state, an entity it does not have.
+var ErrNotFound = errors.New("404 Not Found")
 
 // Day is one day of a forecast.
 type Day struct {
@@ -518,6 +524,57 @@ func (c *Client) MusicAssistantFor(own, name string) (string, error) {
 	}
 	return named, nil
 }
+
+// RemoveOwnEntry deletes Home Assistant's ESPHome entry for the device whose Wi-Fi address is mac
+// (aa:bb:cc:dd:ee:ff, as layout.FactoryMAC gives it), for a reset that hands the device to someone else:
+// left there, it holds the old key and fails until somebody deletes it. It reports how many it deleted.
+// The token has to be an administrator's to delete one.
+func (c *Client) RemoveOwnEntry(ctx context.Context, mac string) (int, error) {
+	if !macForm.MatchString(mac) {
+		return 0, errors.New("hass: not a MAC address")
+	}
+	// The device registry is not on the REST API, but its templates can read it: the config entries of the
+	// ESPHome devices with this address among their connections.
+	tmpl := "{% set ns = namespace(ids=[]) %}{% for e in integration_entities('esphome') %}{% set d = device_id(e) %}" +
+		"{% if d and ('mac', '" + mac + "') in device_attr(d, 'connections') %}" +
+		"{% set ns.ids = ns.ids + (device_attr(d, 'config_entries') | list) %}{% endif %}{% endfor %}" +
+		"{{ ns.ids | unique | join(',') }}"
+	out, err := c.doContext(ctx, "POST", "/api/template", map[string]any{"template": tmpl})
+	if err != nil {
+		return 0, err
+	}
+	// Only an ESPHome entry: the same device can sit in another integration's entry as well.
+	b, err := c.doContext(ctx, "GET", "/api/config/config_entries/entry?domain=esphome", nil)
+	if err != nil {
+		return 0, err
+	}
+	var entries []struct {
+		ID     string `json:"entry_id"`
+		Domain string `json:"domain"`
+	}
+	if err := json.Unmarshal(b, &entries); err != nil {
+		return 0, err
+	}
+	esphome := map[string]bool{}
+	for _, e := range entries {
+		if e.Domain == "esphome" {
+			esphome[e.ID] = true
+		}
+	}
+	n := 0
+	for _, id := range strings.Split(strings.TrimSpace(string(out)), ",") {
+		if !esphome[id] {
+			continue
+		}
+		if _, err := c.doContext(ctx, "DELETE", "/api/config/config_entries/entry/"+neturl.PathEscape(id), nil); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}
+
+var macForm = regexp.MustCompile(`^[0-9a-f]{2}(:[0-9a-f]{2}){5}$`)
 
 // Render has Home Assistant render a template and returns the text.
 func (c *Client) Render(template string) (string, error) {

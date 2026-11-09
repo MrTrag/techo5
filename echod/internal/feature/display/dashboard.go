@@ -53,6 +53,8 @@ func (d *Display) openDashboard() bool {
 	d.mu.Lock()
 	d.dash, d.dashHeld, d.dashTouched, d.dashNight = true, false, time.Now(), false
 	d.drawer, d.sheet, d.deckUp = false, false, false
+	// A custom screen opened by hand gives way too: the dashboard, asked for or opened, comes first.
+	d.customs.up = ""
 	d.mu.Unlock()
 	slog.Info("dashboard up", "mode", dashboard.Get().Mode())
 	d.wake()
@@ -147,7 +149,7 @@ func (d *Display) dashScene(s *scene, sheetOrDrawer bool) {
 	d.mu.Unlock()
 
 	want := mode != config.DashboardOff && s.phase == "idle" && !sheetOrDrawer && !hidden &&
-		!s.showCamera && !s.showWeather && !s.showRadar && !s.showCalendar && !s.showDeck && !s.showWifi && !s.bt.Pairing &&
+		!s.showCamera && !s.showWeather && !s.showRadar && !s.showCalendar && !s.showDeck && s.custom.name == "" && !s.showWifi && !s.bt.Pairing &&
 		(asked || (f.Idle() && !away && !s.nowPlaying))
 	s.showDash, s.dashMode, s.dashAsked = want, mode, want && overNight
 
@@ -177,6 +179,7 @@ func (d *Display) dashScene(s *scene, sheetOrDrawer bool) {
 		s.dashMedia = d.mediaViewNow()
 		s.dashClimate = d.climateViewNow()
 		s.dashFan = d.fanViewNow()
+		s.dashLibrary = d.libraryViewNow()
 	}
 
 	over := d.overDashboard(s)
@@ -197,7 +200,7 @@ func (d *Display) dashScene(s *scene, sheetOrDrawer bool) {
 	holdsChanged := holds != d.dashHolds
 	d.dashHolds = holds
 	if !sheeted {
-		d.dashColor, d.dashMedia, d.dashClimate, d.dashFan = nil, nil, nil, nil
+		d.dashColor, d.dashMedia, d.dashClimate, d.dashFan, d.dashLibrary = nil, nil, nil, nil, nil
 	}
 	d.mu.Unlock()
 	if changed {
@@ -274,7 +277,8 @@ func (d *Display) dashGesture(g touch.Gesture) {
 		// a finger that lands on a tile is the tile's even there: sliding a light on the right-hand
 		// side is not opening the drawer.
 		edge = min(edge, d.r.margin)
-		onTile := !streamed && d.tileAt(g.X, g.Y) != nil
+		// The music library's page reaches nearly to the edges, and a key or a picture there is its.
+		onTile := !streamed && (d.tileAt(g.X, g.Y) != nil || d.libraryUp())
 		switch {
 		case onTile:
 		case g.X < edge:
@@ -361,6 +365,7 @@ func (r *renderer) drawnDashboard(s scene) {
 	r.mediaSheet(s.dashMedia, s.drawn.Theme)
 	r.climateSheet(s.dashClimate, s.drawn.Theme)
 	r.fanSheet(s.dashFan, s.drawn.Theme)
+	r.librarySheet(s.dashLibrary, s.drawn.Theme)
 }
 
 // dashboardPage draws the dashboard over the whole panel.
@@ -375,6 +380,7 @@ func (r *renderer) dashboardPage(s scene) {
 		r.mediaSheet(s.dashMedia, dashboard.Theme{})
 		r.climateSheet(s.dashClimate, dashboard.Theme{})
 		r.fanSheet(s.dashFan, dashboard.Theme{})
+		r.librarySheet(s.dashLibrary, dashboard.Theme{})
 		return
 	}
 	v := s.dash

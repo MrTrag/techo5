@@ -178,6 +178,7 @@ func (c *conversation) watchEvent(e event) bool {
 	case evRunStart:
 		// Whatever comes now is this run's: a run let go of before it closed has nothing more to say.
 		c.staleRun = false
+		c.runURL = e.url
 		return true
 
 	case evWakeStart:
@@ -338,7 +339,13 @@ func (c *conversation) heardOnHA() {
 	if w.mode == watchConfirm {
 		c.confirmGap, c.unheard = 0, 0
 	}
-	if !c.start(nextTurn{slot: w.slot, woke: true, at: c.now(), continued: true}) {
+	n := nextTurn{slot: w.slot, woke: true, at: c.now(), continued: true}
+	if w.mode == watchConfirm {
+		// The request went on from the word while Home Assistant was asked: the turn reaches back to
+		// when the device scored it (historyFor, #477).
+		n.at, n.confirmed = w.at, true
+	}
+	if !c.start(n) {
 		c.closeRun()
 		return
 	}
@@ -445,14 +452,15 @@ func (c *conversation) mayStream() bool {
 }
 
 // haAnswers is whether a slot's wake word is answered by Home Assistant's pipeline: not when the direct
-// brain answers, nor for a word chosen for realtime voice (backendFor). Home Assistant hearing a word is
-// a turn on its pipeline, so it is never asked to listen for one of those.
+// brain answers, nor for a word chosen for realtime voice (backendFor) or to call a contact
+// (wakecall.go). Home Assistant hearing a word is a turn on its pipeline, so it is never asked to listen
+// for one of those.
 func haAnswers(slot int) bool {
 	if config.Get().Brain.Direct() {
 		return false
 	}
 	w := config.Get().Wake.Words
-	return !(slot >= 0 && slot < len(w) && w[slot].Realtime)
+	return !(slot >= 0 && slot < len(w) && (w[slot].Realtime || w[slot].CallContact != ""))
 }
 
 // micBusy is the microphones being cut or somebody else's: a call, a talk through a camera, or takes

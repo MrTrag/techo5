@@ -76,7 +76,9 @@ For a device you're giving to someone else. The device forgets the URL and token
 Assistant connects with by a new random one, and restarts. Your Home Assistant can't connect to it again, and the device no longer calls your Home
 Assistant. Alarms, radio stations, Wi-Fi and its other settings stay.
 
-Afterward, delete the device from **Settings → Devices & services → ESPHome** in your Home Assistant.
+A device that was given access to your Home Assistant with an administrator's token deletes its own
+ESPHome entry there first. Otherwise, delete the device from **Settings → Devices & services → ESPHome**
+in your Home Assistant afterward.
 The new key isn't shown anywhere. To add the device to another Home Assistant later, open its setup
 page, go to **General**, and choose **Let a Home Assistant add this device**: for 15 minutes the
 device has no key, and the Home Assistant that adds it sets one. Home Assistant sends that key over
@@ -93,6 +95,34 @@ Must be `leave`. Anything else changes nothing, so a stray tap in the action lis
 action: esphome.office_leave_home_assistant
 data:
   confirm: leave
+```
+
+## Reset the device for someone else
+
+In YAML, refer to this action as `esphome.<node>_reset_for_someone_else`.
+
+For a device you're giving to someone else, who will set it up from the start. The device forgets its
+Wi-Fi networks, name, room, Home Assistant's encryption key and its access to Home Assistant, puts
+every setting back to how a new install has it (alarms, timers and the phone book go too), deletes the
+old home's files, and restarts into first run. [setup.md](setup.md#giving-a-device-to-someone-else)
+lists everything it clears. It leaves your network at once, and it cannot be undone. A Dot or an
+Echo 2nd gen is given its new network over Bluetooth with Improv afterward.
+
+A device that was given access to your Home Assistant with an administrator's token deletes its own
+ESPHome entry there first. Otherwise, delete the device from **Settings → Devices & services → ESPHome**
+in your Home Assistant afterward.
+With no key, the next Home Assistant can add it with nothing typed.
+
+### confirm (Required)
+
+*string*
+
+Must be `reset`. Anything else changes nothing.
+
+```yaml
+action: esphome.office_reset_for_someone_else
+data:
+  confirm: reset
 ```
 
 ## Set the network address
@@ -625,6 +655,13 @@ so in a room with a TV or another speaker, "volume down" can turn down the wrong
 automations answer those sentences on the TECHO5 device that heard them. Add each one in Settings >
 Automations & scenes > Create automation > Edit in YAML. The time can come from speech-to-text as
 digits or as words ("6:30" or "six thirty"); both work.
+
+To make the alarm repeat, say the days too: "set an alarm for 7:30 am on weekdays", "Monday to Friday",
+"on weekends", "every day", "Mondays and Thursdays". Days can also be left out ("every day except
+Sunday"). A named day repeats every week, because a device alarm has no way to hold a one-off date.
+The importable [set an alarm by voice](../blueprints/automation/techo5/set_alarm_by_voice.yaml)
+blueprint is the maintained version of the first automation and reads all of these; the shorter copy
+below sets a one-time alarm.
 
 ```yaml
 alias: TECHO5 - set an alarm by voice
@@ -2697,6 +2734,40 @@ An auth key from the Tailscale admin console (`tskey-auth-…`), pre-approved an
 action: esphome.office_tailscale_login
 data:
   auth_key: tskey-auth-example
+```
+
+## Join a Headscale tailnet
+
+In YAML, refer to this action as `esphome.<node>_headscale_login`.
+
+Joins the device to the tailnet of your own Headscale server with a pre-auth key, and turns its
+**Tailscale** switch on. A device that was on Tailscale's tailnet leaves it first. Otherwise it works
+as [`tailscale_login`](#join-a-tailnet) does: the key isn't kept, and it waits up to 30 seconds to see
+the device connect. Echo Shows, the Echo Spot and the Skylight only. See
+[Your own Headscale](tailscale.md#your-own-headscale).
+
+> **Good to know**
+>
+> This needs an API encryption key: it's refused unless Home Assistant's *ESPHome* link to the device
+> already has a real encryption key set, since otherwise the key would cross the network in the clear.
+
+### auth_key (Required)
+
+*string*
+
+A pre-auth key from your Headscale server (`headscale preauthkeys create`).
+
+### server_url (Required)
+
+*string*
+
+Your Headscale server's address, as its `server_url` says, such as `https://headscale.example.com`.
+
+```yaml
+action: esphome.office_headscale_login
+data:
+  auth_key: hskey-auth-example
+  server_url: https://headscale.example.com
 ```
 
 ## Join a NetBird network

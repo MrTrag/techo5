@@ -133,6 +133,9 @@ type Display struct {
 	// camButtons is the camera page's action buttons between taps: the one armed (camera_buttons.go).
 	camButtons cameraButtons
 
+	// firstRun is what the first-run faces keep between frames (firstrun.go, firstrun_spot.go).
+	firstRun firstRunState
+
 	light *esphome.Light
 	auto  *esphome.Switch
 	// power is Screen power, the screen's on and off as a switch, and roomSw Screen ignores room light
@@ -171,6 +174,9 @@ type Display struct {
 	weatherFx *esphome.Switch
 	// muteRing is the muted ring drawn thin and dim, on or off (mutering_spot.go).
 	muteRing *esphome.Switch
+	// camDot and idleRing are the quieter rims of #431 (rimdot_spot.go).
+	camDot   *esphome.Select
+	idleRing *esphome.Switch
 	lang     *esphome.Select
 
 	mu      sync.Mutex
@@ -403,6 +409,7 @@ func build() *Display {
 	d.volumeSwipeSw = volumeSwipeSwitch()
 	d.weatherFx = weatherAnimationSwitch(d.wake)
 	d.muteRing = muteRingSwitch(d.wake)
+	d.camDot, d.idleRing = cameraDotSelect(d.wake), idleRingSwitch(d.wake)
 	d.nightHours = nightHoursSelect(d)
 	d.nightStart, d.nightEnd = nightEndSelect(d, true), nightEndSelect(d, false)
 	d.weekendStart, d.weekendEnd = weekendEndSelect(d, true), weekendEndSelect(d, false)
@@ -475,7 +482,7 @@ func (d *Display) timerStyleSel() *esphome.Select { return nil }
 func (d *Display) skinSel() *esphome.Select { return d.skinSl }
 
 func (d *Display) Entities() []esphome.Entity {
-	return []esphome.Entity{d.light, d.power, d.roomSw, d.auto, d.clock, d.clockStyleSel, d.clockPos, d.camTime, d.answerTime, d.turnStyle, d.skinSl, d.callBtn, d.weatherFx, d.muteRing, d.lang, d.styleSwipeSw, d.volumeSwipeSw, d.fontSel, d.textSizeSel,
+	return []esphome.Entity{d.light, d.power, d.roomSw, d.auto, d.clock, d.clockStyleSel, d.clockPos, d.camTime, d.answerTime, d.turnStyle, d.skinSl, d.callBtn, d.weatherFx, d.muteRing, d.camDot, d.idleRing, d.lang, d.styleSwipeSw, d.volumeSwipeSw, d.fontSel, d.textSizeSel,
 		d.nightHours, d.nightStart, d.nightEnd, d.weekendStart, d.weekendEnd, d.nightMode, d.atNight, d.nightStyle, d.glowLevel, d.nightInfoSw}
 }
 
@@ -497,6 +504,8 @@ func (d *Display) Restore(c config.Config) {
 	d.volumeSwipeSw.Set(!c.Screen.NoVolumeSwipe)
 	setWeatherAnimation(d.weatherFx, !c.Screen.WeatherStill)
 	setMuteRingSubtle(d.muteRing, c.Screen.MuteRingSubtle)
+	setCameraDotWatchedOnly(d.camDot, c.Screen.CameraDotWatchedOnly)
+	setIdleRing(d.idleRing, !c.Screen.NoIdleRing)
 	d.nightHoursChanged()
 	d.atNight.Set(atNightOptions[atNightIndex()])
 	d.nightStyle.Set(nightStyleOptions[nightStyleIndex()])
@@ -808,6 +817,13 @@ func (d *Display) gesture(g touch.Gesture) {
 	}
 	if d.videoUpSpot() {
 		d.videoGestureSpot(g)
+		return
+	}
+	// First run still to do takes every finger, as the face it draws is all there is.
+	if d.firstRunActive() {
+		if g.Kind == touch.Tap {
+			d.firstRunTapSpot(g.X, g.Y)
+		}
 		return
 	}
 	// The microphone open for an announcement: its face takes every gesture, because a face nobody
@@ -1570,7 +1586,8 @@ func (d *Display) frame() (next time.Duration) {
 	}
 	s.muted, _ = mute.Get().Muted()
 	s.mutedSubtle = muteRingSubtle.Load()
-	s.listening = babymon.Listening()
+	s.noIdleRing = idleRingHidden.Load()
+	s.listening = babymon.Shown()
 	// A stream this player is carrying is the room's when it is what is being heard: the face names it,
 	// and says what it is doing, though the audio never passes through this player's own stream. Both,
 	// not just playing: the face tests paused first, so a station left paused underneath would label
@@ -1621,7 +1638,7 @@ func (d *Display) frame() (next time.Duration) {
 		s.talkOffered, s.talk = talkback.Offered(s.camera.Entity), talkback.Get().State()
 		s.camButtons = d.camButtons.faces(s.camera.Entity, cameraButtonsFor(s.camera), now)
 	}
-	s.cameraLive = camera.Get().Running()
+	s.cameraLive = camera.Get().Running() && (!cameraDotWatchedOnly.Load() || camstream.Watching() || camstream.ToHomeAssistant())
 	bt := btaudio.Get().State()
 	s.btPairing = bt.Pairing
 	if s.menuOpen {
@@ -1682,6 +1699,10 @@ func (d *Display) frame() (next time.Duration) {
 	if !s.setupAsking {
 		s.takes = takes.Get().Card()
 		s.setupAsking = s.takes.Up()
+	}
+	// First run still to do takes the face (firstrun_spot.go), under all of the above.
+	if s.firstRunUp = d.firstRunActive(); s.firstRunUp {
+		s.firstRun = d.firstRunView(now)
 	}
 	s.announceReady = config.Get().Home.HouseWord != ""
 	s.announceRecording = announce.Get().Recording()
@@ -1811,6 +1832,8 @@ func (d *Display) frame() (next time.Duration) {
 		return fxFrame
 	case s.sheetOpen:
 		return dialFrame // a finger dragging the page is followed smoothly
+	case s.firstRunUp:
+		return time.Second // Home Assistant connecting moves it on by itself
 	case s.showDash && !s.menuOpen:
 		return time.Second // what arrives for it wakes the loop itself
 	case d.r.artDrawn:

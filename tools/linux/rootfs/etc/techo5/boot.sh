@@ -10,7 +10,7 @@
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 LOGDIR=/data/techo5-linux
-log() { echo "techo5-boot: $*" > /dev/kmsg; echo "$(cut -d' ' -f1 /proc/uptime) $*" >> /run/boot.log; }
+log() { echo "<14>techo5-boot: $*" > /dev/kmsg; echo "$(cut -d' ' -f1 /proc/uptime) $*" >> /run/boot.log; }
 
 # What differs between devices; the Echo Show 5's values unless the image carries its own.
 DATA_DEV=/dev/mmcblk0p16
@@ -57,7 +57,9 @@ mountpoint -q /tmp || mount -t tmpfs tmpfs /tmp
 mkdir -p /dev/shm
 mountpoint -q /dev/shm || mount -t tmpfs -o mode=1777,size=1m tmpfs /dev/shm
 mountpoint -q /data || mount -t ext4 -o noatime $DATA_DEV /data
-mountpoint -q /store || mount -t ext4 -o ro,noatime $STORE_DEV /store
+# A board with no store (STORE_DEV=none: the Surface RT) skips it: mounting a name that is no block
+# device leaves "Can't lookup blockdev" in the kernel log.
+mountpoint -q /store || { [ -b "$STORE_DEV" ] && mount -t ext4 -o ro,noatime $STORE_DEV /store; }
 # The root is read-only; what needs writing lives on tmpfs or userdata.
 mount -t tmpfs tmpfs /var/log
 mount -t tmpfs tmpfs /var/tmp
@@ -325,7 +327,12 @@ t5_bt_up "$BT_MODULE" /var/log
 			# (techo5-net check): without it, a device whose router moved to another subnet, or
 			# whose supplicant hung, would keep an address and a route and never be noticed.
 			[ -x /usr/local/sbin/techo5-net ] && /usr/local/sbin/techo5-net check
-			t5_wifi_prefer5
+			# Prefer 5 GHz off (echod, feature/wifiband): the link stays on the band it is on.
+			if [ -e /run/techo5/wifi-keep-band ]; then
+				t5_wifi_unpin
+			else
+				t5_wifi_prefer5
+			fi
 			continue
 		fi
 		# No network saved: nothing a restart or a reboot could join. The supplicant only has to
@@ -536,6 +543,17 @@ if [ -n "${KERNEL_UPDATE:-}" ]; then
 			fi
 		done
 	) &
+fi
+
+# Anything of the owner's, kept on userdata because the root filesystem is replaced by an update: a
+# helper that has to be running all the time, a mount, a tunnel. Executable, or it is not started, and
+# in the background with its output captured, so a script that fails cannot hold up the daemon or
+# hide why. It has to come before the log is copied to userdata, or its line is lost on the next
+# boot. One previous boot's output is kept, so a helper that chatters cannot grow the file forever.
+if [ -x $LOGDIR/rc.local ]; then
+	mv -f $LOGDIR/rc.local.log $LOGDIR/rc.local.log.1 2>/dev/null
+	($LOGDIR/rc.local > $LOGDIR/rc.local.log 2>&1) &
+	log "rc.local started"
 fi
 
 cp /run/boot.log $LOGDIR/boot.log 2>/dev/null
