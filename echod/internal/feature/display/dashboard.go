@@ -157,6 +157,7 @@ func (d *Display) dashScene(s *scene, sheetOrDrawer bool) {
 	if streamed && d.r != nil {
 		s.dash = f.Stream(d.r.w, d.r.h)
 	}
+	d.dashKeyboardScene(s, streamed && d.r != nil)
 	if want && mode == config.DashboardTessera {
 		d.tessScene(s)
 		d.tessSheetViews(s)
@@ -187,7 +188,9 @@ func (d *Display) dashScene(s *scene, sheetOrDrawer bool) {
 	d.dashShowing = want
 	// Either way the page wants every finger as it moves: streamed, to scroll the page under it;
 	// drawn, to scroll and to slide a tile's level. The rest of the screen wants swipes.
-	follow := want
+	// Not while the keyboard is over the streamed page: a key pressed with a finger that slid a little
+	// is still a tap on it.
+	follow := want && !d.dashKbd.up
 	changed := follow != d.dashFollow
 	d.dashFollow = follow
 	// Drawn, a finger held still on a light is a long press for its colors (color_sheet.go), which
@@ -260,10 +263,16 @@ func (d *Display) dashGesture(g touch.Gesture) {
 	f := dashboard.Get()
 	streamed := f.Mode() == config.DashboardStreamed
 	tess := f.Mode() == config.DashboardTessera
+	// While the keyboard is over the streamed page, only its taps count: a finger moving on it is not
+	// the page's, which is under the keyboard. Swipes from the edges wait too, as over the device's other
+	// keyboards: Done or Cancel, or the keyboard left alone (dashKeyboardIdle), lets go of the screen.
+	keys := streamed && d.dashKeyboardUp()
 
 	switch g.Kind {
 	case touch.Tap:
 		switch {
+		case keys:
+			d.dashKey(d.r.keyAt(g.X, g.Y, d.dashKeyboardSymbols()))
 		case streamed:
 			f.Touch("tap", g.X, g.Y)
 		case tess:
@@ -295,6 +304,7 @@ func (d *Display) dashGesture(g touch.Gesture) {
 		d.mu.Unlock()
 		if from == edgeNone {
 			switch {
+			case keys:
 			case streamed:
 				f.Touch("down", g.X, g.Y)
 			case tess:
@@ -311,6 +321,7 @@ func (d *Display) dashGesture(g touch.Gesture) {
 			return
 		}
 		switch {
+		case keys:
 		case streamed:
 			f.Touch("move", g.X, g.Y)
 		case tess:
@@ -327,6 +338,7 @@ func (d *Display) dashGesture(g touch.Gesture) {
 		switch from {
 		case edgeNone:
 			switch {
+			case keys:
 			case streamed:
 				f.Touch("up", g.X, g.Y)
 			case tess:
@@ -381,6 +393,10 @@ func (r *renderer) dashboardPage(s scene) {
 		r.climateSheet(s.dashClimate, dashboard.Theme{})
 		r.fanSheet(s.dashFan, dashboard.Theme{})
 		r.librarySheet(s.dashLibrary, dashboard.Theme{})
+		return
+	}
+	if s.dashKbd.up {
+		r.dashKeyboardPage(s.dashKbd)
 		return
 	}
 	v := s.dash
