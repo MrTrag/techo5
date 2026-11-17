@@ -105,15 +105,43 @@ func (r *roundRenderer) footLine(s roundScene, baseline int, otherwise string) {
 	}
 }
 
-// statusWord is the word the classic face puts over the time.
+// linkWord is what the status word says of a lost Wi-Fi or Home Assistant, as the Show's header does.
+func linkWord(down string) string {
+	switch down {
+	case linkNoWifi:
+		return tr("no_wifi")
+	case linkNoHome:
+		return tr("no_home_assistant")
+	}
+	return ""
+}
+
+// statusLineH is the step up from the status word to a second one over it.
+const statusLineH = 26
+
+// statusWord is the word a clock face puts over the time: what is true of the device now.
+//
+// What the device has lost is said here in the timer's amber and never in the mute's red, which with
+// the red rim means one thing only. Muted as well, the mute keeps its line and its rim and the loss
+// goes on a line of its own over it: neither is a reason to stop saying the other.
 func (r *roundRenderer) statusWord(s roundScene, baseline int) {
+	lost := linkWord(s.linkDown)
 	switch {
 	case s.setupAsking:
 		r.centered(r.label, tr("a_browser_is_asking"), baseline, colMuted)
 	case s.muted:
 		r.centered(r.label, tr("microphone_off"), baseline, colMuted)
+		if lost != "" {
+			r.centered(r.label, lost, baseline-statusLineH, colTimer)
+		}
 	case s.btPairing:
+		// Pairing is what a hand at the Spot is doing now, so it keeps the line; a loss goes over it.
 		r.centered(r.label, tr("bluetooth_pairing"), baseline, colBluetooth)
+		if lost != "" {
+			r.centered(r.label, lost, baseline-statusLineH, colTimer)
+		}
+	case lost != "":
+		r.centered(r.label, lost, baseline, colTimer)
 	case s.playing:
 		r.centered(r.label, tr("ui_playing"), baseline, colDim)
 	case s.paused:
@@ -350,16 +378,16 @@ func (r *roundRenderer) analogFace(s roundScene) {
 
 // wordsFace says the time down the middle of the circle.
 func (r *roundRenderer) wordsFace(s roundScene) {
-	lead, hour, period := clockWords(s.now)
-	number, link := lead, ""
-	for _, w := range []string{" past", " to"} {
-		if strings.HasSuffix(lead, w) {
-			number, link = strings.TrimSuffix(lead, w), strings.TrimSpace(w)
-		}
+	said := clockWords(s.now)
+	lead, hour, period := said.Lead(), said.Hour, said.Period
+	number, link := said.Count, said.Link
+	if number == "" {
+		// "halb sieben": the link stands where the count would.
+		number, link = link, ""
 	}
 	room := func(y int) int { return chord(y) - 60 }
 	if lead == "" {
-		r.centered(r.styleFace(false, 30), "it's", 150, colDim)
+		r.centered(r.styleFace(false, 30), said.Intro, 150, colDim)
 		r.centered(r.fitted(true, 84, hour, room(236)), hour, 236, colAccent)
 		if period != "" {
 			r.centered(r.styleFace(false, 22), period, 290, colDim)
@@ -367,7 +395,7 @@ func (r *roundRenderer) wordsFace(s roundScene) {
 		r.footLine(s, 360, shortDay(s))
 		return
 	}
-	r.centered(r.styleFace(false, 28), "it's", 110, colDim)
+	r.centered(r.styleFace(false, 28), said.Intro, 110, colDim)
 	r.centered(r.fitted(true, 64, number, room(168)), number, 168, colText)
 	r.centered(r.styleFace(false, 30), link, 214, colDim)
 	r.centered(r.fitted(true, 84, hour, room(298)), hour, 298, colAccent)

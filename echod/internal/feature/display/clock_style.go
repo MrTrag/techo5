@@ -75,6 +75,8 @@ func clockStyleIndex() int {
 // clockStyle is the style in force; an unknown one, from a newer build, is the classic face.
 func clockStyle() string { return clockStyles[clockStyleIndex()].value }
 
+// clockStyleOptions are the styles' names for Home Assistant and the setup page, which stay in English
+// whatever the screen's language: Home Assistant chooses one by its name.
 func clockStyleOptions() []string {
 	out := make([]string, len(clockStyles))
 	for i, s := range clockStyles {
@@ -83,14 +85,60 @@ func clockStyleOptions() []string {
 	return out
 }
 
+// clockStyleName is a style's name as the screen says it, in the screen's language.
+func clockStyleName(i int) string {
+	switch clockStyles[i].value {
+	case styleClassic:
+		return tr("clock_style_classic")
+	case styleBig:
+		return tr("clock_style_big")
+	case styleFlip:
+		return tr("clock_style_flip")
+	case styleLED:
+		return tr("clock_style_led")
+	case styleAnalog:
+		return tr("clock_style_analog")
+	case styleWords:
+		return tr("clock_style_words")
+	case styleSun:
+		return tr("clock_style_sun")
+	case styleDashboard:
+		return tr("clock_style_dashboard")
+	case styleBinary:
+		return tr("clock_style_binary")
+	case styleWorld:
+		return tr("clock_style_world")
+	case styleAgenda:
+		return tr("clock_style_agenda")
+	case styleGlow:
+		return tr("clock_style_glow")
+	case styleNixie:
+		return tr("clock_style_nixie")
+	case styleStack:
+		return tr("clock_style_stack")
+	case styleOverlap:
+		return tr("clock_style_overlap")
+	}
+	return clockStyles[i].label
+}
+
+// clockStyleNames are the styles' names for the screen's picker.
+func clockStyleNames() []string {
+	out := make([]string, len(clockStyles))
+	for i := range clockStyles {
+		out[i] = clockStyleName(i)
+	}
+	return out
+}
+
 // clockStyleRow is the setting on the screen, under Display.
 func clockStyleRow() settingRow {
 	return settingRow{id: "clockstyle", label: tr("clock_style_label"), sub: tr("clock_style_description"), kind: ctlChoice,
-		value: clockStyles[clockStyleIndex()].label}
+		value: clockStyleName(clockStyleIndex())}
 }
 
 func clockStylePicker() (pickerView, bool) {
-	return pickerView{title: tr("clock_style_label"), opts: clockStyleOptions(), cur: clockStyleIndex()}, true
+	return pickerView{title: tr("clock_style_label"), opts: clockStyleNames(), cur: clockStyleIndex()}, true
 }
 
 // setClockStyle saves the clock's look and shows it at once, so it can be chosen while looking.
@@ -117,7 +165,7 @@ func (d *Display) stepClockStyle(step int) {
 	n := len(clockStyles)
 	i := ((clockStyleIndex()+step)%n + n) % n
 	d.mu.Lock()
-	d.styleNamed, d.styleNamedUntil = clockStyles[i].label, time.Now().Add(styleNameFor)
+	d.styleNamed, d.styleNamedUntil = clockStyleName(i), time.Now().Add(styleNameFor)
 	d.mu.Unlock()
 	slog.Info("screen: clock style by a swipe", "style", clockStyles[i].label)
 	d.setClockStyle(i)
@@ -353,67 +401,5 @@ func onlyToday(events []hass.Event, now time.Time) []hass.Event {
 	return out
 }
 
-// numberWords are the numbers the words style says.
-var numberWords = []string{"", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
-	"eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty"}
-
-func numberWord(n int) string {
-	if n <= 20 {
-		return numberWords[n]
-	}
-	return "twenty-" + numberWords[n-20]
-}
-
-// clockWords is the time as it is said: what comes before the hour ("seven past", "quarter to", empty
-// on the hour), the hour ("two", "two o'clock", "noon", "midnight"), and the part of the day.
-func clockWords(t time.Time) (lead, hour, period string) {
-	h, m := t.Hour(), t.Minute()
-	switch {
-	case m == 0:
-	case m == 1:
-		lead = "a minute past"
-	case m == 15:
-		lead = "quarter past"
-	case m == 30:
-		lead = "half past"
-	case m == 45:
-		lead = "quarter to"
-	case m == 59:
-		lead = "a minute to"
-	case m < 30:
-		lead = numberWord(m) + " past"
-	default:
-		lead = numberWord(60-m) + " to"
-	}
-	said := h
-	if m > 30 {
-		said = (h + 1) % 24
-	}
-	// The part of the day is the said hour's - "quarter to five in the morning", not "at night" - except
-	// for noon and midnight, which belong to the hour before them.
-	ph := said
-	if said == 12 || said == 0 {
-		ph = h
-	}
-	switch {
-	case said == 0 && m == 0:
-		return "", "midnight", ""
-	case said == 12 && m == 0:
-		return "", "noon", ""
-	}
-	hour = numberWords[(said+11)%12+1]
-	if m == 0 {
-		hour += " o'clock"
-	}
-	switch {
-	case ph >= 5 && ph < 12:
-		period = "in the morning"
-	case ph >= 12 && ph < 18:
-		period = "in the afternoon"
-	case ph >= 18 && ph < 22:
-		period = "in the evening"
-	default:
-		period = "at night"
-	}
-	return lead, hour, period
-}
+// clockWords is the time as the words style says it, in the screen's language.
+func clockWords(t time.Time) locale.SaidTime { return locale.SayTime(t, screenLang()) }

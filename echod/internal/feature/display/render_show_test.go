@@ -22,6 +22,8 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/feature/notify"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/phone"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/remind"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/takes"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/voice"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/hass"
 )
 
@@ -63,6 +65,11 @@ func TestShowScenesDraw(t *testing.T) {
 			callees: []phone.Callee{{Name: "a", Device: true}, {Name: "b", Device: true}, {Name: "c", Device: true},
 				{Name: "d", Number: "15551234567"}, {Name: "e", Number: "106"}}},
 		"drawer-call-empty": {now: at, phase: "idle", weather: sky, showDrawer: true, drawerTab: drawerCall},
+		// The drawer over the dashboard: the page stays behind it, not the clock.
+		"dashboard-drawer-call": {now: at, phase: "idle", weather: sky, showDash: true, dashMode: config.DashboardDrawn, drawn: fourControls(),
+			showDrawer: true, drawerTab: drawerCall, demo: true,
+			callees: []phone.Callee{{Name: "a", Device: true}, {Name: "b", Device: true}, {Name: "c", Device: true},
+				{Name: "d", Number: "15551234567"}, {Name: "e", Number: "106"}}},
 		"nowplaying": {now: at, phase: "idle", nowPlaying: true, playing: true, weather: sky,
 			radio: home.Radio{Now: "KXYZ 101.1", Title: "Take It Easy", Artist: "Eagles"}},
 		// Words in a script none of the screen's fonts has: boxes, unless a font of one's own has it.
@@ -85,8 +92,18 @@ func TestShowScenesDraw(t *testing.T) {
 			spoken: true, speed: 1,
 			radio:         home.Radio{Now: "Music Assistant", Title: "Northern Lights", Artist: "Ann Author", Thumb: previewMusicCover()},
 			musicPosition: media.Position{At: at, Pos: 1500 * time.Second, Dur: 3600 * time.Second, Rate: 1}},
+		// A song Music Assistant can move through: back 15 and forward 30 seconds, above the Library button on
+		// the classic page and under the three buttons on the modern one.
+		"nowplaying-seek": {now: at, phase: "idle", nowPlaying: true, playing: true, weather: sky, libraryWord: "Library", seek: true,
+			radio: home.Radio{Playing: true, Now: "Music Assistant", Title: "Some Jazz", Artist: "The Quartet", Music: true}},
+		"nowplaying-modern-seek": {now: at, phase: "idle", nowPlaying: true, modernMusic: true, playing: true, weather: sky, libraryWord: "Library", seek: true,
+			radio:         home.Radio{Now: "Music Assistant", Title: "After the Rain", Artist: "The Glass Hours", Thumb: previewMusicCover()},
+			musicPosition: media.Position{At: at, Pos: 86 * time.Second, Dur: 222 * time.Second, Rate: 1}},
 		"nowplaying-music-assistant-paused": {now: at, phase: "idle", nowPlaying: true, paused: true, weather: sky,
 			radio: home.Radio{Now: "Music Assistant", Title: "Some Jazz", Artist: "The Quartet", Music: true}},
+		// A station tapped and not playing yet: the page is up at once and says so.
+		"nowplaying-starting":        {now: at, phase: "idle", nowPlaying: true, weather: sky, radio: home.Radio{Chosen: "KXYZ 101.1"}},
+		"nowplaying-modern-starting": {now: at, phase: "idle", nowPlaying: true, modernMusic: true, weather: sky, radio: home.Radio{Chosen: "KXYZ 101.1"}},
 		"nowplaying-modern": {now: at, phase: "idle", nowPlaying: true, modernMusic: true, playing: true, weather: sky,
 			radio:         home.Radio{Now: "Music Assistant", Title: "After the Rain", Artist: "The Glass Hours", Thumb: previewMusicCover()},
 			musicPosition: media.Position{At: at, Pos: 86 * time.Second, Dur: 222 * time.Second, Rate: 1}},
@@ -101,6 +118,13 @@ func TestShowScenesDraw(t *testing.T) {
 		"weather-partly-night": {now: at, phase: "idle", weather: home.Weather{Condition: home.PartlyCloudyNight, Temp: "58°"}, forecast: week, showWeather: true},
 		"weather-clear-night":  {now: at, phase: "idle", weather: home.Weather{Condition: "clear-night", Temp: "58°"}, forecast: week, showWeather: true},
 		"setup-ask":            {now: at, phase: "idle", weather: sky, setupAsking: true},
+		// Record wake word: asked for on the setup page, a take to say now, and one not heard and asked again.
+		"record-word-armed": {now: at, phase: "idle", weather: sky, setupAsking: true,
+			takes: takes.Card{ID: 2, Phase: takes.Armed, Run: true, Take: 1, Of: 20, Gap: 3 * time.Second}},
+		"record-word-take": {now: at, phase: "idle", weather: sky, setupAsking: true,
+			takes: takes.Card{ID: 2, Phase: takes.Recording, Run: true, Take: 7, Of: 20, Gap: 3 * time.Second, Listening: true}},
+		"record-word-again": {now: at, phase: "idle", weather: sky, setupAsking: true,
+			takes: takes.Card{ID: 2, Phase: takes.Recording, Run: true, Take: 7, Of: 20, Gap: 3 * time.Second, Missed: true}},
 		"announcement": {now: at, phase: "idle", weather: sky, showAnnouncement: true,
 			announcement: announce.Message{From: "Kitchen", Text: "dinner is ready"}},
 		"announcement-voice": {now: at, phase: "idle", weather: sky, showAnnouncement: true,
@@ -119,9 +143,9 @@ func TestShowScenesDraw(t *testing.T) {
 				Message: "The washing machine is done"}},
 		// The device's own notes (home/hint.go): a station Home Assistant never started, the star refused.
 		"notification-radio-hint": {now: at, phase: "idle", weather: sky, showNotification: true,
-			notification: notify.Notification{Kind: notify.Text, Title: "Radio", Message: home.NoStartHint, Own: true}},
+			notification: notify.Notification{Kind: notify.Text, Title: "Radio", Message: home.HintText(home.NoStartHint), Own: true}},
 		"notification-favorite-hint": {now: at, phase: "idle", weather: sky, showNotification: true,
-			notification: notify.Notification{Kind: notify.Text, Title: "Favorites", Message: home.FavoriteHint, Own: true}},
+			notification: notify.Notification{Kind: notify.Text, Title: "Favorites", Message: home.HintText(home.FavoriteHint), Own: true}},
 		"notification-no-title": {now: at, phase: "idle", weather: sky, showNotification: true,
 			notification: notify.Notification{Kind: notify.Text, Message: "The washing machine is done"}},
 		"notification-unknown-icon": {now: at, phase: "idle", weather: sky, showNotification: true,
@@ -138,6 +162,9 @@ func TestShowScenesDraw(t *testing.T) {
 			Start:   at.Add(3 * time.Hour), End: at.Add(4 * time.Hour)}},
 		"popup-all-day": {now: at, phase: "idle", weather: sky, popup: &hass.Event{Summary: "Trash day", AllDay: true,
 			Start: at, End: at.Add(24 * time.Hour)}},
+		// The update dialog over the clock, part-way through its download.
+		"update-dialog": {now: at, phase: "idle", weather: sky, updateActive: true, updatePhase: "downloading",
+			updateProgress: 0.42, updateTarget: "1.6.35"},
 		"notification-under-reminder": {now: at, phase: "idle", weather: sky, showReminder: true,
 			reminder: remind.Reminder{Label: "Take the trash out"}, showNotification: true,
 			notification: notify.Notification{Kind: notify.Text, Message: "hidden under the reminder"}},
@@ -177,7 +204,15 @@ func TestShowScenesDraw(t *testing.T) {
 		// Muted, on the pages the header has to carry it onto. The ringing one is why the header
 		// exists: an alarm sounding on a device that cannot hear "stop" used to look exactly like one
 		// that could.
-		"muted-clock": {now: at, phase: "idle", weather: sky, muted: true},
+		"muted-clock":           {now: at, phase: "idle", weather: sky, muted: true},
+		"lost-home-clock":       {now: at, phase: "idle", weather: sky, linkDown: linkNoHome},
+		"lost-wifi-muted-clock": {now: at, phase: "idle", weather: sky, muted: true, linkDown: linkNoWifi},
+		// A request that failed, in each kind of turn screen: one line where the answer would be.
+		"turn-failed-classic":       {now: at, phase: "lingering", heard: "Turn off the porch light", failed: voice.FailedNoHome},
+		"turn-failed-classic-alone": {now: at, phase: "lingering", failed: voice.FailedNoAssistant},
+		"turn-failed-bars": {now: at, phase: "lingering", heard: "Turn off the porch light", failed: voice.FailedTimeout,
+			eq: &eqView{level: make([]float64, eqBands), peak: make([]float64, eqBands), quiet: true}},
+		"turn-failed-captions": {now: at, phase: "idle", weather: sky, cue: "lingering", failed: voice.FailedError},
 		"muted-ringing-alarm": {now: at, phase: "idle", muted: true,
 			ring: ringState{alarm: &alarm.Ring{Label: "Wake up"}, snoozable: true}, snooze: 9},
 		"muted-call": {now: at, phase: "idle", muted: true,

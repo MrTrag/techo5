@@ -18,7 +18,7 @@ import (
 
 // The screen's own settings that a device far from its owner still needs set from a phone: how the
 // clock looks, the font of the screen's words, what a tap on it does, the slideshow, and weather art in place of its photos. On the
-// Screen & Photos tab, over the dashboard and the photos; the rest of what the screen shows is still
+// Screen tab, over the dashboard and the photos; the rest of what the screen shows is still
 // set on the screen, where it can be seen.
 
 // ScreenChoices is the clock's look as the screen offers it, handed in by the display, which imports
@@ -59,11 +59,11 @@ type ScreenChoices struct {
 	// leaves the box off the page.
 	IgnoreRoomLights func(bool)
 	// Calendar is how the calendar page looks, where the screen has one of its own (the Show): on the
-	// Weather & Calendar tab, under the calendars.
+	// Screen tab, by the clock's other looks.
 	Calendar []CalendarChoice
 
 	// Todo is whether the screen has a To-do tab in its drawer (the Show), which the to-do lists section
-	// of the Weather & Calendar tab chooses the lists for (todo.go).
+	// of the Screen tab chooses the lists for (todo.go).
 	Todo bool
 
 	// Themes is the screen's themes and light and dark mode, where it has them (the Show); nil leaves
@@ -80,6 +80,9 @@ type CalendarChoice struct {
 	Now              func() int
 	Choose           func(int)
 }
+
+// worldStyle is the clock style the World clock places are for, as the screen names it.
+const worldStyle = "World"
 
 // maxWorldPlaces is how many World places the page takes: the most any screen shows.
 const maxWorldPlaces = 3
@@ -104,6 +107,13 @@ var slideshowModes = []struct{ label, value string }{
 	{"Screensaver, after a while", config.SlideshowScreensaver},
 }
 
+// saverClockAts are where the screensaver's clock can sit, as the page names them, with what the config keeps.
+var saverClockAts = []struct{ label, value string }{
+	{"Top", ""},
+	{"Center", config.SlideshowAtCenter},
+	{"Bottom", config.SlideshowAtBottom},
+}
+
 // saverClocks are the screensaver clock's sizes as the page names them, with what the config keeps.
 var saverClocks = []struct{ label, value string }{
 	{"Off", config.SlideshowOverlayOff},
@@ -117,12 +127,19 @@ func screenSection(w http.ResponseWriter, token string) {
 	if s == nil {
 		return
 	}
-	fmt.Fprint(w, `<fieldset><legend>The screen</legend><form method="post" action="/setup/save">`)
-	hidden(w, token, "screen", "photos")
+	fieldsetOpen(w, "screen", "The screen")
+	fmt.Fprint(w, `<form method="post" action="/setup/save">`)
+	hidden(w, token, "screen")
 	fmt.Fprint(w, `<label for="clockstyle">Clock style</label><select id="clockstyle" name="clockstyle">`)
 	cur := s.Current()
 	for i, l := range s.Styles {
-		fmt.Fprintf(w, `<option value="%d"%s>%s</option>`, i, selected(i == cur), html.EscapeString(l))
+		// The World style is marked, for the page to show its places only while it is the one chosen
+		// (.worldonly, tabs.go).
+		world := ""
+		if l == worldStyle {
+			world = ` class="world"`
+		}
+		fmt.Fprintf(w, `<option value="%d"%s%s>%s</option>`, i, world, selected(i == cur), html.EscapeString(l))
 	}
 	fmt.Fprint(w, `</select>`)
 	if len(s.Fonts) > 0 {
@@ -136,10 +153,10 @@ func screenSection(w http.ResponseWriter, token string) {
 	  the screen's own. A letter a font does not have is drawn in Go.</p>`)
 	}
 	places := strings.Join(config.Get().Screen.WorldClocks, ", ")
-	fmt.Fprintf(w, `<label for="world">World clock places</label>
+	fmt.Fprintf(w, `<div class="worldonly"><label for="world">World clock places</label>
 	 <input id="world" name="world" value="%s" placeholder="America/New_York, Europe/London, Asia/Tokyo">
 	 <p class="note">For the World clock style: up to %d time zone names, with commas between them. Leave it
-	  empty for New York, London and Tokyo.%s</p>`, html.EscapeString(places), maxWorldPlaces, fewerPlaces(s.Places))
+	  empty for New York, London and Tokyo.%s</p></div>`, html.EscapeString(places), maxWorldPlaces, fewerPlaces(s.Places))
 	swipe := ""
 	if !config.Get().Screen.NoStyleSwipe {
 		swipe = " checked"
@@ -191,7 +208,9 @@ func screenSection(w http.ResponseWriter, token string) {
 	 <p><label><input type="checkbox" name="art" value="yes" style="width:auto"%s> Weather art in place of photos</label></p>
 	 <p class="note">Weather art is a landscape the device draws for the weather and the time of day, with rain,
 	  snow and clouds moving over it. It needs no photos and no Home Assistant.</p>`, art)
-	fmt.Fprint(w, `<label for="saverclock">Screensaver clock</label><select id="saverclock" name="saverclock">`)
+	// The screensaver's clock and its weather are only there in screensaver mode: the page leaves them
+	// out for the other two (.saveronly, tabs.go).
+	fmt.Fprint(w, `<div class="saveronly"><label for="saverclock">Screensaver clock</label><select id="saverclock" name="saverclock">`)
 	// A stored size this page doesn't name draws as Normal on the device, so it shows as Normal here:
 	// matching no option, the browser would show Off, and Save would turn the clock off.
 	overlay := home.Get().SlideshowOverlay()
@@ -201,11 +220,18 @@ func screenSection(w http.ResponseWriter, token string) {
 	for _, c := range saverClocks {
 		fmt.Fprintf(w, `<option value="%s"%s>%s</option>`, c.value, selected(c.value == overlay), c.label)
 	}
+	fmt.Fprint(w, `</select><label for="saverat">Screensaver clock position</label><select id="saverat" name="saverat">`)
+	at := home.Get().SlideshowClockAt()
+	for _, c := range saverClockAts {
+		fmt.Fprintf(w, `<option value="%s"%s>%s</option>`, c.value, selected(c.value == at), c.label)
+	}
 	fmt.Fprintf(w, `</select>
+	 <p class="note">The photo's date and place go to the other side from the clock: at the bottom for a clock at
+	  the top, at the top for a clock at the bottom.</p>
 	 <p><label><input type="checkbox" name="saverweather" value="yes" style="width:auto"%s> Weather with the
 	  screensaver clock</label></p>
 	 <p class="note">On the screensaver, a swipe left or right goes to the next photo or the one before, and that
-	  photo stays up for five minutes.</p>
+	  photo stays up for five minutes.</p></div>
 	 <p><button type="submit">Save</button></p></form></fieldset>`, checked(home.Get().SlideshowWeather()))
 }
 
@@ -303,6 +329,9 @@ func saveScreen(r *http.Request) string {
 	}
 	if sentClock {
 		h.ChooseSlideshowOverlay(saverClock[0])
+		if at, ok := r.PostForm["saverat"]; ok && len(at) > 0 && slices.ContainsFunc(saverClockAts, func(c struct{ label, value string }) bool { return c.value == at[0] }) {
+			h.ChooseSlideshowClockAt(at[0])
+		}
 		h.SetSlideshowWeather(r.PostFormValue("saverweather") == "yes")
 	}
 	slog.Info("setup page: screen set", "clock style", strings.ToLower(s.Styles[i]), "slideshow", mode, "art", h.SlideshowArt())

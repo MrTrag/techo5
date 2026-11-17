@@ -6,14 +6,12 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"strconv"
 	"strings"
 	"time"
 
-	"golang.org/x/image/font"
-
 	"github.com/HuskerMinion/techo5/echod/internal/lib/hass"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/locale"
+	"golang.org/x/image/font"
 )
 
 // The calendar page (docs/calendar-and-night-plan.md): the month as a grid with each day's events on
@@ -119,9 +117,16 @@ func (r *renderer) calendarPage(s scene) {
 	if !l.weather {
 		v.forecast = nil
 	}
+	// Under an open window a finger is on the window, or beside it, where a tap only closes it: the
+	// page under it shows no press (pressCalendar).
+	chips := v.chipsOpen && len(v.order) > 1
+	press := r.press.on
+	r.press.on = press && !chips && v.detail == nil
 	switch {
 	case !v.day.IsZero() && v.week && l.week:
+		restore := r.calendarFaces()
 		r.calendarWeek(v, l)
+		restore()
 	case !v.day.IsZero() && l.timeline:
 		r.calendarTimeline(v, l)
 	case !v.day.IsZero():
@@ -131,14 +136,20 @@ func (r *renderer) calendarPage(s scene) {
 	case v.agenda:
 		r.calendarAgenda(v)
 	default:
+		restore := r.calendarFaces()
 		r.calendarMonth(v, l)
+		restore()
 	}
-	if v.chipsOpen && len(v.order) > 1 {
+	if chips {
+		r.press.on = press && v.detail == nil
 		r.calChipsList(v)
 	}
 	if v.detail != nil {
+		r.press.on = press
 		r.calendarDetail(v, *v.detail)
 	}
+	r.press.on = press
+	r.pressCalendar()
 }
 
 // calArrowIcon is the size the header's chevrons are drawn at. The program's icon buttons draw the
@@ -213,10 +224,10 @@ func (r *renderer) calendarDay(v calendarView) {
 	}
 	// More than fits: a swipe up or down moves through them, and the corners say there are more.
 	if first > 0 {
-		r.text(r.tiny, "▲ "+strconv.Itoa(first)+" more", r.w-r.margin-r.s(130), top-r.s(8), amber)
+		r.text(r.tiny, "▲ "+fmt.Sprintf(tr("ui_cal_n_more"), first), r.w-r.margin-r.s(130), top-r.s(8), amber)
 	}
 	if rest := len(evs) - first - len(shown); rest > 0 {
-		label := "▼ " + strconv.Itoa(rest) + " more"
+		label := "▼ " + fmt.Sprintf(tr("ui_cal_n_more"), rest)
 		r.text(r.tiny, label, r.w-r.margin-r.width(r.tiny, label), r.h-r.s(4), amber)
 	}
 }
@@ -358,17 +369,17 @@ func eventWhen(e hass.Event, day time.Time) string {
 		if sameDay(e.Start, last) || !last.After(e.Start) {
 			return tr("all_day")
 		}
-		return "All day, " + e.Start.Format("Jan 2") + " – " + last.Format("Jan 2")
+		return fmt.Sprintf(tr("ui_cal_all_day_s"), locale.ShortMonthDay(e.Start, screenLang())+" – "+locale.ShortMonthDay(last, screenLang()))
 	}
 	if !e.End.After(e.Start) {
 		return clockText(e.Start)
 	}
 	from, to := clockText(e.Start), clockText(e.End)
 	if !sameDay(e.Start, day) {
-		from = e.Start.Format("Jan 2") + " " + from
+		from = locale.ShortMonthDay(e.Start, screenLang()) + " " + from
 	}
 	if !sameDay(e.End, day) {
-		to = e.End.Format("Jan 2") + " " + to
+		to = locale.ShortMonthDay(e.End, screenLang()) + " " + to
 	}
 	return from + " – " + to
 }
@@ -378,18 +389,18 @@ func eventWhenFull(e hass.Event) (day, at string) {
 	if e.AllDay {
 		last := e.End.AddDate(0, 0, -1)
 		if !last.After(e.Start) {
-			return e.Start.Format("Monday, January 2"), tr("all_day")
+			return locale.LongDate(e.Start, screenLang()), tr("all_day")
 		}
-		return e.Start.Format("Mon, Jan 2") + " – " + last.Format("Mon, Jan 2"), tr("all_day")
+		return locale.ShortDate(e.Start, screenLang()) + " – " + locale.ShortDate(last, screenLang()), tr("all_day")
 	}
 	if !e.End.After(e.Start) {
-		return e.Start.Format("Monday, January 2"), clockText(e.Start)
+		return locale.LongDate(e.Start, screenLang()), clockText(e.Start)
 	}
 	if sameDay(e.Start, e.End) {
-		return e.Start.Format("Monday, January 2"), clockText(e.Start) + " – " + clockText(e.End)
+		return locale.LongDate(e.Start, screenLang()), clockText(e.Start) + " – " + clockText(e.End)
 	}
-	return fmt.Sprintf("%s %s –", e.Start.Format("Mon, Jan 2"), clockText(e.Start)),
-		fmt.Sprintf("%s %s", e.End.Format("Mon, Jan 2"), clockText(e.End))
+	return fmt.Sprintf("%s %s –", locale.ShortDate(e.Start, screenLang()), clockText(e.Start)),
+		fmt.Sprintf("%s %s", locale.ShortDate(e.End, screenLang()), clockText(e.End))
 }
 
 // calendarDetail is one event's window: the title, when, the calendar, and the location and the

@@ -98,6 +98,15 @@ func Crown() bool { return Board == boardCrown }
 // Athena is whether this is the 2nd gen Echo Show 8.
 func Athena() bool { return Board == boardAthena }
 
+// The Skylight hangs on a wall and is read from across a hall: at the layout's own size only its clock
+// could be, the calendar's words coming out about 5 mm tall. Its words start a step larger, and a step
+// larger again is offered; the size chosen on the device or in Home Assistant still decides.
+func init() {
+	if Board == boardSkylight {
+		defaultTextSize, mostTextSize = 125, 150
+	}
+}
+
 // Skylight is whether this is the Skylight Calendar 15 (150-CAL): a 1920 by 1080 landscape screen,
 // no microphone, a speaker on the RK809's headphone outputs.
 func Skylight() bool { return Board == boardSkylight }
@@ -114,6 +123,10 @@ var soundCard string
 // HasMicrophone is whether the device can hear: every Show but the Skylight, which was built
 // without microphones.
 func HasMicrophone() bool { return !Skylight() }
+
+// Show5 is whether this is an Echo Show 5, either generation: the 960 by 480 panel. With Show8, the
+// screens on a bedside table, which the night clock's next alarm is for (feature/display, night_alarm.go).
+func Show5() bool { return Board == boardCronos || Board == boardCheckers }
 
 // Show8 is whether the screen is the Show 8's: an 800 by 1280 portrait panel in a 1280 by 800
 // landscape device, with a FocalTech touch controller behind it. Both generations have it.

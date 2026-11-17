@@ -24,15 +24,16 @@ import (
 )
 
 const (
-	service     = "org.bluez"
-	adapterIfc  = "org.bluez.Adapter1"
-	deviceIfc   = "org.bluez.Device1"
-	playerIfc   = "org.bluez.MediaPlayer1"
-	controlIfc  = "org.bluez.MediaControl1"
-	agentIfc    = "org.bluez.Agent1"
-	agentMgrIfc = "org.bluez.AgentManager1"
-	propsIfc    = "org.freedesktop.DBus.Properties"
-	objMgrIfc   = "org.freedesktop.DBus.ObjectManager"
+	service      = "org.bluez"
+	adapterIfc   = "org.bluez.Adapter1"
+	deviceIfc    = "org.bluez.Device1"
+	playerIfc    = "org.bluez.MediaPlayer1"
+	controlIfc   = "org.bluez.MediaControl1"
+	transportIfc = "org.bluez.MediaTransport1"
+	agentIfc     = "org.bluez.Agent1"
+	agentMgrIfc  = "org.bluez.AgentManager1"
+	propsIfc     = "org.freedesktop.DBus.Properties"
+	objMgrIfc    = "org.freedesktop.DBus.ObjectManager"
 
 	agentPath = dbus.ObjectPath("/org/techo5/agent")
 
@@ -361,6 +362,35 @@ func playerOf(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant, devic
 	return dbus.ObjectPath(players[0]), true
 }
 
+// AbsoluteVolume reports whether bluetoothd can set device's own volume over AVRCP (absolute
+// volume): one of its audio transports has a Volume. BlueZ shows a transport's Volume only once the
+// remote has said over AVRCP that it takes one, which can be a few seconds after its audio comes up,
+// and never for a speaker that does not.
+func (a *Adapter) AbsoluteVolume(device dbus.ObjectPath) (bool, error) {
+	var objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant
+	if err := a.conn.Object(service, "/").Call(objMgrIfc+".GetManagedObjects", 0).Store(&objs); err != nil {
+		return false, err
+	}
+	return transportVolume(objs, device), nil
+}
+
+// transportVolume is whether any of device's MediaTransport1 objects in objs has a Volume.
+func transportVolume(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant, device dbus.ObjectPath) bool {
+	for path, ifcs := range objs {
+		props, ok := ifcs[transportIfc]
+		if !ok {
+			continue
+		}
+		if dev, _ := props["Device"].Value().(dbus.ObjectPath); dev != device && deviceOf(path) != device {
+			continue
+		}
+		if _, ok := props["Volume"]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // advertOnly is a change that is only a device heard again: its signal strength or what it
 // advertises. Bluetooth sensors send these many times a second without anything about the device as
 // a connection changing, so they go to Advertised alone and not to Changed.
@@ -588,6 +618,28 @@ func (a *Adapter) Pairing(on bool) error {
 		return err
 	}
 	return a.set("Discoverable", on)
+}
+
+// SetPairable sets whether the adapter bonds, and says what it was so the caller can put it back. Off,
+// a pairing the device starts itself still completes, but the kernel answers it as "no bonding" and
+// keeps no key: a peer that asked for a bond can then drop the link (the Echo Wall Clock, techo5#511).
+// The agent still refuses pairings nobody asked for, so on for one attempt lets in only that one.
+func (a *Adapter) SetPairable(on bool) (was bool, err error) {
+	if v, err := a.get("Pairable"); err == nil {
+		was, _ = v.Value().(bool)
+	}
+	return was, a.set("Pairable", on)
+}
+
+// Discoverable is whether the adapter is findable now: Bluetooth audio's pairing mode makes it so
+// (Pairing), and a pairing the device starts itself does not.
+func (a *Adapter) Discoverable() bool {
+	v, err := a.get("Discoverable")
+	if err != nil {
+		return false
+	}
+	on, _ := v.Value().(bool)
+	return on
 }
 
 // Discover starts or stops looking for devices. Scanning shares the antenna with Wi-Fi, so it is

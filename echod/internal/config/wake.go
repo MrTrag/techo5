@@ -41,6 +41,9 @@ type Wake struct {
 	// detect, clips.go). Off unless chosen, and turning it off deletes what was kept.
 	KeepClips bool `json:"keep_clips,omitempty"`
 
+	// Send uploads each kept clip to a trainer on the home network (wakesend.go). Off unless chosen.
+	Send WakeSend `json:"send,omitzero"`
+
 	// VoiceCheck is where a device asks who said the wake word, so it can answer "Yes, Steve?" rather
 	// than "Yes?" (jarvis, feature/wakeword/named.go): the voice-ID service's wake check. Empty means
 	// DefaultVoiceCheck, "off" turns it off. VoiceCheckMs is how long a wake waits for the answer

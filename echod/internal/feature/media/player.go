@@ -98,6 +98,9 @@ type Player struct {
 	// top is the Louder top volume switch (speaker.Player.SetLouderTop, #304), nil where no tuning
 	// this build plays has a lift for it.
 	top *esphome.Switch
+	// jackSleep is the Headphone jack sleeps when idle switch (speaker.Player.SetJackSleep, #537), nil
+	// where the build has no jack.
+	jackSleep *esphome.Switch
 
 	// sleep stops what is playing after a while, the way a clock radio does.
 	sleep *sleeper
@@ -162,6 +165,16 @@ type Player struct {
 	// stoppedAt counts stops, so the timer that ends a stopped track knows whether a later stop or a
 	// play has come since.
 	stoppedAt atomic.Uint64
+
+	// stops counts definite stops of the music in this room (StopCount): the Stop buttons, Home
+	// Assistant's stop, and a server that has stayed stopped. Unlike stoppedAt a play does not move
+	// it, and neither does a gap while a track is switched.
+	stops atomic.Uint64
+
+	// settleGen counts the plays asked for here (a play or toggle, anything that starts a track), so a
+	// server's "stopped" that is still settling (RemoteState) is not counted once somebody has since
+	// asked for music: the server may be slow to say "playing".
+	settleGen atomic.Uint64
 
 	// toSender carries what is passed on to a received track's sender, one at a time and in order: a
 	// pause and the play straight after it must reach the phone that way round (tellSender). Only the
@@ -406,6 +419,14 @@ func build() *Player {
 		}
 		p.top.OnCommand = p.SetLouderTop
 	}
+	if speaker.JackSleepPossible() {
+		p.jackSleep = &esphome.Switch{
+			Base: esphome.Base{ObjectID: "headphone_jack_sleep", Name: "Headphone jack sleeps when idle",
+				Icon: "mdi:power-sleep", Category: esphome.CategoryConfig,
+				DeviceID: component.DevicePlayback},
+		}
+		p.jackSleep.OnCommand = p.SetJackSleep
+	}
 
 	// The player itself stays on the device: it is what people reach for. These are how it behaves.
 	bases := []*esphome.Base{&p.resampling.Base, &p.onTurn.Base, &p.duck.Base, &p.jack.Base, &p.asp.Base,
@@ -622,6 +643,26 @@ func (p *Player) SetLouderTop(on bool) {
 	slog.Info("setting changed", "setting", p.top.ObjectID, "using", on)
 }
 
+// SetJackSleep turns the headphone jack's idle sleep on or off, from Home Assistant or the setup page.
+func (p *Player) SetJackSleep(on bool) {
+	if p.jackSleep == nil {
+		return
+	}
+	if err := config.Set().Speaker().JackSleep(on); err != nil {
+		slog.Error("saving a setting failed", "setting", p.jackSleep.ObjectID, "err", err)
+		return
+	}
+	speaker.Get().SetJackSleep(on)
+	p.jackSleep.Set(on)
+	slog.Info("setting changed", "setting", p.jackSleep.ObjectID, "using", on)
+}
+
+// JackSleepAvailable is whether the headphone jack sleep switch is put up on this build.
+func (p *Player) JackSleepAvailable() bool { return p.jackSleep != nil }
+
+// JackSleep is whether the headphone jack sleeps when idle.
+func (p *Player) JackSleep() bool { return p.jackSleep != nil && p.jackSleep.Get() }
+
 // LouderTopAvailable is whether the Louder top volume switch is put up on this build.
 func (p *Player) LouderTopAvailable() bool { return p.top != nil }
 
@@ -645,6 +686,9 @@ func (p *Player) Entities() []esphome.Entity {
 	// which leaves out a board that turned out not to have the amplifier, or still may have it.
 	if p.gain != nil && (speaker.GainAvailable() || speaker.GainPossible()) {
 		out = append(out, p.gain)
+	}
+	if p.jackSleep != nil {
+		out = append(out, p.jackSleep)
 	}
 	if p.top != nil {
 		out = append(out, p.top)
@@ -746,6 +790,11 @@ func (p *Player) Restore(c config.Config) {
 		p.top.Set(c.Speaker.LouderTop)
 		speaker.Get().SetLouderTop(c.Speaker.LouderTop)
 		slog.Info("restored", "what", p.top.ObjectID, "using", c.Speaker.LouderTop)
+	}
+	if p.jackSleep != nil {
+		p.jackSleep.Set(c.Speaker.JackSleep)
+		speaker.Get().SetJackSleep(c.Speaker.JackSleep)
+		slog.Info("restored", "what", p.jackSleep.ObjectID, "using", c.Speaker.JackSleep)
 	}
 
 	p.duck.Set(float32(c.Media.DuckDB))
@@ -884,6 +933,13 @@ func (p *Player) command(c esphome.MediaCommand) {
 		//
 		// With nothing of its own playing or paused there is nothing to keep, and it is a stop like one
 		// here: what would start something again in a moment (a dropped station's put-back) is told.
+		//
+		// Counted (StopCount) only when there was music to stop: a stop sent to a room with nothing
+		// playing, as an automation stopping every speaker does, is not somebody stopping the music a page
+		// is waiting for.
+		if p.somethingToStop() {
+			p.stops.Add(1)
+		}
 		if playing, paused := p.stream.Playing(); !playing && !paused {
 			p.OnStop.Emit(struct{}{})
 		}
@@ -904,17 +960,12 @@ func (p *Player) command(c esphome.MediaCommand) {
 }
 
 // announce plays a url over whatever is going on, which is what Home Assistant means by one: a
-// doorbell or a spoken alert, not a track.
+// doorbell or a spoken alert, not a track. It plays as it arrives (#559), at the level it arrives at:
+// a chime is not speech, and nothing here has ever made one louder.
 func (p *Player) announce(url string) {
 	p.Sounding(true)
 	claim := speaker.Sound().ClaimSpeech("announce", func(ctx context.Context, spk *speaker.Player) error {
-		samples, err := Fetch(ctx, url)
-		if err != nil {
-			return err
-		}
-		spk.PlayVoice(samples)
-		spk.PlayVoice(make([]int16, speaker.VoiceRate*Tail/1000))
-		return nil
+		return PlaySpeech(ctx, url, &SpeechStream{Buffer: AnnounceBuffer}, spk)
 	})
 
 	// The claim ends once the audio has been heard, not once it has been queued, so this is where
@@ -923,8 +974,8 @@ func (p *Player) announce(url string) {
 		<-claim.Done()
 		p.Sounding(false)
 
-		if err := claim.Err(); err != nil {
-			slog.Error("playing the announcement failed", "url", url, "err", err)
+		if err := claim.Err(); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Error("playing the announcement failed", "url", url, "err", err) // a stop is not a failure
 		}
 	})
 }
@@ -1054,6 +1105,12 @@ func (p *Player) SkipReaches() bool {
 }
 
 func (p *Player) Transport(t Transport) {
+	if t == TransportStop {
+		p.stops.Add(1)
+	}
+	if t == TransportPlay || t == TransportToggle {
+		p.settleGen.Add(1)
+	}
 	// A remote's track paused from here and since let go: play asks for it back, stop forgets it.
 	if _, _, _, ok := p.Held(); ok {
 		switch t {
@@ -1130,8 +1187,18 @@ func (p *Player) Transport(t Transport) {
 func (p *Player) RemoteState(state string) {
 	p.remoteState.Store(state)
 	n := p.remoteGen.Add(1)
+	sg := p.settleGen.Load()
 	if state == "playing" {
 		p.held.Store(heldTrack{})
+	}
+	if state == "stopped" {
+		// Counted as a stop only once it has stayed stopped: a server ends one track and starts the
+		// next in whichever order it likes, and that gap is not somebody stopping the music.
+		time.AfterFunc(stopSettle, func() {
+			if p.remoteGen.Load() == n && p.settleGen.Load() == sg {
+				p.stops.Add(1)
+			}
+		})
 	}
 	if state == "paused" {
 		time.AfterFunc(stoppedFor, func() {
@@ -1143,6 +1210,36 @@ func (p *Player) RemoteState(state string) {
 	}
 	p.refresh()
 }
+
+// stopSettle is how long a server's "stopped" has to stand before it counts as a stop (StopCount): longer
+// than the one to two seconds Music Assistant can take between one stream and the next (#521), well
+// under the hold of a page waiting for music (display's musicPendingFor). A variable for the tests.
+var stopSettle = 4 * time.Second
+
+// SetStopSettle sets stopSettle and answers what it was, for the tests of what waits on a stop.
+func SetStopSettle(d time.Duration) time.Duration {
+	was := stopSettle
+	stopSettle = d
+	return was
+}
+
+// somethingToStop is whether the room's music is playing, paused or held for a play: what a stop ends.
+func (p *Player) somethingToStop() bool {
+	playing, paused := p.ScreenState()
+	return playing || paused
+}
+
+// StopByUser is Stop for somebody stopping the music (the voice assistant, the action button), which
+// counts as a stop (StopCount) as the Stop buttons do. Stop itself does not: DLNA and a replaced track
+// use it too.
+func (p *Player) StopByUser() {
+	p.stops.Add(1)
+	p.Stop()
+}
+
+// StopCount is a count of definite stops of the music here, for whatever holds a page up for music on
+// its way and has to know it was stopped instead. It only goes up.
+func (p *Player) StopCount() uint64 { return p.stops.Load() }
 
 // CarriedState is what a carried stream is doing, for whatever has to show or report it: what the
 // remote said, and playing until it has said anything. A remote that said it stopped is not playing,
@@ -1668,6 +1765,7 @@ func (p *Player) PlayTitledChecked(url string, title Title, within time.Duration
 // one does not come back when this one ends - but it is still holding the room, and a room playing along
 // with the house has to leave the group before anything of its own starts, or the house goes with it.
 func (p *Player) ours() {
+	p.settleGen.Add(1)
 	p.remoteLast.Store(false)
 	// A title is for the next play_media; anything else starting first was not it (title.go).
 	p.nextTitle.Store(nil)

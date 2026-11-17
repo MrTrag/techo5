@@ -67,6 +67,14 @@ func (r *renderer) stripButtons() (back, play, next, closeX image.Rectangle) {
 	return back, play, next, closeX
 }
 
+// stripCloseHit is where a tap ends the music from the strip: the X and the corner of the strip it sits
+// in, a finger's width rather than the mark's. The X alone is 34 px on a Show 5, about 4 mm.
+func (r *renderer) stripCloseHit() image.Rectangle {
+	b := r.stripRect()
+	_, _, _, x := r.stripButtons()
+	return image.Rect(x.Min.X-r.s(14), b.Min.Y, b.Max.X, x.Max.Y+r.s(14))
+}
+
 // stripLibrary is the strip's Library button, back to the music library: round like the three, one
 // step on from forward, clear of the X in the corner above.
 func (r *renderer) stripLibrary() image.Rectangle {
@@ -113,7 +121,7 @@ func (r *renderer) musicStrip(s scene) {
 		sub = joinDot(sub, station)
 	}
 	if s.paused {
-		sub = joinDot("Paused", sub)
+		sub = joinDot(tr("drawer_paused"), sub)
 	}
 	back, play, next, closeX := r.stripButtons()
 	tx := art.Max.X + r.s(14)

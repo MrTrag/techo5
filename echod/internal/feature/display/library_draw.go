@@ -30,6 +30,9 @@ const libPartGoSearch = libPartRow + 1
 // libPartSort is the audiobooks' order on their row, which a tap moves to the next.
 const libPartSort = libPartRow + 2
 
+// libPartNowPlaying is the bar's way back to the Now Playing page, while something plays.
+const libPartNowPlaying = libPartRow + 4
+
 // libPartMenu is a choice on the action sheet (index: its place among the sheet's choices), and
 // libPartMenuOut is anywhere else while the sheet is up, which puts it away.
 const (
@@ -70,7 +73,7 @@ func (r *renderer) libraryAt(x, y int) (mediaZone, float64, bool) {
 	r.zmu.Lock()
 	zones, card := slices.Clone(r.libZones), r.libCard
 	r.zmu.Unlock()
-	return mediaHit(zones, card, x, y)
+	return mediaHit(zones, card, x, y, r.s(sheetSlop))
 }
 
 // libRowAt is the section shown as a row under x, y, or -1.
@@ -83,6 +86,27 @@ func (r *renderer) libRowAt(x, y int) int {
 		}
 	}
 	return -1
+}
+
+// libPartActs is whether a tap on z does something on the library l (libraryTap): a choice of the action
+// sheet while it is up; else a button, a tab, or an item that opens or plays, which the playing first
+// of the queue does not. What scrolls, and a row that scrolls along, are only dragged.
+func libPartActs(l *librarySheet, z mediaZone) bool {
+	if l.menu.open {
+		return z.kind == libPartMenu && z.index >= 0 && z.index < len(l.menu.choices)
+	}
+	switch z.kind {
+	case libPartDone, libPartNowPlaying, libPartBack, libPartTab, libPartSort, libPartGoSearch, libPartField, libPartPlay, libPartShuffle:
+		return true
+	case libPartItem:
+		p := l.current()
+		sec, i := z.index/libSecStride, z.index%libSecStride
+		if sec >= len(p.sections) || i >= len(p.sections[sec].entries) {
+			return false
+		}
+		return p.what != libQueue || i > 0 && p.sections[sec].entries[i].QueueItemID != ""
+	}
+	return false
 }
 
 // libDragStart is a finger coming down on the library: where, and on which row.
@@ -414,6 +438,12 @@ func (r *renderer) librarySheet(v *libraryView, th dashboard.Theme) {
 	doneW := pillW(libWord(libWordDone), false)
 	pill(image.Rect(bar.Max.X-doneW, bar.Min.Y, bar.Max.X, bar.Max.Y), "", libWord(libWordDone), lit, pal.bg, false, libPartDone, 0)
 	right := bar.Max.X - doneW - r.s(10)
+	if l.playing {
+		// Back to what is playing: the note alone, as the search tab has its magnifier, beside Done.
+		nw := r.s(64)
+		pill(image.Rect(right-nw, bar.Min.Y, right, bar.Max.Y), "music-note", "", plain, pal.text, false, libPartNowPlaying, 0)
+		right -= nw + r.s(10)
+	}
 	switch {
 	case !l.set:
 		r.text(fc.labelBold, r.fit(fc.labelBold, libWord(libWordLibrary), right-bar.Min.X), bar.Min.X, bar.Min.Y+r.s(33), pal.text)
@@ -512,6 +542,9 @@ func (r *renderer) librarySheet(v *libraryView, th dashboard.Theme) {
 		r.libMenuSheet(&l, g, pal, fc, pill)
 		zones = append(zones, mediaZone{r: whole, kind: libPartMenuOut})
 	}
+	if z, ok := r.pressPart(zones, whole); ok && libPartActs(&l, z) {
+		r.pressOnPart(z.r, pal)
+	}
 	r.setLibrary(zones, whole)
 	r.setLibraryScroll(contentH, viewH, scroll, visible, rowMax)
 }
@@ -520,7 +553,7 @@ func (r *renderer) librarySheet(v *libraryView, th dashboard.Theme) {
 // item's name, then its choices (libMenuFor) as wide pills, a first Play lit as the library's Play is.
 func (r *renderer) libMenuSheet(l *librarySheet, g libGeom, pal dashPal, fc sheetFaces,
 	pill func(image.Rectangle, string, string, color.RGBA, color.RGBA, bool, int, int)) {
-	washOver(r.dst, r.dst.Rect, color.RGBA{0, 0, 0, 110})
+	washOver(r.dst, r.dst.Rect, color.RGBA{0, 0, 0, 150})
 	choices := l.menu.choices
 	n := len(choices)
 	pad, rowH, gap, titleH := r.s(24), r.s(64), r.s(12), r.s(56)

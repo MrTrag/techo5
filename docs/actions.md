@@ -29,6 +29,14 @@ lets the device fetch things on its own — a weather forecast, a camera snapsho
 listing — rather than only reporting sensors and taking commands. It's normally set once, by
 whatever paired the device, and isn't something you call from an automation afterwards.
 
+The easier way to give the device this access is **Connect to Home Assistant** on its setup page
+(**Network** tab, **Home Assistant access**). It opens Home Assistant's own sign-in page, the same one
+the mobile apps use; once you sign in and approve, the device gets its own token. That token is
+listed in the profile of the user who signed in, under **Security, Refresh tokens**, by the device's
+address, and removing it there disconnects the device. Sign in as a user made for the devices,
+without administrator rights, rather than your own. The device renews that access by itself, and
+**Disconnect** on the same page takes it back. Calling this action instead replaces a sign-in.
+
 > **Good to know**
 >
 > Several other actions depend on this being set first: `home_show_camera` and
@@ -80,7 +88,7 @@ A device that was given access to your Home Assistant with an administrator's to
 ESPHome entry there first. Otherwise, delete the device from **Settings → Devices & services → ESPHome**
 in your Home Assistant afterward.
 The new key isn't shown anywhere. To add the device to another Home Assistant later, open its setup
-page, go to **General**, and choose **Let a Home Assistant add this device**: for 15 minutes the
+page, go to **Network**, and choose **Let a Home Assistant add this device**: for 15 minutes the
 device has no key, and the Home Assistant that adds it sets one. Home Assistant sends that key over
 your network unencrypted, as it does for ESPHome devices, so open the window only on a network you
 trust. Adding a device with nothing typed needs a recent Home Assistant (tested with 2026.9).
@@ -130,7 +138,7 @@ data:
 In YAML, refer to this action as `esphome.<node>_network_address`.
 
 Sets how the device gets its address on Wi-Fi: from the router (DHCP), or fixed. It is the
-**Connections → Network address** setting of the setup page, explained in
+**Network → Network address** setting of the setup page, explained in
 [Setting it up](setup.md#9-a-fixed-address). The device answers first and changes its address two
 seconds later.
 
@@ -203,7 +211,8 @@ A time of day: `7:30`, `07:30`, `19:30:00`, `7:30 pm`, `7:30pm`, `3 pm`, or `3pm
 
 Which days it repeats on. One of `once` (the default — rings once and turns itself off), `daily`
 (or `every day`, `everyday`), `weekdays`, `weekends`, or a comma- or space-separated list of days,
-matched by prefix: `mon,wed,fri`, `tue thu`.
+matched by prefix: `mon,wed,fri`, `tue thu`. The English two-letter names work too: `Mo,We,Fr`.
+Numbers and ranges (`mon-fri`) are not days.
 
 ### label (Can be empty)
 
@@ -1284,7 +1293,7 @@ In YAML, refer to this action as `esphome.<node>_home_cameras`.
 
 Sets which of Home Assistant's cameras the device offers on its Cameras page, in the camera grid,
 on the setup page's Talk through cameras list and by voice ("show the front door"). There are three
-choices, also on the setup page under Connections → Home Assistant cameras:
+choices, also on the setup page under Cameras → Home Assistant cameras:
 
 - **None**: no Home Assistant camera at all.
 - **All**: every camera entity Home Assistant has, refreshed every 10 minutes. This is the default for
@@ -1461,7 +1470,7 @@ not the Dot.
 
 Puts up to four buttons on one camera's view that each run a Home Assistant action, such as
 **Open gate** or **Unlock**. Each call sets that camera's whole set, in the order given, and replaces
-what it had. The same buttons are on the setup page under Connections → Camera buttons. See
+what it had. The same buttons are on the setup page under Cameras → Camera buttons. See
 [Camera buttons](setup.md#camera-buttons).
 
 > **Good to know**
@@ -2046,7 +2055,7 @@ edge and a tap on the tab do. A tap on the screen outside the drawer, or its clo
 away. At night it lights a screen the night has put out, at the night light's level (or at half
 brightness with no night light), and the drawer shows over the red night clock until it is closed. A
 screen somebody turned off stays off. Fails on a device that has no list chosen (choose them with
-`todo_lists`, or on the setup page's Weather & Calendar tab). No arguments.
+`todo_lists`, or on the setup page's Screen tab). No arguments.
 
 ```yaml
 action: esphome.kitchen_todo_show
@@ -2082,7 +2091,9 @@ In YAML, refer to this action as `esphome.<node>_calendar_popup_sources`.
 With **Event pop-ups** on, an event coming up shows over the screen: a timed event a while before it
 starts (the **Pop up** select, a quarter hour by default), an all-day event once in the morning, as
 the night hours end. At night and in quiet hours it makes no sound and does not light a dark screen.
-Each pop-up fires an `esphome.techo5_calendar` event with `event: popup`, `summary`, `calendar`,
+A tap takes it down here and on every other Show in the house with the same event up or still to
+come, matched by its start and its title; that needs the same **house word** on each, as reminders
+do. Each pop-up fires an `esphome.techo5_calendar` event with `event: popup`, `summary`, `calendar`,
 `start` and `device`. This action chooses which of the device's calendars pop up. A Show only.
 
 ### calendars (Required)
@@ -2689,6 +2700,9 @@ answer with an error. Each entry has:
 - `model`: the wake word model's ID.
 - `score`: the highest score the word reached.
 - `cutoff`: the threshold it was judged against.
+- `sent_at`: when it was uploaded to a trainer, in UTC, once it has been (see
+  [Sending clips to a trainer](setup.md#sending-clips-to-a-trainer)).
+- `send_failed`: the status a trainer refused it with for good.
 
 The answer lists 50 clips at a time; `pages` says how many pages there are and `total` how many clips.
 This action answers with data; call it with a `response_variable`.
@@ -2874,10 +2888,11 @@ data:
 In YAML, refer to this action as `esphome.<node>_netbird_login`.
 
 Joins the device to your NetBird network with a setup key, and turns its **NetBird** switch on. The
-first time, the device downloads NetBird's client first (about 14 MB): the action then answers that it's
-downloading, and you run it again once the **NetBird status** sensor says *Needs a setup key*. The key is
-handed to NetBird once and not kept: after that the device rejoins by itself. It waits up to 30 seconds
-to see the device connect, so a key that's used up or expired is an error here. Echo Shows, the Echo Spot and
+first time, the device downloads NetBird's client first (about 14 MB): the action answers at once, the
+device holds the key in memory only and joins by itself when the download is done, so one run is enough.
+If that join fails, the **NetBird status** sensor says *Needs a setup key* and you run it again. The key is
+handed to NetBird once and not kept: after that the device rejoins by itself. Once the client is here, it
+waits up to 30 seconds to see the device connect, so a key that's used up or expired is an error. Echo Shows, the Echo Spot and
 the Skylight only. See [NetBird: reaching a device from away](netbird.md).
 
 > **Good to know**

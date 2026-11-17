@@ -284,17 +284,24 @@ Settings → Devices & services: the unit appears under Discovered as an ESPHome
 from step 5. Add it and paste the key printed in step 5 when asked. If it does not appear, add the
 ESPHome integration by hand with host `<address>` and port 6053.
 
+Installed with `install-show.py --let-home-assistant-add`, there is no key: choose Add within 30
+minutes of the unit's first start on the network, with nothing to type, and Home Assistant sets one.
+By hand, the same comes from leaving out the key in step 5 and writing an empty marker instead
+(`: > /data/misc/techo5/adopt-on-first-start`); the daemon honors it once, and ignores it on a unit
+that has a key. SSH, with `--ssh-key`, starts once Home Assistant has added the device: the device keeps SSH off while it has no key. Home Assistant sends the key it sets over your network unencrypted, as it does for ESPHome devices, so use it on a network you trust. Adding a device with nothing typed needs a recent Home Assistant (tested with 2026.9).
+
 Then:
 
 - **Time zone**: nothing to set. The unit starts on UTC and takes Home Assistant's zone as soon as it
   connects, and keeps it from then on. A unit with no internet can use a time server on your own
-  network (setup page, General, Time server), or takes Home Assistant's time when it connects.
+  network (setup page, Network, Time server), or takes Home Assistant's time when it connects.
 - **Wake word**: the default is "Alexa". Change it on the device (swipe down from the top, Sound,
   Wake word) or in Home Assistant; the other follows.
-- **Home Assistant token** (optional, for the forecast page, local radio stations and the radio's
-  star, the list of weather sources, and cameras): create a long-lived access token on your Home Assistant profile page, then run
-  the `esphome.<device>_home_assistant` action with `url` (like `http://192.168.1.20:8123`) and
-  `token`.
+- **Home Assistant access** (optional, for the forecast page, local radio stations and the radio's
+  star, the list of weather sources, and cameras): on the device's setup page, **Network** tab, choose
+  **Connect to Home Assistant** and sign in. Or create a long-lived access token on your Home Assistant
+  profile page and run the `esphome.<device>_home_assistant` action with `url` (like
+  `http://192.168.1.20:8123`) and `token`.
 - **Weather**: Home Assistant's own forecast by default. To show another weather entity, use the
   settings screen (General, Weather), the "Weather source" select, or `esphome.<device>_home_weather`.
 - **Radio**: three ways to get stations onto the device, none of which needs the others. See
@@ -536,7 +543,7 @@ up is not going to. The log says `the stream ended by itself, putting it back on
 again on its own is this, not a fault.
 
 **If it says playing and nothing comes out.** Home Assistant and the screen show a station as
-playing even when not a byte of it arrives. The device's log says why (setup page, General →
+playing even when not a byte of it arrives. The device's log says why (setup page, Status →
 Download diagnostics; with SSH on, `/data/techo5-linux/techo5.log`). Look for `playing media` with
 the address the device was handed, then `playing media failed`, or
 `media: the live stream dropped; fetching it again` with `ran=0s`: the stream ended before it began.
@@ -633,8 +640,8 @@ tail -100 /data/techo5-linux/rescue.log
 | An update from Home Assistant is slow, or fails with `nothing arrived` or `gave up after 2h0m0s` | The download is slow or keeps stalling. Newer builds keep what they fetched and carry on from there, on their own and on the next press of Install, and give up only after two hours. A download from the internet that crawls under 50 kB/s while the Wi-Fi is up gets one Wi-Fi reassociation (at most once every 6 hours); the log says `a download from the internet is crawling`. If it is still slow, reconnect the unit's Wi-Fi or restart it, then press Install again. |
 | The screen shows "hacked fastboot" | A leftover `reboot bootloader` request: `fastboot -s <serial> continue`. |
 | No SSH after the switch to the slot | SSH is off unless step 5 was done: turn on the SSH switch in Home Assistant and send a key with the `ssh_keys` action, or use the USB serial console. |
-| A phone pairs over Bluetooth, then drops after a second or two | Some newer phones are dropped while the controller has Secure Connections on (#183). Turn off **Bluetooth Secure Connections** (Settings > Connections, the setup page's Connections tab, or Home Assistant), forget the device on the phone and pair again. See [Music](setup.md#5-music) for what it costs. |
-| The device jumps to full volume when a computer plays to it over Bluetooth | The computer reports full volume once and turns its own sound down itself, often on Linux (#245). Turn off **Bluetooth sets the volume** (the setup page's Connections tab, or Home Assistant): the device then keeps its own volume. See [Music](setup.md#5-music). |
+| A phone pairs over Bluetooth, then drops after a second or two | Some newer phones are dropped while the controller has Secure Connections on (#183). Turn off **Bluetooth Secure Connections** (Settings > Connections, the setup page's Sound tab, or Home Assistant), forget the device on the phone and pair again. See [Music](setup.md#5-music) for what it costs. |
+| The device jumps to full volume when a computer plays to it over Bluetooth | The computer reports full volume once and turns its own sound down itself, often on Linux (#245). Turn off **Bluetooth sets the volume** (the setup page's Sound tab, or Home Assistant): the device then keeps its own volume. See [Music](setup.md#5-music). |
 | The radio says playing and stays quiet | The stream never arrived. See "If it says playing and nothing comes out" at the end of [Radio](#radio). |
 | Picking a favorite station shows "Home Assistant didn't start the stream" | Home Assistant refused the device's call to the radio script. Turn on **Allow the device to perform Home Assistant actions** in the device's ESPHome entry (Configure), then pick the station again. See [Radio](#radio). |
 | The unit sits in rescue | The screen says so: **RESCUE**, with the reason on the last line. No bootable slot. `slotctl status` shows why; the daemon still runs from a slot in rescue, so Home Assistant keeps working while you look. |

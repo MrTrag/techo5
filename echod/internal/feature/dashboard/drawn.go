@@ -4,6 +4,7 @@ package dashboard
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -14,7 +15,9 @@ import (
 	"time"
 
 	"github.com/HuskerMinion/techo5/echod/internal/config"
+	"github.com/HuskerMinion/techo5/echod/internal/layout"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/hass"
+	"github.com/HuskerMinion/techo5/echod/internal/lib/redact"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/safe"
 )
 
@@ -159,7 +162,10 @@ type Drawn struct {
 	Sections []Section
 	Theme    Theme
 	Problem  string
-	Version  uint64
+	// Connect is a Problem that is the device having no access to Home Assistant: the screen offers
+	// the way to the setup page's Connect to Home Assistant with it (#567).
+	Connect bool
+	Version uint64
 }
 
 // needs is what a source asks for once connected: entities to follow, templates to render, histories
@@ -583,9 +589,12 @@ func (s *session) close() {
 	}
 }
 
-func (s *session) problem(text string) {
+func (s *session) problem(text string) { s.say(text, false) }
+
+// say is problem, saying too whether it is the device having no access to Home Assistant (Connect).
+func (s *session) say(text string, connect bool) {
 	s.mu.Lock()
-	s.view.Problem = text
+	s.view.Problem, s.view.Connect = text, connect
 	s.view.Version++
 	s.hold = nil // what went wrong is said now, not after the held page's time is up
 	s.mu.Unlock()
@@ -628,7 +637,7 @@ func (s *session) run() {
 
 func (s *session) once() error {
 	if !hass.Get().Ready() {
-		s.problem("A drawn dashboard needs Home Assistant's address and a token (the home_assistant action).")
+		s.say(noAccess(config.Get().Device.Name, factoryMAC()), true)
 		return fmt.Errorf("no home assistant access")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -637,7 +646,9 @@ func (s *session) once() error {
 	if err != nil {
 		// The address the home_assistant action gave is kept until it is given again: a Home
 		// Assistant that moved is the commonest reason for this, so say where it was looked for.
-		s.problem(unreachable(hass.Get().Address()))
+		addr := hass.Get().Address()
+		slog.Warn("dashboard: can't reach Home Assistant", "address", redact.URLSecrets(addr), "err", redact.URLSecrets(err.Error()))
+		s.problem(unreachable(addr))
 		return err
 	}
 	defer live.Close()
@@ -661,11 +672,19 @@ func (s *session) once() error {
 	history := loadHistory(lctx, live, graphed, longest)
 	lcancel()
 	if err != nil {
-		s.problem(err.Error())
+		// A sentence written for the screen as it is; anything else is the log's, an error being able
+		// to name an address with a token in its query.
+		var said onScreen
+		if errors.As(err, &said) {
+			s.problem(string(said))
+		} else {
+			slog.Warn("dashboard: loading the drawn dashboard", "err", redact.URLSecrets(err.Error()))
+			s.problem("Home Assistant would not give this dashboard.")
+		}
 		return err
 	}
 	s.mu.Lock()
-	s.view.Problem, s.view.Theme = "", theme
+	s.view.Problem, s.view.Connect, s.view.Theme = "", false, theme
 	s.history, s.graphs = history, need.graphs
 	s.seed(need.pictures)
 	s.mu.Unlock()
@@ -819,10 +838,30 @@ type onScreen string
 
 func (s onScreen) Error() string { return string(s) }
 
-// unreachable is what a drawn dashboard says when Home Assistant does not answer at addr.
+// noAccess is what a drawn dashboard says before the device has access to Home Assistant. The setup
+// page's Connect to Home Assistant gives it, by signing in (#567); the home_assistant action still
+// does too, and "the home_assistant action" alone left people looking for a token field on the setup
+// page and in ESPHome (#551), so it is named in full, ready to paste into Developer Tools.
+func noAccess(name, mac string) string {
+	return "A drawn dashboard needs this device connected to Home Assistant. On its setup page, choose " +
+		"Connect to Home Assistant on the Network tab, or in Home Assistant run the action " +
+		layout.ActionName(name, mac, "home_assistant") + " once, with url and token."
+}
+
+// factoryMAC is the device's MAC address, which its node name falls back on, or "" when it can't be read.
+func factoryMAC() string {
+	m, err := layout.FactoryMAC()
+	if err != nil {
+		return ""
+	}
+	return m
+}
+
+// unreachable is what a drawn dashboard says when Home Assistant does not answer at addr. The address
+// is the log's, not the screen's, which everyone in the room sees.
 func unreachable(addr string) string {
 	if addr == "" {
 		return "Can't reach Home Assistant."
 	}
-	return "Can't reach Home Assistant at " + addr + ". If it has moved, run the home_assistant action again with its new address."
+	return "Can't reach Home Assistant. If it has moved, run the home_assistant action again with its new address."
 }

@@ -17,6 +17,7 @@ import (
 
 	"github.com/HuskerMinion/techo5/echod/internal/component"
 	"github.com/HuskerMinion/techo5/echod/internal/config"
+	"github.com/HuskerMinion/techo5/echod/internal/hardware/mic"
 	"github.com/HuskerMinion/techo5/echod/internal/layout"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/alsa"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/asp"
@@ -209,6 +210,11 @@ type Player struct {
 	claimed atomic.Bool
 	// wakeFails is the gated amplifier's wakes that failed in a row (ampWake).
 	wakeFails atomic.Int32
+	// jackSleep is whether the headphone path comes down while idle, and jackIdle when (jack.go).
+	jackSleep atomic.Bool
+	jackIdle  idleAmp
+	// jackWakeFails is the jack's wakes that failed in a row (jackUp).
+	jackWakeFails atomic.Int32
 
 	// underruns is the card running out while we were away. Write blocks against the whole ring, so
 	// each one means the loop was starved for as long as the ring is deep.
@@ -403,7 +409,15 @@ func New() *Player {
 		p.lanes = append(p.lanes, make([]float32, period))
 	}
 	p.tuning = t
-	if curve, ok := firstCurves[t.Name()]; ok {
+	curve, ok := firstCurves[t.Name()]
+	if table := t.VolumeTable(); ownVolumeTable() && len(table) == VolumeSteps+1 {
+		// The unit's own curve, where its AFE.cfg has one (the 2nd gen Shows): the one Fire OS turns
+		// the music down by in front of the tuning, reaching 0 dB at the top step. firstCurves stop
+		// near -20 dB there.
+		copy(curve[:], table)
+		ok = true
+	}
+	if ok {
 		p.first = &curve
 		if db, ok := topLifts[t.Name()]; ok {
 			l := liftTop(curve, db)
@@ -427,6 +441,10 @@ func init() {
 	// 1st gen Show 5), it is, and the silence goes on under it: see idle.go.
 	component.Register(component.Hardware, Get(), component.Order(6),
 		component.Supervise(service.Restart(time.Second, 30*time.Second)))
+
+	// A speaker on the jack is across the room: its echo needs the canceller's longer filter, which mic
+	// gives it on the Dot and Spot builds (longJack).
+	mic.LongEchoPath = func() bool { return Get().Output() == OutputHeadphone }
 }
 
 // Get is the speaker. There is one, and everything audible goes through it.
@@ -475,6 +493,7 @@ func (p *Player) route() {
 		p.apply(headphoneOff)
 	}
 	p.apply(p.path(p.out))
+	p.jackAwake()
 }
 
 // path is out's sequence, with the Speaker gain in it where the board writes that with the path
@@ -492,11 +511,13 @@ func (p *Player) path(out Output) []kctl {
 // AmpSwitch in paths_dot.go and paths_cronos.go. Turning it on also lets go of the amplifier's mute
 // (MuteSwitch) once the stream is playing; before then Run lets go of it itself.
 //
-// A board with an idle gate (idleGate) switches that instead, in its own pop-free order, and on any
-// output: switching on there is also waking it from an idle sleep, which a path written again (a
-// start, a change of output, Reopen) is the moment for.
+// A board with an idle gate (idleGate) and no AmpSwitch or MuteSwitch of its own (the 1st gen Show 5)
+// switches that instead, in its own pop-free order, and on any output: switching on there is also
+// waking it from an idle sleep, which a path written again (a start, a change of output, Reopen) is
+// the moment for. The Echo 2nd gen's gate is its MuteSwitch, so it is switched here as before, and
+// switching it on counts as awake for the idle gate.
 func (p *Player) amp(on bool) {
-	if p.gate != nil {
+	if p.gate != nil && AmpSwitch == "" && MuteSwitch == "" {
 		if on {
 			p.ampWake()
 		} else {
@@ -510,6 +531,11 @@ func (p *Player) amp(on bool) {
 
 	p.pathMu.Lock()
 	defer p.pathMu.Unlock()
+	if on && p.gate != nil {
+		// The mute is let go below: the idle gate must not believe the amplifier still asleep, or it
+		// would hiss until the next sound woke it and the gate's count began again.
+		p.idle.settled(ampAwake)
+	}
 
 	if p.out != OutputSpeaker {
 		return
@@ -536,6 +562,10 @@ func (p *Player) unmute() {
 	defer p.pathMu.Unlock()
 	if p.out != OutputSpeaker || p.draining {
 		return
+	}
+	if p.gate != nil {
+		// A stream started again after an idle sleep: the mute is let go, so the gate is awake.
+		p.idle.settled(ampAwake)
 	}
 	p.apply([]kctl{{name: MuteSwitch, value: "Off"}})
 }
@@ -615,6 +645,7 @@ func (p *Player) setOutput(out Output) {
 		p.apply(headphoneOff)
 	}
 	p.apply(p.path(out))
+	p.jackAwake()
 	p.pathMu.Unlock()
 
 	p.SetVolume(int(p.step.Load()))
@@ -668,6 +699,7 @@ func (p *Player) Reopen() {
 	p.apply(initSequence)
 	p.apply(headphoneOff)
 	p.apply(p.path(OutputSpeaker))
+	p.jackAwake()
 	p.pathMu.Unlock()
 
 	p.SetVolume(int(p.step.Load()))
@@ -848,7 +880,12 @@ func (p *Player) Run(ctx context.Context) error {
 			// An amplifier waking from its idle sleep (idle.go) is not ready for what is queued: the
 			// queue waits, and the card gets silence, until it is. Only a board with an ampGate has
 			// one; the Dot's standby is ours, above.
-			if p.gate != nil && p.idleStep() {
+			// Nor is a headphone path coming back from its own idle sleep (jack.go).
+			hold := p.gate != nil && p.idleStep()
+			if HasJack && p.jackStep() {
+				hold = true
+			}
+			if hold {
 				clear(buf)
 			} else {
 				active = p.fill(buf)
@@ -1125,6 +1162,7 @@ func (p *Player) fill(buf []byte) bool {
 		need, needOn = max(need, underStep), true
 	}
 	p.followRing(needOn, need)
+	p.sinkRing(needOn, need)
 	gain, step := p.Volume(), mainStep
 	mediaK, bellK, queueK, underK := float32(1), float32(0), float32(1), float32(1)
 	// Read once, so a period goes out on one curve even when Louder top volume changes during it.
@@ -1580,8 +1618,12 @@ func (p *Player) SetVolume(step int) {
 	step = max(0, min(step, VolumeSteps))
 	p.step.Store(int32(step))
 	volumeChanged(step)
-	if p.sink.Load() != nil {
-		p.volume.Store(math.Float32bits(sinkGain(step)))
+	if st := p.sink.Load(); st != nil {
+		// A sink with its own volume is told the step first, so the gain here is worked out against it.
+		if l := st.level.Load(); l != nil {
+			l.follow(step)
+		}
+		p.volume.Store(math.Float32bits(st.gain(step)))
 		return
 	}
 	p.volume.Store(math.Float32bits(gainForStep(p.Output(), step)))
@@ -1721,8 +1763,8 @@ func (p *Player) laneSteps(media int) (queue, under int) {
 // gainFor is the linear gain for a step on whatever the audio is going to now.
 func (p *Player) gainFor(step int) float32 {
 	step = max(0, min(step, VolumeSteps))
-	if p.sink.Load() != nil {
-		return sinkGain(step)
+	if st := p.sink.Load(); st != nil {
+		return st.gain(step)
 	}
 	return gainForStep(p.Output(), step)
 }

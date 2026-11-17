@@ -3,8 +3,10 @@
 package display
 
 import (
+	"fmt"
 	"image"
-	"strconv"
+
+	"github.com/HuskerMinion/techo5/echod/internal/lib/locale"
 )
 
 // calendarAgendaRefined is Coming up with one line an event: its start, its title and, when it has one,
@@ -18,11 +20,15 @@ func (r *renderer) calendarAgendaRefined(v calendarView, l calLook) {
 
 	rows := agendaRows(v.events, v.now)
 	top, bottom := r.margin+r.s(52), r.h-r.s(4)
+	// The rows grow with the text size, as the settings' rows do: at 125% the words were as tall as
+	// the row. A heading has room under its words for their tails, and a little over them to part it
+	// from the day before: at 29 the rule was four pixels under the baseline, and the comma and the y
+	// of "Today," stood on it.
 	height := func(a agendaRow) int {
 		if a.ev == nil {
-			return r.s(29)
+			return r.grownForText(r.s(34))
 		}
-		return r.s(33)
+		return r.grownForText(r.s(33))
 	}
 	most, used := len(rows), 0
 	for most > 0 && used+height(rows[most-1]) <= bottom-top {
@@ -62,14 +68,21 @@ func (r *renderer) calendarAgendaRefined(v calendarView, l calLook) {
 			}
 			ahead := daysBetween(v.now, row.day)
 			name := agendaDayName(row.day, v.now)
-			r.text(r.tiny, name, r.margin, y+r.s(22), amber)
-			extra := "in " + strconv.Itoa(ahead) + " days"
-			if ahead < 2 {
-				extra = row.day.Format("Mon, Jan 2")
+			hb := y + r.grownForText(r.s(24)) // the heading's baseline, lower in a row grown for its words
+			// Today's heading alone is in the accent. With every day's in it, at the size of the
+			// events' titles, the headings were what the page was about and the events came second.
+			ink := cream
+			if sameDay(row.day, v.now) {
+				ink = amber
 			}
-			r.text(r.micro, extra, r.margin+r.width(r.tiny, name)+r.s(12), y+r.s(22), dim)
-			r.dayWeather(v.forecast, row.day, right, y+r.s(22), r.micro, 22, false)
-			r.fxLine(float64(r.margin), float64(y+h-r.s(3)), float64(right), float64(y+h-r.s(3)), float64(r.s(2)), ember, 1)
+			r.text(r.tiny, name, r.margin, hb, ink)
+			extra := fmt.Sprintf(tr("ui_cal_in_days"), ahead)
+			if ahead < 2 {
+				extra = locale.ShortDate(row.day, screenLang())
+			}
+			r.text(r.micro, extra, r.margin+r.width(r.tiny, name)+r.s(12), hb, dim)
+			r.dayWeather(v.forecast, row.day, right, hb, r.micro, 22, false)
+			r.fxLine(float64(r.margin), float64(y+h-r.s(2)), float64(right), float64(y+h-r.s(2)), float64(r.s(2)), ember, 1)
 			r.calHitAdd(calHit{r: image.Rect(r.margin, y, right, y+h), kind: calDay, day: row.day})
 			y += h
 			continue
@@ -86,7 +99,7 @@ func (r *renderer) calendarAgendaRefined(v calendarView, l calLook) {
 		if !e.AllDay {
 			when = clockText(e.Start)
 			if !sameDay(e.Start, row.day) {
-				when = "Until " + clockText(e.End)
+				when = fmt.Sprintf(tr("ui_cal_until_cap_s"), clockText(e.End))
 			}
 		}
 		r.text(r.tiny, when, tx, base, dim)

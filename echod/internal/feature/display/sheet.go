@@ -127,6 +127,10 @@ func categoryRows(sv sheetView) (rows []settingRow, note string) {
 				}
 				rows = append(rows, settingRow{id: "nightinfo", label: tr("night_clock_next_up_and_alerts"),
 					sub: tr("dim_red_and_no_brighter"), kind: ctlToggle, on: config.Get().Screen.NightInfo})
+				if nightAlarmHere() {
+					rows = append(rows, settingRow{id: "nightalarm", label: tr("night_clock_next_alarm"),
+						sub: tr("dim_red_and_no_brighter"), kind: ctlToggle, on: !config.Get().Screen.NoNightAlarm})
+				}
 			}
 			if hasNightTap && config.Get().Screen.NightLight {
 				rows = append(rows, settingRow{id: "nighttap", label: tr("tap_lifts_the_night_light"),
@@ -240,6 +244,7 @@ func categoryRows(sv sheetView) (rows []settingRow, note string) {
 				{id: "hasounds", label: tr("home_assistant_sounds"), sub: tr("for_muting_and_timers"), kind: ctlToggle, on: !config.Get().Speaker.ClassicSounds},
 				{id: "louder", label: tr("louder_speech"), sub: tr("replies_and_announcements"), kind: ctlToggle, on: config.Get().Speaker.LouderSpeech},
 			}...)
+			rows = append(rows, recordWordRows()...)
 		} else {
 			rows = append(rows,
 				settingRow{label: tr("sounds"), kind: ctlHeading},
@@ -256,6 +261,8 @@ func categoryRows(sv sheetView) (rows []settingRow, note string) {
 		rows = append(rows, []settingRow{
 			{label: tr("music"), kind: ctlHeading},
 			{id: "sendspin", label: tr("music_assistant_player"), sub: tr("play_music_in_sync_with_other_rooms"), kind: ctlToggle, on: st.sendspin},
+			{id: "sendspindelay", label: tr("ui_playback_delay"), sub: tr("ui_holds_this_room_back_for_slower_players"), kind: ctlStepper,
+				value: fmt.Sprintf("%d ms", sendspin.Get().Delay())},
 		}...)
 		return append(withStreaming(rows),
 			settingRow{label: tr("cameras"), kind: ctlHeading},
@@ -272,10 +279,14 @@ func categoryRows(sv sheetView) (rows []settingRow, note string) {
 }
 
 // btStatus is what the Bluetooth audio feature says it is doing, in the screen's language when it is
-// the plain "Not connected" it starts out with; its other lines are about a pairing and stay as sent.
+// the plain "Not connected" it starts out with or the pairing hint; its other lines are about a pairing
+// and stay as sent.
 func btStatus(s string) string {
-	if s == "Not connected" {
+	switch s {
+	case "Not connected":
 		return tr("not_connected")
+	case "Put your earbuds in pairing mode":
+		return tr("ui_bt_pairing_hint")
 	}
 	return s
 }
@@ -406,13 +417,13 @@ var giftArm struct {
 
 // giftResetRow clears the device for somebody else and starts first run (firstrun.Reset), asking twice.
 func giftResetRow(now time.Time) settingRow {
-	row := settingRow{id: "giftreset", label: "Reset for someone else", sub: "Clears it and starts setting it up again",
-		kind: ctlDanger, button: "Reset"}
+	row := settingRow{id: "giftreset", label: tr("reset_for_someone_else"), sub: tr("clears_it_and_start_setting_it_up_again"),
+		kind: ctlDanger, button: tr("reset")}
 	giftArm.Lock()
 	armed := !giftArm.at.IsZero() && now.Sub(giftArm.at) < restartWindow
 	giftArm.Unlock()
 	if armed {
-		row.sub, row.button = "Wi-Fi, name, Home Assistant, alarms, everything: tap again", tr("ui_confirm")
+		row.sub, row.button = tr("wifi_name_home_assistant_alarm_everything_tap_again"), tr("ui_confirm")
 	}
 	return row
 }
@@ -494,8 +505,9 @@ func connectionRows(sv sheetView) []settingRow {
 	}
 	ts := tailscale.Get().State()
 	rows = append(rows, settingRow{id: "tailscale", label: "Tailscale", sub: tailscaleSub(ts), kind: ctlToggle, on: ts.On})
-	// NetBird likewise, once it has been joined: until then there is nothing to turn on here.
-	if nb := netbird.Get().State(); netbird.Available() && (nb.On || config.Get().Netbird.Joined) {
+	// NetBird likewise, always: before a first join its line points to the setup page.
+	if netbird.Available() {
+		nb := netbird.Get().State()
 		rows = append(rows, settingRow{id: "netbird", label: "NetBird", sub: netbirdSub(nb), kind: ctlToggle, on: nb.On})
 	}
 	return rows
@@ -504,6 +516,8 @@ func connectionRows(sv sheetView) []settingRow {
 // netbirdSub is the NetBird row's line.
 func netbirdSub(s netbird.Status) string {
 	switch {
+	case !s.On && !config.Get().Netbird.Joined:
+		return tr("ui_needs_a_setup_key_the_setup_page_connections")
 	case !s.On:
 		return tr("ui_reach_this_device_from_away_off")
 	case s.Downloading:
@@ -1193,6 +1207,9 @@ func (d *Display) rowTap(id string, p part, opt int) {
 		safe.Go("lyrics from the screen", func() { home.Get().SetLyricsOn(!home.LyricsOn()) })
 	case "nightinfo":
 		d.setNightInfo(!config.Get().Screen.NightInfo)
+	case "nightalarm":
+		// Saved as left off, so turning it on is what was off.
+		d.setNightAlarm(config.Get().Screen.NoNightAlarm)
 	case "nighttap":
 		d.setNightTapLifts(!config.Get().Screen.NightTapLifts)
 	case "roomlights":
@@ -1232,6 +1249,8 @@ func (d *Display) rowTap(id string, p part, opt int) {
 		}
 	case "mic":
 		mute.Get().Flip()
+	case "recordword", "recordcount", "recordgap":
+		recordWordTap(id, p)
 	case "speakergain":
 		v := media.Get().SpeakerGain()
 		switch p {
@@ -1297,11 +1316,24 @@ func (d *Display) rowTap(id string, p part, opt int) {
 	case "sendspin":
 		sp := sendspin.Get()
 		sp.SetEnabled(!sp.Enabled())
+	case "sendspindelay":
+		sp := sendspin.Get()
+		switch p {
+		case partMinus:
+			sp.SetDelay(sp.Delay() - sendspinDelayStep)
+		case partPlus:
+			sp.SetDelay(sp.Delay() + sendspinDelayStep)
+		}
 	case "ssh":
 		security.Get().SetSSH(!config.Get().Security.SSH)
 	case "tailscale":
 		go func() { _ = tailscale.Get().SetOn(!config.Get().Tailscale.On) }()
 	case "netbird":
+		// Before a first join the row only points to the setup page: switched on here it would start
+		// the client's download with no key to join with.
+		if !config.Get().Netbird.On && !config.Get().Netbird.Joined {
+			break
+		}
 		go func() { _ = netbird.Get().SetOn(!config.Get().Netbird.On) }()
 	case "remoteapi":
 		remote.Get().SetOn(!config.Get().Remote.On)
@@ -1460,9 +1492,9 @@ func (d *Display) sheetSwipe(g touch.Gesture) {
 		return
 	}
 	stillHere()
-	by := notchPx
+	by := d.r.s(notchPx)
 	if g.Kind == touch.SwipeDown {
-		by = -notchPx
+		by = -by
 	}
 	cardMax, pickMax := d.r.scrollLimits()
 	d.mu.Lock()
@@ -1477,8 +1509,9 @@ func (d *Display) sheetSwipe(g touch.Gesture) {
 	d.cardScroll = min(max(d.cardScroll+by, 0), cardMax)
 }
 
-// notchPx is how far a list scrolls for each notch a swipe reports: the touch screen's notch, so
-// the list keeps up with the finger.
+// notchPx is how far a list scrolls for each notch a swipe reports, in the Show 5's pixels: the touch
+// screen's notch, which is larger on a larger panel (56 on the Show 8, 80 on the Skylight), so the list
+// keeps up with the finger on each. Unscaled, a Skylight's list went half as far as the finger.
 const notchPx = 40
 
 // checkUpdates looks for an update, showing Checking… on the Updates row until the answer is in.
@@ -1541,3 +1574,6 @@ func repeatedWordNote() string {
 	}
 	return ""
 }
+
+// sendspinDelayStep is what a tap on the delay's minus or plus moves it by, in milliseconds.
+const sendspinDelayStep = 10

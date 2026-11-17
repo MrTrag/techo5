@@ -337,12 +337,22 @@ Every installer (`install-show.py`, `install-athena.py`, `install-skylight.py`, 
 python3 tools/install-show.py --for-someone-else
 ```
 
+## Letting Home Assistant add it with nothing typed
+
+`install-show.py`, `install-athena.py` and `install-skylight.py` take `--let-home-assistant-add` for a device you install for yourself. Name, Wi-Fi and SSH key are written as usual, but no Home Assistant key: none is printed or kept in `backups/<serial>/`, and a key an earlier install left on the device is removed. On its first start with a network, the device lets a Home Assistant add it for 30 minutes: choose **Add** under Discovered, with nothing to type, and Home Assistant sets the key. If nobody adds it in time, the window shuts with a random key, and the setup page's **Let a Home Assistant add this device** (Network) opens another. SSH, with `--ssh-key`, starts once Home Assistant has added the device: the device keeps SSH off while it has no key. Home Assistant sends the key it sets over your network unencrypted, as it does for ESPHome devices, so use it on a network you trust. Adding a device with nothing typed needs a recent Home Assistant (tested with 2026.9). It cannot be used with `--key-file` or `--for-someone-else`.
+
+```
+python3 tools/install-show.py --name "Kitchen" --let-home-assistant-add
+```
+
 ## After installing (every device)
 
 1. **Add it.** Home Assistant discovers it as an ESPHome device (Settings → Devices & services).
    Paste the encryption key the installer printed. It's also saved in
    `backups/<serial>/home-assistant.key` (a Show or Spot installed before 2026-09-19:
-   `backups/<serial>/api.psk`); keep that folder.
+   `backups/<serial>/api.psk`); keep that folder. Installed with `--let-home-assistant-add`, there is
+   no key to paste: choose Add within 30 minutes of its first start (see
+   [above](#letting-home-assistant-add-it-with-nothing-typed)).
 2. **Allow it to perform Home Assistant actions.** On the device's ESPHome entry → Configure, turn on
    **Allow the device to perform Home Assistant actions**. The radio favorites, phone call events and
    some screen features need it.
@@ -353,7 +363,7 @@ python3 tools/install-show.py --for-someone-else
 4. **Updates** from then on come from Home Assistant's update card: signed releases install into the
    spare slot and roll back on their own if they don't come up healthy. **Update channel** in Home
    Assistant is *stable* unless you change it; *dev* follows test builds, for a device being worked
-   on. **Install updates automatically** (in Home Assistant, or on the setup page's General tab,
+   on. **Install updates automatically** (in Home Assistant, or on the setup page's System tab,
    under Updates) installs a new release by itself between 2 and 5 AM, while nothing is playing. It
    is off until you turn it on.
 5. **Optional:**
@@ -413,7 +423,7 @@ pipeline rather than the device: Home Assistant is replying in text only.
    the device's media player entity in Media player entity, type a message and press Perform action.
    - If it speaks, the pipeline is what is wrong: back to step 2.
    - If it stays silent, the device's own log says whether any audio arrived. On the device's setup
-     page, **General → Download diagnostics** gives the last of it, and that file can go straight
+     page, **Status → Download diagnostics** gives the last of it, and that file can go straight
      into an issue. With SSH on, the whole log is `/data/techo5-linux/techo5.log` (`echod.log` on
      the Dot).
 4. **Reply delivery.** The device has a Reply delivery setting: *Whole file* fetches the reply and

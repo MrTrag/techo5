@@ -96,6 +96,9 @@ type Engine struct {
 	// board is what the words have scored lately, for the setup page (board.go).
 	board board
 
+	// peaks is each slot's highest score since MarkPeaks, nil when nothing asked (callscores.go).
+	peaks []Peak
+
 	// Threshold is asked for every score, so a change in Home Assistant takes effect at once. It is
 	// per slot because the models disagree on scale.
 	Threshold func(slot int) float64
@@ -151,6 +154,10 @@ type Engine struct {
 	// openWakeWord gives nothing until it has about two seconds of audio. Loading is not hearing, and
 	// this is the difference.
 	OnReady func(slot int)
+
+	// OnSlots is told, on a goroutine of its own, that the word in a slot was loaded, cleared or dropped:
+	// for what keeps a copy of it rather than asking Loaded each time (a run of wake word takes).
+	OnSlots func()
 
 	// OnDropped runs, off the audio path, when a slot's model failed on the audio and was taken out of
 	// it (dropFailed), with the id it held.
@@ -301,6 +308,16 @@ func (e *Engine) reset() {
 		e.slots[i] = slot{}
 	}
 	e.board.forgetAll()
+	e.slotsChanged()
+}
+
+// slotsChanged tells OnSlots that a slot's word changed, off the caller's goroutine: it is called with
+// mu held, and whoever hears it asks Loaded. Each look is at the slots as they are when it runs, so the
+// last one sees the last change.
+func (e *Engine) slotsChanged() {
+	if f := e.OnSlots; f != nil {
+		safe.Go("wake word slots changed", f)
+	}
 }
 
 // build makes an engine of one kind. A test replaces it with one that needs no model files.
@@ -344,6 +361,7 @@ func (e *Engine) Use(n int, m wake.Model) error {
 	e.slots[n] = slot{model: m, loaded: true}
 	e.drop(old)
 	e.board.forget(n)
+	e.slotsChanged()
 
 	slog.Info("wake word loaded", "slot", n+1, "phrase", m.Phrase, "id", m.ID, "engine", m.Kind)
 	return nil
@@ -365,6 +383,7 @@ func (e *Engine) Clear(n int) {
 	e.slots[n] = slot{}
 	e.drop(old)
 	e.board.forget(n)
+	e.slotsChanged()
 }
 
 // drop lets go of what a slot was using: the model, unless another slot still wants it, and then the
@@ -418,6 +437,33 @@ func (e *Engine) Loaded(n int) (wake.Model, bool) {
 		return wake.Model{}, false
 	}
 	return e.slots[n].model, e.slots[n].loaded
+}
+
+// FrontOf is the front end the model in slot n is scored on: "tflm" (microWakeWord's exact one,
+// mwwfront), "zserge" (its approximation) or "oww" (openWakeWord), or "" with nothing loaded there. All
+// of them read the same frame here (mic.Listen); a run of wake word takes says which one its word is
+// on (feature/takes run.go).
+func (e *Engine) FrontOf(n int) string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if n < 0 || n >= len(e.slots) || !e.slots[n].loaded {
+		return ""
+	}
+	m := e.slots[n].model
+	switch b := e.backends[m.Kind].(type) {
+	case *microBackend:
+		k, ok := b.step[m.ID]
+		if !ok {
+			return ""
+		}
+		if k.exact {
+			return "tflm"
+		}
+		return "zserge"
+	case *owwBackend:
+		return "oww"
+	}
+	return ""
 }
 
 // Crossing is the score a slot's latest detection crossed its threshold at: what OnDetect fired on.
@@ -580,6 +626,16 @@ func (e *Engine) score(frame []int16, source *mic.Source) {
 		if !ok {
 			continue
 		}
+		if e.peaks != nil {
+			p := &e.peaks[i]
+			if p.ID != s.model.ID {
+				// A word swapped in since the mark starts its own peak.
+				*p = Peak{Slot: i, ID: s.model.ID}
+			}
+			if score > p.Peak || p.At.IsZero() {
+				p.Peak, p.At = score, now
+			}
+		}
 		if !s.scored {
 			s.scored = true
 			slog.Info("wake word ready", "slot", i+1, "id", s.model.ID)
@@ -605,6 +661,7 @@ func (e *Engine) dropFailed() {
 					e.slots[i] = slot{}
 					e.drop(s)
 					e.board.forget(i)
+					e.slotsChanged()
 					if e.OnDropped != nil {
 						n, id := i, id
 						safe.Go("wake word dropped", func() { e.OnDropped(n, id) })
@@ -825,6 +882,43 @@ func (e *Engine) Settle(d time.Duration, spared ...int) {
 	}
 }
 
+// MarkPeaks starts each slot's highest score over again, the held back ones included, for Peaks.
+func (e *Engine) MarkPeaks() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.peaks = make([]Peak, len(e.slots))
+}
+
+// Peak is a slot's highest score since MarkPeaks, with the word that scored it.
+type Peak struct {
+	Slot int
+	ID   string
+	Peak float64
+	At   time.Time // when it scored that
+}
+
+// Peaks is the highest score of each slot that scored anything since MarkPeaks, a word taken out
+// since included, and stops keeping them. Nothing when MarkPeaks was not called.
+func (e *Engine) Peaks() []Peak {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var out []Peak
+	for _, p := range e.peaks {
+		if p.ID != "" {
+			out = append(out, p)
+		}
+	}
+	e.peaks = nil
+	return out
+}
+
+// Quieted is whether the engines are down for a cut microphone (Quiet).
+func (e *Engine) Quieted() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.quiet
+}
+
 // Quiet drops the engines while the microphones are cut, and builds them again when they come back.
 //
 // A cut microphone hands on silence, so nothing can be detected in it — but the models were still
@@ -835,13 +929,6 @@ func (e *Engine) Settle(d time.Duration, spared ...int) {
 // The slots are kept. What is dropped is the engines under them, which is where both the work and
 // the streaming state live, so coming back is the same cold start as a wake word freshly chosen
 // rather than a window holding audio from before the mute and audio from after it, spliced.
-// Quieted is whether the engines are down for a cut microphone (Quiet).
-func (e *Engine) Quieted() bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.quiet
-}
-
 func (e *Engine) Quiet(on bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
