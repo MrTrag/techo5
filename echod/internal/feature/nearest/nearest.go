@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"sync"
@@ -313,9 +314,16 @@ func (n *Nearest) Answer(word string, can func() bool, act func()) {
 
 // contend is the claim every word goes through. open runs after the window, with the time the word was
 // heard and this device's score for it, if this device is the nearest; now runs in its place when there
-// is nobody to ask. A turn that is already open is not claimed over.
+// is nobody to ask.
+//
+// A device in the middle of a turn claims the word like any other. It used to say nothing, and nothing
+// else spoke for it: the turn it opened is only vouched for until kept after its own wake word, so the
+// word said again a few seconds into the turn was claimed by nobody near, and a device that barely heard
+// it through a wall answered unopposed. If this device wins, the word does what it always did to a turn
+// here (ignored while still listening, takes the turn over after that); if another heard it better, that
+// one answers and the turn here is left alone.
 func (n *Nearest) contend(word string, at time.Time, can func() bool, open func(time.Time, float64), now func()) {
-	if !n.open() || n.busy() || !can() {
+	if !n.open() || !can() {
 		now()
 		return
 	}
@@ -323,6 +331,12 @@ func (n *Nearest) contend(word string, at time.Time, can func() bool, open func(
 	if len(peers) == 0 {
 		now()
 		return
+	}
+	if n.busy() {
+		// Somebody interrupting a turn here is not asked about as a faint wake is (won): the score
+		// handed on is one no cutoff is above.
+		won := open
+		open = func(at time.Time, _ float64) { won(at, math.Inf(1)) }
 	}
 
 	c := config.Get()

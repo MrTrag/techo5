@@ -144,12 +144,34 @@ func TestNoHouseWordAnswersAtOnce(t *testing.T) {
 	}
 }
 
-func TestBusyAnswersAsBefore(t *testing.T) {
+// In the middle of a turn the word is claimed like any other, and won, it reaches the turn as a wake
+// word heard when it was said. It is never asked about as a faint one, however faintly it was heard.
+func TestBusyClaimsAndThenAnswersAsBefore(t *testing.T) {
+	h := newHouse(t)
+	confirmBelow(t, true, 10)
+	h.n.score = func() float64 { return 3 }
+	h.n.busy = func() bool { return true }
+	heard := h.now
+	h.n.Woke(0)
+	if len(h.sent) != 1 || h.at0 != 0 || len(h.opened) != 0 {
+		t.Fatalf("in the middle of a turn: sent %d claims, answered at once %d times, opened %d; want one claim and a wait", len(h.sent), h.at0, len(h.opened))
+	}
+	h.wait(300 * time.Millisecond)
+	if len(h.opened) != 1 || !h.opened[0].Equal(heard) || len(h.faint) != 0 {
+		t.Errorf("after the window: opened %v, asked about as faint %d times; want once, at the wake, and never asked about", h.opened, len(h.faint))
+	}
+}
+
+// In the middle of a turn, with another device that heard the word better, this one says nothing more
+// about it: the other answers and the turn here goes on.
+func TestBusyAndBeatenLeavesItsTurnAlone(t *testing.T) {
 	h := newHouse(t)
 	h.n.busy = func() bool { return true }
 	h.n.Woke(0)
-	if h.at0 != 1 || len(h.sent) != 0 {
-		t.Error("in the middle of a turn, the wake word was claimed")
+	h.claimFrom("Kitchen", 26)
+	h.wait(300 * time.Millisecond)
+	if h.at0 != 0 || len(h.opened) != 0 {
+		t.Errorf("beaten in the middle of a turn: answered at once %d times, opened %d; want neither", h.at0, len(h.opened))
 	}
 }
 
@@ -630,4 +652,57 @@ func TestARepeatFiringOfTheSameWordsOpensNoSecondTurn(t *testing.T) {
 		t.Error("a claim long after the word was told it was answered here, turn or not")
 	}
 
+}
+
+// twoRooms is two devices that tell each other their claims, as the Lounge and Bedroom Dots do: near
+// hears the talker well, far hears them through a wall and scores nothing for how the word stood out.
+func twoRooms(t *testing.T) (near, far *house) {
+	t.Helper()
+	near, far = newHouse(t), newHouse(t)
+	near.n.score = func() float64 { return 12 }
+	far.n.score = func() float64 { return 0 }
+	tell := func(from *house, name string, to *house, toName string) {
+		from.n.fanout = func(_ []announce.Peer, mine *pending) {
+			from.sent = append(from.sent, mine.claim)
+			from.mine = mine
+			c := mine.claim
+			c.From = name
+			if to.n.took(c) {
+				from.n.answeredElsewhere(mine, toName)
+			}
+		}
+	}
+	tell(near, "Lounge", far, "Bedroom")
+	tell(far, "Bedroom", near, "Lounge")
+	return near, far
+}
+
+// The word said again while the nearest device is still in its turn, a few seconds after the first
+// (the lounge walk-about of 21 Nov 2026: four times the Lounge Dot heard the word mid-turn and the
+// Bedroom Dot, through the wall, answered). The device in its turn must still claim the word, so the
+// far one is beaten as it was the first time.
+func TestTheWordAgainMidTurnStillGoesToTheNearest(t *testing.T) {
+	near, far := twoRooms(t)
+	both := func(d time.Duration) { near.wait(d); far.wait(d) }
+
+	near.n.Woke(0)
+	far.n.Woke(0)
+	both(300 * time.Millisecond)
+	if len(near.opened) != 1 || len(far.opened) != 0 {
+		t.Fatalf("the first word: near opened %d, far opened %d; want the near one alone", len(near.opened), len(far.opened))
+	}
+
+	// The near device is in its turn, and the word comes again 4.5 s after the first.
+	near.n.busy = func() bool { return true }
+	both(4500 * time.Millisecond)
+	near.n.Woke(0)
+	far.n.Woke(0)
+	both(300 * time.Millisecond)
+
+	if len(near.sent) != 2 {
+		t.Errorf("the near device, in its turn, sent %d claims in all; want 2, one for each time it heard the word", len(near.sent))
+	}
+	if len(far.opened) != 0 {
+		t.Errorf("the far device answered the second word (opened %d turns) though the near one heard it too", len(far.opened))
+	}
 }
