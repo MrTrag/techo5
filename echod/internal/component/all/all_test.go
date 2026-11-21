@@ -74,6 +74,7 @@ var registered = []string{
 	"cpu_temperature",
 	"dlna",
 	"duck_on_near_miss",
+	"exact_front_end_ha",
 	"failure_effect",
 	"firmware",
 	"follow_up_1",
