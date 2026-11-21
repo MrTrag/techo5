@@ -288,6 +288,10 @@ type Display struct {
 	drawerTab    int
 	drawerScroll int
 	drawerPick   string
+	// appsPop is a panel's apps list open over the clock, from a tap on it (tablet_apps_panel.go).
+	appsPop bool
+	// appsPopAt is when the apps list was last opened or touched; it closes appsPopFor after.
+	appsPopAt time.Time
 
 	// touchedAt is the last finger on the panel; nightDark is the screen having been put out by the
 	// night schedule rather than by anyone.
@@ -1450,6 +1454,20 @@ func (d *Display) gesture(g touch.Gesture) {
 		return
 	}
 
+	// A panel's apps list over the clock or the dashboard: every finger is its while it is up.
+	d.mu.Lock()
+	appsUp := d.appsPop && !d.sheet
+	d.mu.Unlock()
+	if appsUp {
+		if d.r != nil && d.r.appsDrawn.Load() {
+			d.appsPopGesture(g)
+			d.wake()
+			return
+		}
+		// Up but not on the screen: something else is drawn there, and the finger is for it.
+		d.closeAppsPop()
+	}
+
 	// The dashboard: every finger is its, including the one that takes it away; unless the drawer has
 	// slid in over it, when every finger is the drawer's, as it is over the clock.
 	d.mu.Lock()
@@ -1727,9 +1745,10 @@ func (d *Display) gesture(g touch.Gesture) {
 			d.toggleMusic()
 			return
 		}
-		// The clock itself: a voice turn, unless the Tap on the clock setting says the dashboard, or
-		// nothing. A turn under way still takes the tap either way, as the way to stop or answer it,
-		// and with no dashboard set up a tap meant for one starts a turn rather than doing nothing.
+		// The clock itself: a voice turn, unless the Tap on the clock setting says the dashboard, the
+		// deck, a panel's apps, or nothing. A turn under way still takes the tap either way, as the way to
+		// stop or answer it, and with no dashboard set up a tap meant for one starts a turn rather than
+		// doing nothing.
 		if idle {
 			switch config.Get().Screen.ClockTap {
 			case "nothing":
@@ -1741,6 +1760,10 @@ func (d *Display) gesture(g touch.Gesture) {
 				}
 			case "deck":
 				if d.openDeck() {
+					return
+				}
+			case "apps":
+				if d.openTabletApps() {
 					return
 				}
 			}
@@ -2909,7 +2932,8 @@ func (d *Display) frame() (next time.Duration) {
 	s.pin = pinNow(now)
 	// The network address page is one of the settings, opened from them and going back to them: the
 	// lock stays open behind it. So is the camera test.
-	relockOnClose(s.showSheet || (d.wifiOpen && d.wifi.addr != nil) || d.camtest != nil)
+	// The apps list over the clock is behind the lock too (openTabletApps): it closing locks again.
+	relockOnClose(s.showSheet || (d.wifiOpen && d.wifi.addr != nil) || d.camtest != nil || d.appsPop)
 	s.showWifi, s.wifi = d.wifiOpen, d.wifi
 	if d.wifi.addr != nil {
 		// The page's form as it is now: the taps and the change running in the background write it
@@ -2965,6 +2989,13 @@ func (d *Display) frame() (next time.Duration) {
 	wants := (s.phase == "idle") && music
 	d.mu.Lock()
 	s.showDrawer, s.drawerTab, s.drawerScroll, s.drawerPick, s.pickScroll = d.drawer && !s.showSheet && !s.showCamera, d.drawerTab, d.drawerScroll, d.drawerPick, d.pickScroll
+	// The apps list goes away for good, not only out of sight, once something covers it or nobody has
+	// touched it for a while: left up, it would wait behind the lock for whoever taps it next.
+	turn := s.phase == "listening" || s.phase == "thinking" || s.phase == "replying"
+	if d.appsPop && (s.showSheet || s.showCamera || turn || now.Sub(d.appsPopAt) > appsPopFor) {
+		d.appsPop, d.pickScroll = false, 0
+	}
+	s.appsPop = d.appsPop
 	d.mu.Unlock()
 	d.mu.Lock()
 	s.demo = now.Before(d.demoUntil)
@@ -3159,8 +3190,16 @@ func (d *Display) frame() (next time.Duration) {
 		s.saverWeather = home.Get().SlideshowWeather()
 		if s.slideshowScreensaver != nil && !home.Get().SlideshowArt() {
 			s.slideshowCaptions = home.Get().SlideshowCaptions()
-			s.saverDone, s.saverCountdown = home.Get().SlideshowProgress(now)
+			var whole time.Duration
+			s.saverDone, whole, s.saverCountdown = home.Get().SlideshowTimeGone(now)
+			s.saverStep = countdownStep(whole, d.r.w)
 		}
+	}
+	// Only while the screensaver is what shows: under the red night clock or the light before an alarm
+	// the photo is still picked but never drawn, and the countdown would redraw the night for nothing.
+	if s.saverCountdown && !s.redClock && s.sunrise == 0 {
+		// The line fills a step at a time; drawn only on the second it moved in jumps (#656).
+		defer func() { next = min(next, s.saverStep) }()
 	}
 	// Under the screensaver the clock is not up, and a swipe is for its photos (#502). clockUp used to be
 	// settled before the screensaver was looked for, so a swipe over the photos turned the clock style.

@@ -9,6 +9,7 @@ import (
 	"image/draw"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/image/font"
@@ -158,7 +159,9 @@ type scene struct {
 	drawerTab    int
 	drawerScroll int
 	drawerPick   string
-	pickScroll   int
+	// appsPop draws a panel's apps list over the page (tablet_apps_panel.go).
+	appsPop    bool
+	pickScroll int
 
 	// popup is an event popped up over the screen (calendar_popup.go).
 	popup *hass.Event
@@ -250,6 +253,8 @@ type scene struct {
 	// saverCountdown draws how much of the photo's time has gone, saverDone of it (#656).
 	saverCountdown bool
 	saverDone      float64
+	// saverStep is how often the countdown has moved far enough to be drawn again (countdownStep).
+	saverStep time.Duration
 
 	// slideshowTrouble is why the slideshow has no photo, once it has given up looking; it sits in
 	// the footer so a folder that went away is visible rather than silently retried.
@@ -337,6 +342,10 @@ type scene struct {
 // renderer draws scenes onto one canvas. Faces are made once: parsing a font is cheap, but
 // building a face at each size is not something to do per frame.
 type renderer struct {
+	// appsDrawn is whether the last frame drew a panel's apps list (apps_pop.go): only then do fingers go
+	// to it, since a page drawn instead of it (a camera, an alert, a turn) is what they are for.
+	appsDrawn atomic.Bool
+
 	nightBuf     *image.RGBA // the night layer kept between frames (nightLayerFor)
 	paint                    // the canvas, its size, and the settings screen's tap zones
 	climateParts             // the thermostat sheet's, where it was last drawn (climate_sheet.go)
@@ -612,6 +621,7 @@ func (r *renderer) useFont() {
 // draw composes a whole frame. Everything is repainted: the canvas is small and a full paint is
 // simpler than tracking what changed.
 func (r *renderer) draw(s scene) {
+	r.appsDrawn.Store(false)
 	r.useFont()
 	r.marked, r.footAt, r.lcarsDrawn = false, 0, false
 	r.press = s.press
@@ -838,6 +848,9 @@ func (r *renderer) draw(s scene) {
 			r.press.on = false
 			r.drawer(s)
 		}
+		if s.appsPop {
+			r.appsPopup(s)
+		}
 		if s.showVolume {
 			r.volumeBar(s)
 		}
@@ -924,6 +937,9 @@ func (r *renderer) draw(s scene) {
 	}
 	if s.showDrawer {
 		r.drawer(s)
+	}
+	if s.appsPop {
+		r.appsPopup(s)
 	}
 	if s.showVolume {
 		r.volumeBar(s)

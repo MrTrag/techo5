@@ -169,13 +169,11 @@ func categoryRows(sv sheetView) (rows []settingRow, note string) {
 				rows = append(rows, settingRow{id: "callscreen", label: tr("call_screen"), sub: tr("page_or_hang_up_button"), kind: ctlChoice, value: callScreenOptions()[callScreenIndex()]})
 			}
 		}
-		if hasClockTap {
-			sub := tr("ui_start_assist_open_the_dashboard_or_the_deck_or_nothing")
-			if !hasMicrophone() {
-				sub = tr("ui_open_the_dashboard_or_the_deck_or_nothing")
-			}
-			rows = append(rows, settingRow{id: "clocktap", label: tr("tap_on_the_clock"), sub: sub, kind: ctlChoice, value: clockTapChoices()[clockTapIndex()].label})
+		sub := tr("ui_start_assist_open_the_dashboard_or_the_deck_or_nothing")
+		if !hasMicrophone() {
+			sub = tr("ui_open_the_dashboard_or_the_deck_or_nothing")
 		}
+		rows = append(rows, settingRow{id: "clocktap", label: tr("tap_on_the_clock"), sub: sub, kind: ctlChoice, value: clockTapChoices()[clockTapIndex()].label})
 		rows = append(rows,
 			settingRow{label: tr("weather"), kind: ctlHeading},
 			settingRow{id: "weatherfx", label: tr("weather_animation"), sub: tr("rain_snow_and_storms_move_on_the_forecast"), kind: ctlToggle, on: weatherAnimation.Load()},
@@ -405,6 +403,7 @@ func generalRows(sv sheetView) []settingRow {
 		settingRow{label: tr("about"), kind: ctlValue, value: deviceModel + " · slot " + st.slot})
 	// A panel's tablet has settings of its own, which the panel as its home screen keeps out of reach.
 	rows = append(rows, androidSettingsRows(st.now)...)
+	rows = append(rows, tabletAppsRows()...)
 	return append(rows,
 		restart,
 		giftResetRow(st.now),
@@ -634,6 +633,8 @@ func pickerForRaw(id string, sv sheetView) (pickerView, bool) {
 		return zonePicker(region), true
 	}
 	switch id {
+	case "tabletapps":
+		return tabletAppsPicker()
 	case "alarmsound":
 		p := pickerView{title: tr("alarm_sound"), opts: speaker.AlarmSounds(), cur: -1}
 		for i, o := range p.opts {
@@ -866,6 +867,8 @@ func (d *Display) choose(id string, i int) {
 		return
 	}
 	switch id {
+	case "tabletapps":
+		chooseTabletApp(i)
 	case "atnight":
 		d.setAtNight(i)
 	case "nightstyle":
@@ -1395,6 +1398,8 @@ func (d *Display) rowTap(id string, p part, opt int) {
 		giftResetTap()
 	case "androidsettings":
 		androidSettingsTap()
+	case "tabletapps":
+		tabletAppsTap(d)
 	case "restart":
 		d.mu.Lock()
 		armed := !d.restartArm.IsZero() && time.Since(d.restartArm) < restartWindow
