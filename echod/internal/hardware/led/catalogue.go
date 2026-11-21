@@ -91,3 +91,9 @@ var roomEffects = []Effect{
 	// what the ring would otherwise show comes through.
 	{Name: EffectMusic, Palette: calm, Senses: followsMusic},
 }
+
+// wakeEffects are for a turn that has just opened, and are offered only as a wake word's effect. They
+// read the room for where the voice is and then hold still, which nothing in the lists above does.
+var wakeEffects = []Effect{
+	{Name: EffectListening, Palette: listeningColors, Senses: listening},
+}

@@ -41,6 +41,10 @@ const (
 	// same moment looks different depending on the room. So reversing one means nothing, and starting
 	// one again does not give back what it showed the first time.
 	KindRoom
+
+	// KindWake is a light for a turn that has just opened, offered only as a wake word's effect. It
+	// reads the room as a KindRoom effect does, but for one thing only: which side the voice is on.
+	KindWake
 )
 
 // Has reports whether an effect may be used for a kind.
@@ -144,6 +148,9 @@ const (
 	EffectRoomEmbers  = "Room Embers"
 	EffectMusic       = "Follows the Music"
 
+	// A turn that has just opened: the ring on and held still, brighter toward the voice.
+	EffectListening = "Listening"
+
 	// Motion, in their own.
 	EffectRainbow         = "Rainbow"
 	EffectFireComet       = "Fire Comet"
@@ -176,6 +183,7 @@ var catalogue = []struct {
 	{KindLight, motionEffects},
 	{KindLight, alertEffects},
 	{KindRoom, roomEffects},
+	{KindWake, wakeEffects},
 }
 
 func init() {
@@ -206,6 +214,14 @@ func Names(kinds Kinds) []string {
 
 // EffectNames lists what the ring light may be set to.
 func EffectNames() []string { return Names(KindLight) }
+
+// WakeNames lists what a wake word's effect may be set to: everything the light may be, and then the
+// ones that only make sense as a turn opens.
+func WakeNames() []string { return append(Names(KindLight), Names(KindWake)...) }
+
+// Senses reports whether a named effect reads the room, and so has to be given one (Claim.React)
+// rather than simply played.
+func Senses(name string) bool { return byName[name].Senses != nil }
 
 // effect returns the frame function for a named effect. The room is only needed by an effect that
 // senses it, and asking for one of those without it is an error rather than a dark ring.

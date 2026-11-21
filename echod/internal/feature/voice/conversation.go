@@ -1142,7 +1142,7 @@ func (c *conversation) start(n nextTurn) (started bool) {
 	c.reply = reply{}
 
 	if effect := wakeword.Effect(slot); effect != "" {
-		c.claim.Play(effect, c.ring.Base())
+		c.playWake(effect, false)
 	}
 
 	c.arm(c.listenFor(n))
@@ -1401,7 +1401,7 @@ func (c *conversation) restyle() {
 	switch c.phase {
 	case phaseListening:
 		if effect := wakeword.Effect(c.slot); effect != "" {
-			c.claim.Play(effect, c.ring.Base())
+			c.playWake(effect, false)
 		} else {
 			c.claim.Clear()
 		}
@@ -1420,7 +1420,7 @@ func (c *conversation) showPhase(override string) {
 	switch override {
 	case "":
 		if effect := wakeword.Effect(c.slot); effect != "" {
-			c.claim.PlayReversed(effect, c.ring.Base())
+			c.playWake(effect, true)
 		} else {
 			c.claim.Clear()
 		}
@@ -1428,6 +1428,26 @@ func (c *conversation) showPhase(override string) {
 		c.claim.Clear()
 	default:
 		c.claim.Play(override, c.ring.Base())
+	}
+}
+
+// playWake puts the wake word's own animation on the ring, backwards for the steps after listening.
+//
+// One that reads the room (led.Senses, the Listening light) is handed the microphone to read, and is
+// never reversed: what it shows comes from where the voice is, not from a direction of travel.
+func (c *conversation) playWake(effect string, reversed bool) {
+	switch {
+	case led.Senses(effect):
+		if c.source == nil {
+			// Nothing to read the room with, so nothing honest to show.
+			c.claim.Clear()
+			return
+		}
+		c.claim.React(effect, c.ring.Base(), led.Room{Level: c.source.Level, Facing: c.source.Facing})
+	case reversed:
+		c.claim.PlayReversed(effect, c.ring.Base())
+	default:
+		c.claim.Play(effect, c.ring.Base())
 	}
 }
 

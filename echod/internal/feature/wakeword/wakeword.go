@@ -149,7 +149,7 @@ func newSlot(n int) slot {
 				Icon:     "mdi:animation",
 				Category: esphome.CategoryConfig,
 			},
-			Options: append([]string{component.EffectNone}, led.EffectNames()...),
+			Options: append([]string{component.EffectNone}, led.WakeNames()...),
 		},
 		thinking: &esphome.Select{
 			Base: esphome.Base{
@@ -275,7 +275,7 @@ func newSlot(n int) slot {
 			slog.Error("saving the wake tone failed", "slot", n+1, "err", err)
 		}
 	}
-	component.BindEffect(s.effect, led.EffectNames(), nil,
+	component.BindEffect(s.effect, led.WakeNames(), nil,
 		func(v string) error { return config.Set().Wake(n).Effect(v) })
 	component.BindOverride(s.thinking, led.EffectNames(),
 		func(v string) error { return config.Set().Wake(n).ThinkingEffect(v) })

@@ -132,11 +132,11 @@ func TestEveryEffectIsBuildableAndSaysWhereItBelongs(t *testing.T) {
 			if e.Kinds == 0 {
 				t.Error("says nowhere it may be used, so nothing will ever offer it")
 			}
-			if (e.Senses != nil) != e.Kinds.Has(KindRoom) {
+			if (e.Senses != nil) != (e.Kinds.Has(KindRoom) || e.Kinds.Has(KindWake)) {
 				t.Errorf("kinds %04b and watching the room disagree", e.Kinds)
 			}
-			if e.Senses != nil && e.Kinds != KindRoom {
-				t.Errorf("kinds %04b: watching the room is all one of these can do", e.Kinds)
+			if e.Senses != nil && e.Kinds != KindRoom && e.Kinds != KindWake {
+				t.Errorf("kinds %04b: one that watches the room reacts to it or opens a turn, and nothing else", e.Kinds)
 			}
 		})
 	}
