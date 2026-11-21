@@ -20,6 +20,13 @@ type Wake struct {
 	// Gate is the other-room floor: see Gate.
 	Gate Gate `json:"gate"`
 
+	// ExactHA puts the wake words Home Assistant sends (custom_wake_words) on microWakeWord's exact
+	// front end. Upstream does that for every one since dot-v1.0.74; here it is a choice per device,
+	// off unless chosen, because our Jarvis rounds were tuned on the approximate one and a round has to
+	// be trained and tried for the exact one first, on one device. Off, those words run as they always
+	// have. The image's words and setup-page uploads are not affected either way.
+	ExactHA bool `json:"exact_ha,omitempty"`
+
 	// Hangup is a word that hangs up a call, heard on the device. Like Stop it is not one of the slots:
 	// it opens no pipeline, and it is listened for only while a call rings or is up.
 	Hangup Hangup `json:"hangup,omitempty"`
@@ -108,6 +115,14 @@ func (w GateWriter) On(v bool) error {
 
 func (w GateWriter) DB(v float64) error {
 	return w.st.Update(func(c *Config) { c.Wake.Gate.DB = v })
+}
+
+// FrontWriter is the front end choice for Home Assistant's wake words (Wake.ExactHA), which belongs
+// to no slot.
+type FrontWriter struct{ st *Store }
+
+func (w FrontWriter) ExactHA(v bool) error {
+	return w.st.Update(func(c *Config) { c.Wake.ExactHA = v })
 }
 
 // OnHA is what Home Assistant's wake word engine is asked to do. Both are off unless chosen: either one

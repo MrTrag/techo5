@@ -360,10 +360,12 @@ Shairport Sync, https://github.com/mikebrady/shairport-sync (MIT, with parts und
   and AAC decoders and swresample (above, LGPL-2.1-or-later) are linked into it statically; the
   source of both and tools/linux/build-shairport-sync.sh rebuild or relink it. Its license files are
   in tools/linux/licenses/shairport-sync and in every root filesystem, /usr/share/licenses/shairport-sync.
-  Changes: two. tools/linux/shairport-sync-stdout-delay.patch gives its stdout output a delay() (how
+  Changes: three. tools/linux/shairport-sync-stdout-delay.patch gives its stdout output a delay() (how
   much is still to be heard, which the daemon reports), so it keeps in step with a group; MIT too.
   tools/linux/shairport-sync-ssrc0-fallback.patch, by iVolt1 (https://github.com/iVolt1, TECHO5 issue
   #468), lets it play Music Assistant's buffered AirPlay 2 stream, whose sender sends SSRC 0.
+  tools/linux/shairport-sync-ma-format.patch is upstream's own fix (development commit deb83848) for
+  Music Assistant's newer sender, which sends ALAC 44.1 kHz/16-bit as SSRC 0x12000000.
 
 nqptp, https://github.com/mikebrady/nqptp (GPL-2.0)
   Every root filesystem carries nqptp 1.2.9, the clock AirPlay 2 needs, as /usr/local/bin/techo5-nqptp
@@ -428,17 +430,24 @@ Tailscale, https://github.com/tailscale/tailscale (BSD 3-Clause License)
   source by tools/linux/build-tailscaled.sh, unmodified. Its license is in every root filesystem,
   /usr/share/licenses/tailscale.
 
-NetBird, https://github.com/netbirdio/netbird (BSD 3-Clause License, for the client)
-  Not in any image: when NetBird is switched on, the device downloads the client from TECHO5's release
-  (netbird-arm64.tar.gz, built from NetBird's source by tools/linux/build-netbird.sh, unmodified).
-  Copyright (c) 2022-2026 NetBird GmbH & AUTHORS. Its license file travels with it in the archive and is
-  kept beside the client on the device.
-
 Noto Sans JP, https://github.com/google/fonts (SIL Open Font License 1.1)
   Not in any image or daemon: a device whose screen language is Japanese downloads it from TECHO5's
   release (techo5-noto-sans-jp.tar.gz). Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved
   Font Name 'Source'. Cut down to the characters the screen draws by tools/fonts/make_cjk_font.py. Its
   OFL.txt travels with it and is kept on the device with the other licenses.
+
+Noto Emoji, https://github.com/google/fonts (SIL Open Font License 1.1)
+  Not in any image or daemon: a device with a screen downloads it from TECHO5's release
+  (techo5-noto-emoji.tar.gz) the first time it has an emoji to draw. Copyright 2013 Google LLC. Cut
+  down to one weight and the characters it maps by tools/fonts/make_emoji_font.py. Its OFL.txt travels
+  with it and is kept on the device with the other licenses.
+
+Fluent Emoji, https://github.com/microsoft/fluentui-emoji (MIT License)
+  Not in any image or daemon: a device with a screen downloads it from TECHO5's release
+  (techo5-fluent-emoji.tar.gz) with Noto Emoji, and draws emoji from it in color. Copyright (c)
+  Microsoft Corporation. The Flat artwork, made into a color font by tools/fonts/make_color_emoji_font.py:
+  gradients filled with their middle color, and a thin light edge added under the mostly dark emoji.
+  Its LICENSE travels with it and is kept on the device with the other licenses.
 
 echod: Tessera's World clock and Custom card plugins (echod/internal/feature/display/tessera_plugins.go,
 tessera_card.go)

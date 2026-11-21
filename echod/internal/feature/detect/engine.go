@@ -367,6 +367,36 @@ func (e *Engine) Use(n int, m wake.Model) error {
 	return nil
 }
 
+// Refront loads Home Assistant's wake words again, so each runs on the front end exactFor now picks
+// for it: called when the device's exact front end switch changes (front.go). A model's front end is
+// chosen when it loads, so nothing else moves it. Only those words are touched; the image's words and
+// uploads keep their state. With the microphones cut nothing is loaded, and the unmute loads them on
+// the front end chosen by then.
+func (e *Engine) Refront() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	var moved []string
+	for i, s := range e.slots {
+		if !s.loaded || !s.model.FromHomeAssistant || s.model.Kind == wake.KindOpenWakeWord {
+			continue
+		}
+		b := e.backends[s.model.Kind]
+		if b == nil {
+			continue
+		}
+		if err := b.load(s.model); err != nil {
+			slog.Error("reloading a wake word on its front end failed", "id", s.model.ID, "err", err)
+			continue
+		}
+		// A cold model: none of the old one's readiness, utterance or refractory state.
+		e.slots[i] = slot{model: s.model, loaded: true}
+		e.board.forget(i)
+		moved = append(moved, s.model.ID)
+	}
+	slog.Info("wake words reloaded on their front end", "exact_ha", exactHA.Load(), "ids", moved)
+}
+
 // Clear switches a slot off.
 func (e *Engine) Clear(n int) {
 	e.mu.Lock()

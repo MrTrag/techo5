@@ -58,10 +58,13 @@ type Radio struct {
 	// What the station is playing, when its service says: the song, and a picture for the
 	// background — the cover when there is one, else the station's logo (Logo true).
 	Title, Artist, Album string
-	Art                  *image.RGBA
-	Thumb                *image.RGBA // the same picture as a square, fitted or filled the same way
-	Logo                 bool
-	Music                bool // a music station, for the default picture when there is none
+	// Stand is Artist being the album standing in for an artist Music Assistant did not send (byline):
+	// a station's name, which is shown under the title but is nobody's song to look up words for.
+	Stand bool
+	Art   *image.RGBA
+	Thumb *image.RGBA // the same picture as a square, fitted or filled the same way
+	Logo  bool
+	Music bool // a music station, for the default picture when there is none
 
 	// Followed is another of Home Assistant's players on the page (follow.go): its buttons go to it,
 	// and Done puts it away rather than stopping it.
@@ -243,6 +246,8 @@ type Feature struct {
 	slideshowCaptionSw *esphome.Switch
 	// slideshowWeatherSw puts the weather beside the screensaver's clock (#502).
 	slideshowWeatherSw *esphome.Switch
+	// slideshowCountdownSw draws each photo's time going over the screensaver (#656).
+	slideshowCountdownSw *esphome.Switch
 	// immichFavoritesSw, immichPersonTxt, immichFromTxt and immichToTxt narrow an Immich source.
 	immichFavoritesSw *esphome.Switch
 	immichPersonTxt   *esphome.Text
@@ -253,6 +258,9 @@ type Feature struct {
 	// slideshowGen counts the slideshow's changes of source (changeSlideshow, ResetImmich), so a list
 	// gathered for the source before is not kept for the one after.
 	slideshowGen uint64
+	// slideshowTicks is when slideshowLoop started, its looks every slideshowTick from then; zero
+	// while it is not running.
+	slideshowTicks time.Time
 }
 
 // forecastEvery is how often the forecast is refreshed while there is a weather entity.
@@ -340,6 +348,7 @@ func Get() *Feature {
 			shared.mu.Unlock()
 		})
 		media.Get().OnEnd.Listen(shared.ended)
+		media.Get().OnUnplayable.Listen(shared.unplayable)
 		media.Get().OnNowPlaying.Listen(func(struct{}) { shared.pokeNowPlaying() })
 		media.Get().OnResumeRemote.Listen(func(struct{}) { safe.Go("resume music assistant", resumeMusicAssistant) })
 		media.Get().OnTakeOver.Listen(func(struct{}) { safe.Go("leave the group", leaveGroup) })
@@ -491,6 +500,7 @@ func (f *Feature) Restore(c config.Config) {
 		f.slideshowPairsSw.Set(c.Home.Slideshow.Pairs && PairsHere())
 		f.slideshowCaptionSw.Set(c.Home.Slideshow.Caption)
 		f.slideshowWeatherSw.Set(c.Home.Slideshow.Weather)
+		f.slideshowCountdownSw.Set(c.Home.Slideshow.Countdown)
 		f.immichFavoritesSw.Set(c.Home.Slideshow.ImmichFavorites)
 		f.immichPersonTxt.Set(c.Home.Slideshow.ImmichPerson)
 		f.immichFromTxt.Set(c.Home.Slideshow.ImmichFrom)
@@ -758,7 +768,8 @@ func (f *Feature) Radio() Radio {
 //
 // Receiving() is not the name of it. That names a phone over Bluetooth, which is a stream of this
 // player's own rather than a remote's; the only thing that takes the speaker this way is Sendspin, and
-// what runs the server it talks to here is Music Assistant, so that is what the page calls it.
+// what runs the server it talks to here is Music Assistant, so that is what the page calls it - or the
+// service Music Assistant plays from, once Home Assistant has said which (ma_source.go).
 //
 // Whose song it is comes from whosePlaying, the order the now-playing sensors go by too.
 func carried(r Radio) Radio {
@@ -801,8 +812,9 @@ func carried(r Radio) Radio {
 	case playingHeld:
 		// A remote's track paused from here is still the page's, with play on it, after the remote
 		// has let it go.
-		r.Playing, r.Now = false, "Music Assistant"
-		r.Title, r.Artist, r.Album = s.heldTitle, s.heldArtist, s.heldAlbum
+		r.Playing, r.Now = false, maScreenName(s.maService)
+		r.Title, r.Artist, r.Album = s.heldTitle, byline(s.heldArtist, s.heldAlbum), s.heldAlbum
+		r.Stand = s.heldArtist == "" && r.Artist != ""
 		r.Art, r.Thumb = remoteArt()
 		r.Logo = false
 		r.Music = true
@@ -811,8 +823,9 @@ func carried(r Radio) Radio {
 		// just before Music Assistant took the speaker never plays - the remote ends it - and the list
 		// went on reading "Starting…" for it for as long as the remote carried on.
 		r.Chosen = ""
-		r.Playing, r.Now = true, "Music Assistant"
-		r.Title, r.Artist, r.Album = s.extTitle, s.extArtist, s.extAlbum
+		r.Playing, r.Now = true, maScreenName(s.maService)
+		r.Title, r.Artist, r.Album = s.extTitle, byline(s.extArtist, s.extAlbum), s.extAlbum
+		r.Stand = s.extArtist == "" && r.Artist != ""
 		// Music Assistant's own picture for the track when it sent one. Without one the page draws a
 		// stand-in of its own, so the last station's cover and logo must not be left behind somebody
 		// else's.
@@ -821,6 +834,16 @@ func carried(r Radio) Radio {
 		r.Music = true
 	}
 	return r
+}
+
+// byline is the line under a Music Assistant track's title: its artist, else its album. Radio over
+// Sendspin comes with no artist and the station's name as its album (a stream title "Song / Artist" is
+// split only at " - "), so the station is shown under the title, as when Home Assistant played it here.
+func byline(artist, album string) string {
+	if artist != "" {
+		return artist
+	}
+	return album
 }
 
 // favoriteNames is the stations in Home Assistant's lists, in order, each once.

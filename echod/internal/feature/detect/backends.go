@@ -54,9 +54,17 @@ func newBackend(k wake.Kind) (backend, error) {
 // exactFor is whether a model runs on the exact front end. A model sent from the setup page always
 // does: it was trained on the reference's features, which the approximate front end only roughly
 // makes, and a model of one's own has no tuned sensitivity on the approximate one to keep. Some score
-// next to nothing on it while the exact one wakes them at full score (#352). The image's and Home
-// Assistant's words follow ExactFrontEnd, so their sensitivity settings keep meaning what they did.
-func exactFor(m wake.Model, exact bool) bool { return exact || m.Uploaded }
+// next to nothing on it while the exact one wakes them at full score (#352). One from Home Assistant's
+// custom_wake_words is nearly always somebody's own too, and the same file that woke a Dot uploaded
+// stayed silent from there. The image's words follow ExactFrontEnd, so their sensitivity settings
+// keep meaning what they did.
+//
+// Jarvis build: one from Home Assistant goes on the exact front end only when this device's "Exact
+// front end for Home Assistant words" switch is on (exactHA, front.go). Off, the default, it stays
+// on the approximate one, where our rounds were tuned.
+func exactFor(m wake.Model, exact bool) bool {
+	return exact || m.Uploaded || (m.FromHomeAssistant && exactHA.Load())
+}
 
 // frontKey is one feature front end: its step in ms, and whether it is the exact one.
 type frontKey struct {

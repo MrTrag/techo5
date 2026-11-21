@@ -289,6 +289,7 @@ func ClearSecrets(c *Config) {
 	c.TalkBack = TalkBack{}
 	c.Security.LockPIN = ""
 	c.Security.BabyKey = ""
+	c.Security.ScreenKey = ""
 	c.Deck.OBS.Password = ""
 	c.Remote.Secret = ""
 	c.CamStream.Pass = ""
@@ -300,7 +301,7 @@ func ClearSecrets(c *Config) {
 	for i := range c.Calendar.Links {
 		c.Calendar.Links[i].URL = ""
 	}
-	// Whether this device is on a tailnet is its own, and never in a file; NetBird's alike.
+	// Whether this device is on a tailnet is its own, and never in a file; the old NetBird switch alike.
 	c.Tailscale = Tailscale{}
 	c.Netbird = Netbird{}
 	scrubUserinfo(reflect.ValueOf(c).Elem())
@@ -345,6 +346,7 @@ func KeepSecrets(c *Config, from Config) (reenter []string) {
 	c.Home.HouseWord = from.Home.HouseWord
 	c.Security.LockPIN = from.Security.LockPIN
 	c.Security.BabyKey = from.Security.BabyKey
+	c.Security.ScreenKey = from.Security.ScreenKey
 	c.Remote.Secret = from.Remote.Secret
 	c.CamStream.Pass = from.CamStream.Pass
 	c.TalkBack = from.TalkBack
@@ -362,9 +364,10 @@ func ClearOwn(c *Config) { KeepOwn(c, Config{}) }
 
 // KeepOwn puts from's own things into c, in place of whatever c has.
 func KeepOwn(c *Config, from Config) {
-	lockPIN, babyKey := c.Security.LockPIN, c.Security.BabyKey // secrets, kept or cleared by their own list
+	// Secrets, kept or cleared by their own list.
+	lockPIN, babyKey, screenKey := c.Security.LockPIN, c.Security.BabyKey, c.Security.ScreenKey
 	c.Security = from.Security
-	c.Security.LockPIN, c.Security.BabyKey = lockPIN, babyKey
+	c.Security.LockPIN, c.Security.BabyKey, c.Security.ScreenKey = lockPIN, babyKey, screenKey
 
 	c.Diag = from.Diag
 
@@ -456,7 +459,7 @@ func KeepOwn(c *Config, from Config) {
 	c.Microphone.ClapSense = from.Microphone.ClapSense
 	c.CamStream = from.CamStream
 	c.Remote.On = from.Remote.On
-	// Being on a tailnet is this device's: a restore never turns Tailscale or NetBird on or off.
+	// Being on a tailnet is this device's: a restore never turns Tailscale or the old NetBird on or off.
 	c.Tailscale = from.Tailscale
 	c.Netbird = from.Netbird
 	// Answering for the others when this one heard best keeps measuring the room and talks to them on the
@@ -503,6 +506,9 @@ func KeepOwn(c *Config, from Config) {
 	// to move it to another channel or have it install on its own.
 	c.Update.Channel = from.Update.Channel
 	c.Update.AutoInstall = from.Update.AutoInstall
+	// A release held back by Roll back is this device's too: a file from one that rolled back would
+	// keep another from updating, and an older file would undo the hold and reinstall that release.
+	c.Update.HeldBack = from.Update.HeldBack
 }
 
 // scheme finds an address in a setting.

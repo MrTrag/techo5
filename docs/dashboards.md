@@ -154,6 +154,23 @@ it away. A password shows as stars, and in a text area Done doesn't add a new li
 server from this release or newer; an older one shows no keyboard. The keyboard has English letters
 and symbols only, and a field in a frame from another site on the page doesn't bring it up.
 
+## Alarms
+
+On the Echo Show and the Echo Spot, a card can open the device's alarms: give it a tap action that
+navigates to `#techo5-alarms`. The settings open on Alarms & Timers, to add an alarm or open one in
+its editor; **Done** goes back to the dashboard.
+
+```yaml
+type: button
+name: Alarms
+icon: mdi:alarm
+tap_action:
+  action: navigate
+  navigation_path: "#techo5-alarms"
+```
+
+Home Assistant itself has no view of that name, so the same card does nothing in a browser.
+
 ## Music library
 
 On the Echo Show (and the Skylight and Panel builds), a drawn dashboard can open Music Assistant's
@@ -330,6 +347,11 @@ whether it works: connected, can't reach it, or it didn't take the key.
 
 The streamed page is your real dashboard, with everything on it. The device's demo mode for
 screenshots does not cover it.
+
+When the screen turns off, dashcast keeps the dashboard ready for 5 minutes, so it is back at once
+when the screen wakes; after that it loads again, Home Assistant's logo first. If your screens stay
+off for long, whoever runs dashcast can keep it ready longer with `DASHCAST_WARM_FOR`, and set how many
+are kept with `DASHCAST_WARM_COUNT` ([`dashcast/README.md`](../dashcast/README.md#settings)).
 
 ### Web pages
 

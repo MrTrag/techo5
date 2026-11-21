@@ -102,7 +102,7 @@ func (d *Detect) Entities() []esphome.Entity {
 		out = append(out, c.word, c.threshold)
 	}
 	out = append(out, d.frames.busy, d.frames.rate, d.frames.worst)
-	return append(out, d.score, d.onHA.stream, d.onHA.confirm, d.onHA.threshold, d.onHA.faint, d.gate, d.gateDB,
+	return append(out, d.score, d.onHA.stream, d.onHA.confirm, d.onHA.threshold, d.onHA.faint, d.gate, d.gateDB, d.front,
 		d.clipsTotal, d.clipsKinds, d.keepClips, d.send.to, d.send.unsent, d.send.status)
 }
 
@@ -132,6 +132,10 @@ func (d *Detect) Restore(c config.Config) {
 	d.gate.Set(c.Wake.Gate.On)
 	d.gateDB.Set(float32(c.Wake.Gate.Level()))
 	slog.Info("restored", "what", "other-room floor", "on", c.Wake.Gate.On, "db", c.Wake.Gate.Level())
+	// Before Start loads anything, so Home Assistant's words load on the chosen front end first time.
+	exactHA.Store(c.Wake.ExactHA)
+	d.front.Set(c.Wake.ExactHA)
+	slog.Info("restored", "what", d.front.ObjectID, "using", c.Wake.ExactHA)
 	// An off that never reached the state wins over it (clipsoff.go).
 	keep := d.keepClipsAtStart(c.Wake.KeepClips)
 	d.keepClips.Set(keep)

@@ -269,6 +269,39 @@ data:
   days: weekdays
 ```
 
+## Wake with music
+
+In YAML, refer to this action as `esphome.<node>_alarm_wake_with`.
+
+Sets what an alarm wakes with: its alarm sound, a radio station, or a Music Assistant favorite. The
+music plays on the device's own speaker in place of the alarm sound, and the alarm otherwise rings as
+any other; if the music isn't heard within 8 seconds, the alarm sound rings instead. See **Wake with**
+in [docs/setup.md](setup.md). The same choice is **Wake with** in an alarm's editor on the device and
+on the setup page. Fails if no alarm has that id, if the station or favorite isn't found, or if the
+alarm is light only or silent.
+
+### id
+
+*string*
+
+An alarm's `id` from `alarms_list`.
+
+### wake_with
+
+*string*
+
+`alarm_sound`, `radio: <station>` with a station as the radio page lists it, or
+`music_assistant: <favorite>` with one of Music Assistant's favorite playlists, albums or radio
+stations (a Music Assistant URI like `library://playlist/12` works too). `alarms_list` says what each
+alarm wakes with in the same words.
+
+```yaml
+action: esphome.office_alarm_wake_with
+data:
+  id: "{{ listing.alarms[0].id }}"
+  wake_with: "music_assistant: Morning Mix"
+```
+
 ## Alarm events
 
 Each step of an alarm fires `esphome.techo5_alarm` on Home Assistant's bus, with:
@@ -280,6 +313,7 @@ Each step of an alarm fires `esphome.techo5_alarm` on Home Assistant's bus, with
 | `label` | The alarm's label |
 | `due` | When it was due, like `2026-10-01T06:45:00-06:00` |
 | `device` | The device's name |
+| `wake_with` | What it wakes with, on `ringing`, `snoozed` and `stopped`: `alarm_sound`, `radio: <station>` or `music_assistant: <favorite>`, as chosen (also when the music didn't start and the alarm sound rang) |
 
 A snoozed alarm fires `ringing` again when it comes back. Reminders fire nothing here. The device
 needs **Allow the device to perform Home Assistant actions** turned on in its ESPHome integration
@@ -1054,6 +1088,7 @@ alarms:
     ring_on: []          # the other devices a reminder goes off on
     silent: false        # true for one set with alarm_set_silent
     light_only: false    # true for a wake light alone (alarm_set_light_only)
+    wake_with: alarm_sound   # or "radio: <station>", "music_assistant: <favorite>" (alarm_wake_with)
 snoozed: []              # each {label, at}
 followed: []             # each {entity, label, armed, next}
 timers:
@@ -1228,6 +1263,37 @@ action: esphome.office_timer_add
 data:
   id: "{{ started.id }}"
   duration: 5 minutes
+```
+
+## Next timer
+
+The timer that ends soonest, whether it was set by voice through Assist or with `timer_start`, shows
+as a countdown in two sensors:
+
+- **Next timer ends** (`sensor.<node>_next_timer_ends`) is when it ends, as a timestamp. It's empty
+  (`unknown` in Home Assistant) when no timer is running.
+- **Next timer** (`sensor.<node>_next_timer`) is its label, `Pasta`. With no timer running but one
+  paused, it's the paused one with what it has left, `Pasta (paused, 4:05 left)`, and **Next timer
+  ends** stays empty. It's empty when there's no timer at all.
+
+A running timer always comes before a paused one. Silent timers (`timer_start_silent`) are left out.
+Several timers at once are in the **Timers** sensor and `alarms_list`.
+
+A tile card shows the end as a countdown, and so does a row in an entities card with
+`format: relative`. A time trigger with an offset runs an automation before the timer ends; it does not
+run for a timer shorter than the offset, whose moment has already passed:
+
+```yaml
+alias: Kitchen light on before the timer ends
+triggers:
+  - trigger: time
+    at:
+      entity_id: sensor.kitchen_echo_next_timer_ends
+      offset: "-00:01:00"
+actions:
+  - action: light.turn_on
+    target:
+      entity_id: light.kitchen
 ```
 
 ## Follow Home Assistant helpers as alarms
@@ -1562,8 +1628,8 @@ In YAML, refer to this action as `esphome.<node>_notify`.
 
 Puts a notification up on this device's screen: a card in the middle of the screen with a heading (an
 icon and a title, either optional) and a message of up to three lines. It can chime as it comes up and
-can be said aloud. It stays until somebody taps it or its time runs out (12 hours at most when no time
-is given).
+can be said aloud. It stays until somebody taps it, its time runs out (12 hours at most when no time
+is given) or an automation takes it down ([Take a notification down](#take-a-notification-down)).
 
 Every TECHO5 has its own `notify`, and a call shows on that device alone. To reach several devices,
 call each one's action; see [Notifying every device](#notifying-every-device).
@@ -1665,7 +1731,7 @@ comes up, and once more as it goes.
 
 | Field | |
 |---|---|
-| `event` | `shown` as it comes up; then `dismissed` (somebody tapped it, or its picture's camera page was closed), `expired` (its time ran out) or `replaced` (a newer notification, or a camera put up over its picture, took its place) |
+| `event` | `shown` as it comes up; then `dismissed` (somebody tapped it, or its picture's camera page was closed), `expired` (its time ran out), `replaced` (a newer notification, or a camera put up over its picture, took its place) or `cleared` (an automation took it down with `notify_clear`) |
 | `id` | The notification's own, unique on its device: the numbers count up from a random start each time the device starts, so one from before a restart is very unlikely to come again. Pair it with `device` |
 | `tag` | The `tag` the call passed, `""` for none |
 | `kind` | `text` for `notify`, `picture` for `notify_picture` |
@@ -1971,6 +2037,30 @@ actions:
       - action: notify.mobile_app_phone
         data:
           message: "Nobody answered the door"
+```
+
+## Take a notification down
+
+In YAML, refer to this action as `esphome.<node>_notify_clear`.
+
+Takes a notification down before its time, when the news is over: the messages have been heard, the
+washer has been emptied, somebody opened the door on another device. It works for both kinds, a card
+and a picture, and takes a picture's camera view down with it. The notification reports `cleared`.
+
+| Argument | Type | Accepted values | Empty means |
+|---|---|---|---|
+| `tag` | string | The `tag` the notification was sent with. Only a notification with this tag is taken down, so clearing the messages never takes down the doorbell. | Whichever notification is up. |
+
+Nothing up, or one with another tag, is not an error: the call does nothing, since the notification
+may have been tapped away or run out already. A note or an alert of the device's own (a calendar's
+meeting, for one) is not taken down; a tap or its time ends it. A Dot takes the call too, so a script
+that clears every device does not fail on one.
+
+```yaml
+# The new messages have been heard: take their card down on the kitchen Show.
+action: esphome.kitchen_notify_clear
+data:
+  tag: "messages"
 ```
 
 ## Choose the calendars shown
@@ -2881,43 +2971,6 @@ action: esphome.office_headscale_login
 data:
   auth_key: hskey-auth-example
   server_url: https://headscale.example.com
-```
-
-## Join a NetBird network
-
-In YAML, refer to this action as `esphome.<node>_netbird_login`.
-
-Joins the device to your NetBird network with a setup key, and turns its **NetBird** switch on. The
-first time, the device downloads NetBird's client first (about 14 MB): the action answers at once, the
-device holds the key in memory only and joins by itself when the download is done, so one run is enough.
-If that join fails, the **NetBird status** sensor says *Needs a setup key* and you run it again. The key is
-handed to NetBird once and not kept: after that the device rejoins by itself. Once the client is here, it
-waits up to 30 seconds to see the device connect, so a key that's used up or expired is an error. Echo Shows, the Echo Spot and
-the Skylight only. See [NetBird: reaching a device from away](netbird.md).
-
-> **Good to know**
->
-> This needs an API encryption key: it's refused unless Home Assistant's *ESPHome* link to the device
-> already has a real encryption key set, since otherwise the key would cross the network in the clear.
-
-### setup_key (Required)
-
-*string*
-
-A setup key from your NetBird dashboard.
-
-### management_url (Required)
-
-*string*
-
-Your own management server's URL, such as `https://netbird.example.com`. Empty for NetBird's own. Use
-`https://`: with `http://` the setup key crosses the network unencrypted.
-
-```yaml
-action: esphome.office_netbird_login
-data:
-  setup_key: A1B2C3D4-0000-0000-0000-000000000000
-  management_url: ""
 ```
 
 ## Set the settings lock's PIN

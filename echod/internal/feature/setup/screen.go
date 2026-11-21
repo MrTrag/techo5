@@ -127,11 +127,11 @@ func screenSection(w http.ResponseWriter, token string) {
 	if s == nil {
 		return
 	}
-	fieldsetOpen(w, "screen", "The screen")
+	cur := s.Current()
+	sectionOpen(w, "screen", "The screen", screenSummary(s.Styles, cur, home.Get().SlideshowMode(), home.Get().SlideshowArt())...)
 	fmt.Fprint(w, `<form method="post" action="/setup/save">`)
 	hidden(w, token, "screen")
 	fmt.Fprint(w, `<label for="clockstyle">Clock style</label><select id="clockstyle" name="clockstyle">`)
-	cur := s.Current()
 	for i, l := range s.Styles {
 		// The World style is marked, for the page to show its places only while it is the one chosen
 		// (.worldonly, tabs.go).
@@ -230,9 +230,34 @@ func screenSection(w http.ResponseWriter, token string) {
 	  the top, at the top for a clock at the bottom.</p>
 	 <p><label><input type="checkbox" name="saverweather" value="yes" style="width:auto"%s> Weather with the
 	  screensaver clock</label></p>
+	 <p><label><input type="checkbox" name="savercountdown" value="yes" style="width:auto"%s> Photo countdown: a
+	  thin line along the foot of the screen, a ring round a round one, fills while each photo is up</label></p>
 	 <p class="note">On the screensaver, a swipe left or right goes to the next photo or the one before, and that
-	  photo stays up for five minutes.</p></div>
-	 <p><button type="submit">Save</button></p></form></fieldset>`, checked(home.Get().SlideshowWeather()))
+	  photo stays up for five minutes.</p></div>`, checked(home.Get().SlideshowWeather()), checked(home.Get().SlideshowCountdown()))
+	alsoOnRow(w, token, "screen")
+	fmt.Fprint(w, `<p><button type="submit">Save</button></p></form>`)
+	sectionClose(w)
+}
+
+// screenSummary is the line on the shut card: the clock style, and what the slideshow does.
+func screenSummary(styles []string, cur int, slideshow string, art bool) []string {
+	var out []string
+	if cur >= 0 && cur < len(styles) {
+		out = append(out, styles[cur]+" clock")
+	}
+	show := "photos"
+	if art {
+		show = "weather art"
+	}
+	switch slideshow {
+	case config.SlideshowBackground:
+		out = append(out, show+" behind the clock")
+	case config.SlideshowScreensaver:
+		out = append(out, show+" as a screensaver")
+	default:
+		out = append(out, "slideshow off")
+	}
+	return out
 }
 
 func saveScreen(r *http.Request) string {
@@ -333,6 +358,7 @@ func saveScreen(r *http.Request) string {
 			h.ChooseSlideshowClockAt(at[0])
 		}
 		h.SetSlideshowWeather(r.PostFormValue("saverweather") == "yes")
+		h.SetSlideshowCountdown(r.PostFormValue("savercountdown") == "yes")
 	}
 	slog.Info("setup page: screen set", "clock style", strings.ToLower(s.Styles[i]), "slideshow", mode, "art", h.SlideshowArt())
 	return ""

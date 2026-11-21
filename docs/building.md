@@ -249,17 +249,6 @@ one (an athena on Amazon's kernel) the daemon doesn't offer Tailscale. The build
 reproducible: the same script gives the same bytes on any machine. A release built from a worktree needs
 it copied into its `bin/` as well, with `tailscaled-arm64.LICENSE`.
 
-## NetBird
-
-No image carries NetBird's client ([docs/netbird.md](netbird.md)): a device downloads it when NetBird
-is turned on, from the release that first published it, checked against the size and SHA-256 in
-`echod/internal/feature/netbird/pinned.go`.
-[tools/linux/build-netbird.sh](../tools/linux/build-netbird.sh) builds `bin/netbird-arm64.tar.gz`, the
-client and its license, from NetBird's own release source, pinned and checked by SHA-256, with a pinned
-Go (Linux, WSL or Git Bash on Windows). The build is reproducible, so the same script gives the bytes
-`pinned.go` names; a new NetBird version means a new build, new values there, and the archive published
-with that release.
-
 ## The Japanese font
 
 No image carries a Japanese font either: a Show or a Spot whose screen language is Japanese downloads
@@ -269,6 +258,20 @@ builds `bin/techo5-noto-sans-jp.tar.gz`, Noto Sans JP (SIL Open Font License) cu
 everyday kanji, with its license, from google/fonts at a pinned commit, with a pinned fontTools
 (`pip install fonttools==4.65.0`). The same script gives the same bytes; release.ps1 checks them against
 the pin.
+
+The emoji font comes the same way: a Show or a Spot downloads it the first time its screen has an emoji
+to draw, pinned in `echod/internal/feature/cjkfont/emoji.go`.
+[tools/fonts/make_emoji_font.py](../tools/fonts/make_emoji_font.py) builds `bin/techo5-noto-emoji.tar.gz`,
+Noto Emoji (the black-and-white one, SIL Open Font License) at one weight with its license, from
+google/fonts at a pinned commit, with the same pinned fontTools.
+
+The color emoji come with it, pinned in `echod/internal/feature/cjkfont/coloremoji.go`.
+[tools/fonts/make_color_emoji_font.py](../tools/fonts/make_color_emoji_font.py) builds
+`bin/techo5-fluent-emoji.tar.gz`, Microsoft's Fluent Emoji Flat art (MIT License) as a COLR version 0
+font, with its license, from microsoft/fluentui-emoji at a pinned commit, checked by one SHA-256 over
+the files it uses (`pip install fonttools==4.65.0 picosvg==0.23.0 skia-pathops==0.9.2 lxml==6.1.3`;
+`--cache DIR` keeps the 3,200 small files it fetches). It takes about a minute. Noto Emoji still draws
+what Fluent has no emoji for.
 
 ## The person detection model
 

@@ -52,7 +52,7 @@ It started on the Show 5, which is where the name comes from.
 | <img src="docs/images/badges/biscuit.png" alt="" width="36" align="absmiddle"> **Echo Dot, 2nd gen** (2016, `biscuit`) | RS03QR | [TECHO5 Dot](https://github.com/HuskerMinion/techo5-dot) | In daily use |
 | <img src="docs/images/badges/radar.png" alt="" width="36" align="absmiddle"> **Echo, 2nd gen** (2017, `radar`) | XC56PY | [TECHO5 Dot](https://github.com/HuskerMinion/techo5-dot#echo-2nd-gen), same release and daemon | Working on one unit |
 | <img src="docs/images/badges/donut.png" alt="" width="36" align="absmiddle"> **Echo Dot, 3rd gen** (2018, `donut`) | D9N29T | [TECHO5 Dot](https://github.com/HuskerMinion/techo5-dot#echo-dot-3rd-gen), same release, its own daemon build | Working on two units |
-| **Echo Input** (2018, `cupcake`) | C1125P | [TECHO5 Dot](https://github.com/HuskerMinion/techo5-dot#echo-input), the Echo Dot 3rd gen's release and daemon build | Experimental, not yet tried on a unit |
+| <img src="docs/images/badges/cupcake.png" alt="" width="36" align="absmiddle"> **Echo Input** (2018, `cupcake`) | C1125P | [TECHO5 Dot](https://github.com/HuskerMinion/techo5-dot#echo-input), the Echo Dot 3rd gen's release and daemon build | Working on one unit |
 | **Android tablets and the Meta Portal**, no unlock | Android 8.0 or later, ARM | [TECHO5 Panel](https://github.com/HuskerMinion/techo5-panel), an app with the same daemon inside ([docs/panel.md](docs/panel.md)) | Tested on a Fire HD 8 (10th gen), a Galaxy Tab S6 Lite and a Meta Portal (2nd gen); other tablets may work |
 
 Every other device amonet opens is a Fire tablet. No Echo made after 2021 has a public unlock.
@@ -206,8 +206,8 @@ The bigger changes of September to November 2026. Every release lists the rest.
   to classic AirPlay if a group doesn't play in step. Its firewall ports are open only while the
   AirPlay 2 receiver runs.
 - 🛰️ **NetBird** (v1.6.8). The other way, beside Tailscale, to keep a device in another house in
-  your Home Assistant, with NetBird's own service or your own server. Off until you give it a setup
-  key. [docs/netbird.md](docs/netbird.md)
+  your Home Assistant. No longer built in: it runs as tioan's add-on,
+  [techo5-netbird](https://github.com/tioan/techo5-netbird). [docs/netbird.md](docs/netbird.md)
 - 📶 **Also in v1.6.8.** Home Assistant can connect to Bluetooth devices through a Show, up to three
   at a time, with the new **Bluetooth proxy connections** switch
   ([#184](https://github.com/HuskerMinion/techo5/pull/184)). Weekend nights can have their own hours
@@ -676,6 +676,9 @@ the backup. Every step: **[docs/install-skylight.md](docs/install-skylight.md)**
 - [docs/training-wake-word.md](docs/training-wake-word.md): training a wake word of your own with
   [wakesmith](https://github.com/HuskerMinion/wakesmith), or by hand in any language.
 - [CONTRIBUTING.md](CONTRIBUTING.md): reporting problems, trying a build on your device, and pull requests.
+- [Add-ons others have made](docs/external-asp.md#add-ons-others-have-made): extras made and kept by
+  their authors, not by TECHO5, that run from userdata and outlast updates. Making one of your own:
+  [running something at boot](docs/setup.md#running-something-of-your-own-at-boot).
 
 ## Sister projects
 

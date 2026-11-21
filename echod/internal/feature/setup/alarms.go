@@ -6,6 +6,7 @@ import (
 	"html"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -29,8 +30,10 @@ func alarmsSection(w http.ResponseWriter, token string) {
 	now := time.Now()
 	v := alarm.Get().View(now)
 	timers := timer.Get().List(now)
+	// Asked once for the page: Music Assistant's favorites can take a moment to come.
+	wakes := alarm.Get().WakeChoices(3 * time.Second)
 
-	fieldsetOpen(w, "alarm_edit", "Coming up")
+	sectionOpen(w, "alarm_edit", "Coming up")
 	fmt.Fprint(w, `<p class="note" style="margin-top:0">A reminder says its words once and stays on the screen until it is
 	  dismissed; an alarm with words says them when it starts ringing.</p>`)
 	shown := 0
@@ -43,7 +46,7 @@ func alarmsSection(w http.ResponseWriter, token string) {
 	}
 	for _, a := range v.Local {
 		shown++
-		alarmDrawer(w, token, a)
+		alarmDrawer(w, token, a, wakes)
 	}
 	if shown == 0 {
 		fmt.Fprint(w, `<p class="note">Nothing set. Add one below, or from Home Assistant.</p>`)
@@ -56,13 +59,13 @@ func alarmsSection(w http.ResponseWriter, token string) {
 		}
 		fmt.Fprint(w, `<button type="submit" class="quiet">Cancel snoozes</button></form>`)
 	}
-	fmt.Fprint(w, `</fieldset>`)
+	sectionClose(w)
 
-	addDrawer(w, token)
+	addDrawer(w, token, wakes)
 
 	if len(v.Followed) > 0 {
-		fmt.Fprint(w, `<fieldset><legend>From Home Assistant</legend>
-		 <p class="note" style="margin-top:0">Helpers this device follows as alarms. Change them in Home Assistant.</p>`)
+		sectionOpen(w, "haalarms", "From Home Assistant")
+		fmt.Fprint(w, `<p class="note" style="margin-top:0">Helpers this device follows as alarms. Change them in Home Assistant.</p>`)
 		for _, f := range v.Followed {
 			when := "not set"
 			if !f.At.IsZero() {
@@ -75,7 +78,7 @@ func alarmsSection(w http.ResponseWriter, token string) {
 			fmt.Fprintf(w, `<p style="margin:.3rem 0"><span class="chip">Alarm</span> <strong>%s</strong> %s <span class="where">· %s</span></p>`,
 				html.EscapeString(when), html.EscapeString(cmpOr(f.Label, f.Entity)), state)
 		}
-		fmt.Fprint(w, `</fieldset>`)
+		sectionClose(w)
 	}
 
 	prefsSection(w, token)
@@ -99,7 +102,7 @@ func timerDrawer(w http.ResponseWriter, token string, c timer.Countdown) {
 	fmt.Fprint(w, `</div></details>`)
 }
 
-func alarmDrawer(w http.ResponseWriter, token string, a config.Alarm) {
+func alarmDrawer(w http.ResponseWriter, token string, a config.Alarm, wakes []config.WakeWith) {
 	kind, chip := "Alarm", "chip"
 	if a.Remind {
 		kind, chip = "Reminder", "chip rem"
@@ -114,6 +117,9 @@ func alarmDrawer(w http.ResponseWriter, token string, a config.Alarm) {
 		}
 		if a.LightOnly {
 			where += " · light only"
+		}
+		if w := a.Waking(); w.Music() {
+			where += " · wakes with " + w.Name
 		}
 	}
 	cls := ""
@@ -138,6 +144,7 @@ func alarmDrawer(w http.ResponseWriter, token string, a config.Alarm) {
 		sunriseField(w, "s"+a.ID, a.Sunrise)
 		if !a.Silent {
 			lightOnlyField(w, a.LightOnly)
+			wakeField(w, "w"+a.ID, a.Wake, wakes)
 		}
 	}
 	toggle := "Turn off"
@@ -151,8 +158,8 @@ func alarmDrawer(w http.ResponseWriter, token string, a config.Alarm) {
 	 <button type="submit" name="act" value="delete" class="quiet danger" formnovalidate>Delete</button></div></form></div></details>`, toggle)
 }
 
-func addDrawer(w http.ResponseWriter, token string) {
-	// The drawer is not in a fieldset of its own, so it is the section: it stays open when the page comes
+func addDrawer(w http.ResponseWriter, token string, wakes []config.WakeWith) {
+	// The drawer is not in a card of its own, so it is the section: it stays open when the page comes
 	// back from it, with what happened said inside.
 	open := ""
 	if cameBackTo(w, "alarm_add") {
@@ -177,6 +184,7 @@ func addDrawer(w http.ResponseWriter, token string) {
 	// Light only is for an alarm; the page hides it while Reminder or Timer is chosen (.alarmonly).
 	fmt.Fprint(w, `<div class="alarmonly">`)
 	lightOnlyField(w, false)
+	wakeField(w, "addwake", config.WakeWith{}, wakes)
 	fmt.Fprint(w, `</div>`)
 	fmt.Fprint(w, `<p class="note">Repeat days are for alarms and reminders at a time of day; "in" is once. Other
 	 devices are for reminders; the wake light and light only are for alarms.</p>
@@ -185,7 +193,7 @@ func addDrawer(w http.ResponseWriter, token string) {
 
 func prefsSection(w http.ResponseWriter, token string) {
 	c := config.Get()
-	fieldsetOpen(w, "alarm_prefs", "For every alarm on this device")
+	sectionOpen(w, "alarm_prefs", "For every alarm on this device", alarmPrefsSummary(c.Alarms.Snooze(), ring.Level(), alarm.Get().Sound())...)
 	fmt.Fprint(w, `<form method="post" action="/setup/save">`)
 	hidden(w, token, "alarm_prefs")
 	fmt.Fprintf(w, `<div class="row">
@@ -213,8 +221,19 @@ func prefsSection(w http.ResponseWriter, token string) {
 	 <p class="note">Ring volume is only for alarms and timers, not the music. At 0 they make no sound. The
 	  default wake light is for alarms that don't choose their own. Gets louder starts an alarm 30 dB under its
 	  ring volume and brings it up to it. What an alarm says is spoken by Home
-	  Assistant, after the first chime.</p>
-	 <div class="btns"><button type="submit">Save</button></div></form></fieldset>`)
+	  Assistant, after the first chime.</p>`)
+	alsoOnRow(w, token, "alarm_prefs")
+	fmt.Fprint(w, `<div class="btns"><button type="submit">Save</button></div></form>`)
+	sectionClose(w)
+}
+
+// alarmPrefsSummary is the line on the shut card: the snooze, the ring volume and the sound.
+func alarmPrefsSummary(snooze, ringVolume int, sound string) []string {
+	out := []string{fmt.Sprintf("Snooze %d min", snooze), fmt.Sprintf("ring volume %d", ringVolume)}
+	if sound != "" {
+		out = append(out, sound)
+	}
+	return out
 }
 
 // whenFields are an alarm's time and words.
@@ -267,6 +286,43 @@ func lightOnlyField(w http.ResponseWriter, cur bool) {
 	}
 	fmt.Fprintf(w, `<p><label><input type="checkbox" name="light_only" value="yes" style="width:auto"%s> Light only:
 	 no sound and nothing to stop; at its time the night ends, and the screen is back as by day</label></p>`, checked)
+}
+
+// wakeField is an alarm's Wake with list (#651): the alarm sound, or music in its place, from choices
+// (alarm.WakeChoices).
+func wakeField(w http.ResponseWriter, id string, cur config.WakeWith, choices []config.WakeWith) {
+	fmt.Fprintf(w, `<label for="%s">Wake with <span class="note">(the alarm sound if the music does not start
+	 within a few seconds; not for light only)</span></label><select id="%s" name="wake">`, id, id)
+	fmt.Fprintf(w, `<option value=""%s>Alarm sound</option>`, selected(!cur.Music()))
+	if cur.Music() && !slices.Contains(choices, cur) {
+		choices = append(slices.Clone(choices), cur)
+	}
+	for _, c := range choices {
+		what := "Radio"
+		if c.Kind == config.WakeMusic {
+			what = "Music Assistant"
+		}
+		fmt.Fprintf(w, `<option value="%s"%s>%s: %s</option>`, html.EscapeString(wakeValue(c)), selected(c == cur), what, html.EscapeString(c.Name))
+	}
+	fmt.Fprint(w, `</select>`)
+}
+
+// wakeValue is a Wake with choice as the list sends it.
+func wakeValue(c config.WakeWith) string {
+	return url.Values{"kind": {c.Kind}, "name": {c.Name}, "uri": {c.URI}}.Encode()
+}
+
+// wakeOf is the Wake with list as sent: the alarm sound for none, or for anything it cannot read.
+func wakeOf(r *http.Request) config.WakeWith {
+	v, err := url.ParseQuery(r.PostFormValue("wake"))
+	if err != nil {
+		return config.WakeWith{}
+	}
+	c := config.WakeWith{Kind: v.Get("kind"), Name: v.Get("name"), URI: v.Get("uri")}
+	if !c.Music() {
+		return config.WakeWith{}
+	}
+	return c
 }
 
 // lightOnlyOf is the Light only box as sent.
@@ -337,8 +393,8 @@ func addFromPage(r *http.Request) string {
 		if err != nil {
 			return err.Error()
 		}
-		if s, only := sunriseOf(r), lightOnlyOf(r); s != al.Sunrise || only != al.LightOnly {
-			al.Sunrise, al.LightOnly = s, only
+		if s, only, wake := sunriseOf(r), lightOnlyOf(r), wakeOf(r); s != al.Sunrise || only != al.LightOnly || wake != al.Wake {
+			al.Sunrise, al.LightOnly, al.Wake = s, only, wake
 			if err := alarm.Get().Put(al); err != nil {
 				return err.Error()
 			}
@@ -386,6 +442,7 @@ func editFromPage(r *http.Request) string {
 			al.Sunrise = sunriseOf(r)
 			if !al.Silent {
 				al.LightOnly = lightOnlyOf(r)
+				al.Wake = wakeOf(r)
 			}
 		}
 		al.On = true
@@ -420,7 +477,7 @@ func prefsFromPage(r *http.Request) string {
 		return "that is not one of the choices for how an alarm gets louder"
 	}
 	// The one write that can fail goes first: a failure then has changed nothing, as the page says.
-	if err := config.Set().Alarms().SunriseMinutes(sunrise); err != nil {
+	if err := alarm.Get().SetSunriseDefault(sunrise); err != nil {
 		return err.Error()
 	}
 	alarm.Get().SetSnooze(snooze)

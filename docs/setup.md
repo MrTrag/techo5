@@ -17,15 +17,19 @@ you use nowhere else.
 
 ### First run
 
-The first time a TECHO5 device starts, it walks whoever plugged it in through six steps: **Wi-Fi**,
-**Time zone**, **Name and room**, **Home Assistant**, **Updates** and a **Sound check**. A step that is
+The first time a TECHO5 device starts, it walks whoever plugged it in through seven steps: **Language
+and clock**, **Wi-Fi**, **Time zone**, **Name and room**, **Home Assistant**, **Updates** and a **Sound
+check** (a device with no screen has no **Language and clock**). A step that is
 already done, such as Wi-Fi set by the installer, just shows what is set, with Next. Each step is kept
 as it is finished, so a restart picks up where it stopped, and finishing it on any face (the screen or
-the setup page) finishes it everywhere.
+the setup page) finishes it everywhere. Every step after the first has **Back**, to the step before:
+going back undoes nothing (the network stays joined, Home Assistant keeps the device), the step just
+shows what is set, with Next.
 
 - **On a Show** (and the Skylight Calendar), the screen shows a card a step, starting and ending with
-  the welcome card.
-- **On a Spot**, the round screen shows the same steps, with the buttons stacked. What needs typing
+  the welcome card. Back is the **‹** key beside a step's title.
+- **On a Spot**, the round screen shows the same steps, with the buttons stacked and **Back** at the
+  top. What needs typing
   (another network, a name, a zone not in the clock's list) is done on a phone: **On a phone** opens
   the setup page, and the Spot asks for the tap that lets the phone in.
 - **On a TECHO5 Panel**, the screen shows the same cards without **Wi-Fi** and **Updates**: the
@@ -38,6 +42,11 @@ the setup page) finishes it everywhere.
 
 The steps:
 
+- **Language and clock:** the screen's language, each written in its own words, and a 12- or 24-hour
+  clock. The rest of first run switches to the language chosen at once, and choosing one picks the
+  clock it usually goes with (12 hours for English, 24 for the others), which can be changed right
+  there. It shows what is set now, so Next is one tap when that is right. Both can be changed in
+  Settings later.
 - **Name and room:** the room goes to Home Assistant as the device's suggested area, so it lands in
   that room when it is added. Once Home Assistant has the device, rooms are changed there. Renaming
   restarts the device's software, and first run comes back on the same step.
@@ -82,7 +91,7 @@ goes down. The device then restarts into first run. A reset clears:
   and automatic updates (off)
 - the SIP account and the phone book
 - the slideshow's photos, sounds and fonts of its own, wake word recordings and clips
-- SSH keys, Tailscale's and NetBird's logins, Spotify's login
+- SSH keys, Tailscale's login and what the built-in NetBird left, Spotify's login
 - the Tessera dashboard's layout, the time server, and the time zone chosen on the device
 - crash reports and logs, which can hold names and addresses
 
@@ -206,8 +215,8 @@ usual one, and the steps below start with it.
    - **Show whole photo** shows each photo in full, with a blurred copy of it filling the sides.
      Off, a photo shaped like the screen (a landscape one on a wide screen) fills it, cropped; a photo
      of the other shape, such as a portrait one on a wide screen, is still shown whole on its blurred
-     copy, so nobody loses their head. On the round Spot, photos close to square (4:3 and 3:4) fill the
-     face and wider or taller ones are shown whole inside the circle.
+     copy, so nobody loses their head. On the round Spot every photo fills the face, cropped, whatever its
+     shape; turn Show whole photo on to see them whole there.
    - **Photo pairs** (the Show) puts two tall photos side by side, each filling half the screen,
      in place of one with blurred sides. A tall photo with no other near it in the list shows alone.
    - **Screensaver clock position** puts the screensaver's clock at the top, in the middle or at the
@@ -217,14 +226,25 @@ usual one, and the steps below start with it.
    - **Date and place** writes the day each photo was taken at its foot on the screensaver. Immich
      says the place too. For any other source the day comes from the photo's own EXIF data, or else
      from a date in its file name (like `20260818_111018.jpg`); a photo with neither has no caption.
+   - **Photo countdown** draws a thin, faint line along the foot of the screensaver (a ring round the
+     edge on the Spot) that fills while each photo is up, so you can see when the next one comes. It
+     starts again with each new photo, and with one you swiped to. Off at first.
    - With an Immich source, **Favorites only** is here too.
 
 **The screensaver.** **Screensaver clock** (in Home Assistant, or on the setup page under **Screen &
 Photos**) is Off, Small, Medium or Normal. Medium is readable across a room without covering the
 middle of the photo. **Screensaver weather** adds the sky's icon and the temperature to the clock.
+**Photo countdown** (a switch in Home Assistant, a box on the setup page, a row under Display) shows
+how much of each photo's time has gone, as above.
 While the photos are up, a swipe left goes to the next photo and a swipe right to the one before,
 back through the last 20; the photo swiped to stays up for five minutes before the slideshow carries
 on. Swipes there never change the clock style.
+
+**Show screensaver** (a button in Home Assistant, on the Show, the Spot and the Panel) puts the
+screensaver up now, as if the screen had been idle for the whole wait, for an automation such as
+"everybody left" or "movie time". A tap takes it down as usual. A press does nothing when there is
+no screensaver to show (Slideshow is not on Screensaver, or no photo has arrived yet), when the
+screen is out, or while something else has the screen (a request, a call, a ring, the settings).
 
 The same settings are entities in Home Assistant, and the folder can be set with the
 [`home_slideshow` action](actions.md#set-the-slideshows-photo-source). Given the folder that is
@@ -478,16 +498,27 @@ it is read. The camera pages (`/camera.jpg` and `/camera.mjpeg`, there while Cam
 ask for that login too, so set a camera password before you use them; a browser the setup page has let
 in needs none. **Since v1.2.24:** a Home Assistant Generic Camera, MJPEG camera or recorder that read
 `/camera.jpg` or `/camera.mjpeg` with no login gets "401" until you set a camera password and give it the
-user and password with **Digest** authentication (Basic is not taken). Changing the password ends the
-pages' open streams, and so does closing the lens cover. The device is not found by ONVIF discovery
+user and password with **Digest** authentication (Basic is not taken). On the first-generation
+Echo Show 5, `/camera.mjpeg?size=full` asks for the 1280×720 native camera stream instead of the
+default 640×360 preview; it uses the same camera password and access controls. Full resolution
+costs more CPU and network bandwidth. Other devices ignore this query parameter. Changing the
+password ends the pages' open streams, and so does closing the lens cover. The device is not found by ONVIF discovery
 unless you turn on **Camera discovery (ONVIF)**, a switch of the device's in Home Assistant, under its
 configuration: then, while the stream is on, it answers WS-Discovery searches (3702/udp), so Home
 Assistant's ONVIF integration lists it among the discovered devices. The answer tells anyone on your
 network who asks the device's name, model and MAC address, which is why it is off by default; without
 it, give the recorder the device's address. ONVIF and the pages are a login digest over plain HTTP, as on most
 cameras: the password itself is never sent, but anyone who can watch your Wi-Fi traffic could replay a
-captured login to the same page for a few minutes, and could see the pictures anyway. `/screen.png`
-(Screen web access) has no login: if the screen is showing the camera, a screenshot shows it too.
+captured login to the same page for a few minutes, and could see the pictures anyway.
+
+To see the screen in Home Assistant, turn on **Screen web access** and add a Generic Camera with
+`http://<device address>:8181/screen.png?key=<key>` as its still image URL. The setup page has the
+address with its key under Privacy, **Screen page**, and a **New key** button that stops the old one
+working. Without the key the page answers nothing but "403", except to a browser the setup page has let
+in. `/screen.png` used to answer without a key: a Generic Camera set up with the plain address gets
+"403" until you give it the address from the setup page. Keep the address private: if the
+screen is showing the camera, a screenshot shows it too, and like the camera pages it travels over plain
+HTTP.
 
 ## 5. Music
 
@@ -664,8 +695,14 @@ captured login to the same page for a few minutes, and could see the pictures an
   **Now playing album** and **Now playing state** (playing, paused or idle). The names are as the app
   or the station's service sent them. A phone over Bluetooth sends none the device reads, so only the
   source is filled in for it; Radio is whatever the **Radio station** sensor names, with its title and
-  artist. While the device holds a track the state says whether it is playing or paused; once it lets
-  the track go the others are empty and the state reads idle. When an app is paused on the phone, the
+  artist. A Music Assistant track is named by the service it plays from when Home Assistant says which
+  (Spotify, Plex, YouTube Music, Tidal, Qobuz, Deezer, Apple Music, SoundCloud, Jellyfin, Radio for
+  Radio Browser and TuneIn, Library for its own files), on the sensor and on the Now Playing page alike.
+  This needs the device's Home Assistant token
+  ([home_assistant action](actions.md#connect-the-device-to-home-assistant)); without it, or for another
+  provider, it stays Music Assistant. While the device holds a track the state says whether it is
+  playing or paused; once it lets the track go the others are empty and the state reads idle. When an
+  app is paused on the phone, the
   device keeps the track paused or lets it go a few seconds after the phone stops sending, depending
   on the app, so an automation should go by the state rather than by how long a pause takes. A Music
   Assistant track paused or stopped while it played here stays named, with the state paused, for up to
@@ -832,6 +869,8 @@ other Shows don't have the switches.
 ### Clock and home screen
 
 - **Clock format**, **Clock position** and **Date color** (Date color on the Show only). Clock
+  format is *12-hour*, *12-hour, no AM/PM* or *24-hour*; *no AM/PM* leaves it off the clock face
+  only, so an alarm's or an event's time in a line of text still says which. Clock
   position puts a smaller clock at the foot of the screen, in a bottom corner or between them
   (*Bottom left*, *Bottom center*, *Bottom right*), so a photo stays in view. Every style goes there
   except *Dashboard*, *Agenda* and *World*, which keep the whole screen. On the Spot, Clock position is
@@ -865,11 +904,18 @@ other Shows don't have the switches.
   device with a light sensor, the screen follows the room's light, up to the brightness you set. On
   the Show, **Dimmest** (**Auto-brightness dimmest** in Home Assistant) sets how dark it goes in a
   dark room.
-- **Dim after idle** (Show, Never by default; Settings > Display, or **Dim after idle** in Home
+- **Dim after idle** (Show and Panel, Never by default; Settings > Display, or **Dim after idle** in Home
   Assistant): after 1 to 30 minutes with no touch, no voice turn and, with Presence detection on,
   nobody seen near, the screen fades down to its **Dimmest** share of the brightness. A touch, a turn
   or somebody coming near brings it straight back. Not at night, which has its own rules, and not
   while a call, an alarm, a timer or the settings are up.
+- **Dim screen** and **Screen dimmed** (Show and Panel, in Home Assistant): the **Dim screen** button
+  takes the screen down to its **Dimmest** now, as Dim after idle would, and the device brings it back
+  up itself at the next touch, turn or somebody near, or when the **Screen** light is set. It does
+  this even with Dim after idle at Never. A press does nothing at night, on a screen that is out, or
+  while something is going on. **Screen dimmed** is a binary sensor that is on while the screen is
+  down at its Dimmest, by the button or by Dim after idle. The **Screen** light keeps its brightness
+  the whole time.
 - **Font**: the font of every word the screen draws: the clock, the date, the weather, the settings
   and the rest (not the icons). *Go*, the screen's own and the default, *Inter*, *MuseoModerno*,
   *Exo*, *Overpass*, *Saira*, *Comic Neue*, *Open Sans*, *Google Sans Flex* or *Go Mono*. Each is sized so a line
@@ -985,9 +1031,11 @@ other Shows don't have the switches.
   **Rainbow** (the Show; not the Spot or the Panel app) is a cue too: a glow of
   pinks, violets, blues and oranges round the whole edge of the screen that moves with the voice,
   along the top and bottom only while the device thinks, and what was heard and the answer on a card
-  of frosted glass a little above the middle. A request opens with a gold globe at the right edge and
-  a wave of pink crossing the screen. During night hours it is Cue and captions instead (red over the
-  night clock), so the colors don't light the room.
+  of frosted glass a little above the middle. An answer longer than the card's four lines scrolls up
+  through it as it is said, and stays on its last lines once it is; a very long one is cut after 40
+  lines. A request opens with a gold globe at the right edge and a wave of pink crossing the screen.
+  During night hours it is Cue and captions instead (red over the night clock), so the colors don't
+  light the room.
   The screen under a cue keeps working: a tap there does what it always does, and a tap on the
   captions (or Rainbow's card) puts them away. Stop a request by voice or with the stop word. A page
   with buttons to answer (a call, a ringing alarm, the settings, a camera) gets neither the light nor
@@ -1095,6 +1143,12 @@ a Korean song title or a Japanese calendar event, show as boxes. A font of your 
 screen draws any character its font and Go don't have from it. It's never the font for everything;
 that's **Font**, above.
 
+Emoji need nothing of your own. The first time the screen has an emoji to draw (in a calendar event,
+a notification or a song title, say), the Show or Spot downloads Microsoft's Fluent Emoji and Google's
+Noto Emoji, about 1 MB together, into the fonts folder, and draws emoji in color from then on (Noto
+draws the few Fluent lacks, in black and white; the night clock draws them in its red). They're drawn a character at a time: a family shows as its people side by side, a flag as its
+two letters, and a skin tone is left out. A font of your own that has emoji is used instead.
+
 On the setup page's Screen tab, under **Fonts of your own**, choose a `.ttf`, `.otf` or
 `.ttc` file to send it to the device, and use **Remove** to delete one. Or put the file in the
 device's fonts folder over SSH ([Set the SSH authorized keys](actions.md#set-the-ssh-authorized-keys)):
@@ -1181,7 +1235,9 @@ device's fonts folder over SSH ([Set the SSH authorized keys](actions.md#set-the
   that only lights a dark screen too, stays on while a finger is down, and goes off 30 seconds after
   the last one lifted, so tapping on keeps it on. An automation that puts the screen out after a
   while can wait for it: `binary_sensor.<device>_screen_touched` off `for:` 5 minutes. It says only
-  that the screen was touched, not where.
+  that the screen was touched, not where. To dim rather than put it out, the automation presses
+  **Dim screen** instead: the device brings the screen back up at the next touch or turn by itself,
+  so nothing has to undo it.
 
 ## 7. Voice
 
@@ -1416,6 +1472,9 @@ To keep the words on the device, turn off **Send voice text** on it in Home Assi
 and **Last reply** stay empty, and the events leave out what was heard and the reply, keeping the rest
 (how it ended, the timings).
 
+A reply's audio tags, words in square brackets such as `[whispers]` or `[calm]` that tell a voice how
+to speak, are left out of the reply on the screen, **Last reply** and the events.
+
 ### Realtime voice
 
 A wake word can be answered by a speech-to-speech model at OpenAI, xAI (Grok) or Google (Gemini) in
@@ -1573,11 +1632,12 @@ The quickest way is the device's setup page:
 4. Say it a few times from where you'll use it, and watch it on the setup page's
    [wake word scores](#watching-the-wake-word-scores) to pick its **Wake word threshold**.
 
-A wake word sent from the page is scored on exactly the features its model was trained on. The words
-that came with the device, and ones added through Home Assistant, run on an approximation that
-their thresholds are set for, and some models of your own score next to nothing on it
-([#352](https://github.com/HuskerMinion/techo5/issues/352)). If one added through Home Assistant
-hardly ever wakes, send it from the setup page instead.
+A wake word sent from the page, or added through Home Assistant, is scored on exactly the features
+its model was trained on. The words that came with the device run on an approximation that their
+thresholds are set for, and some models of your own score next to nothing on it
+([#352](https://github.com/HuskerMinion/techo5/issues/352)). A word added through Home Assistant
+before TECHO5 scored it this way moves over by itself the next time the device connects, so its
+**Wake word threshold** may want setting again.
 
 Only microWakeWord models are taken (`"type": "micro"` in the `.json`), with a `.tflite` of at most
 1 MB, and up to 20 sent this way. **Remove** takes one sent from the page off the device; the wake
@@ -1776,6 +1836,11 @@ asked for on the setup page also needs **Record takes of a word** switched on (P
 any recording a browser asks for does. While takes of a word recorded on the setup page wait there to be
 downloaded, a run waits until they are downloaded or thrown away. The count and the gap are remembered
 until the device restarts.
+
+The takes are of the wake word in the first slot that has one. With two wake words loaded, a **Wake
+word** row under **Start** on the screen, and a **Wake word** choice on the setup page, say which word
+the run is of; − and + switch between them. Like the count and the gap, the choice is remembered only
+until the device restarts, and a chosen word that is no longer loaded goes back to the first one.
 
 Before each take the device beeps; say the wake word after the beep. The screen says which take it is
 ("Take 7 of 20") and when to say it, and has **Stop**; a Dot's ring pulses amber for the whole run.
@@ -2115,8 +2180,9 @@ while they are said. Home Assistant speaks them, in its assistant's voice and la
 Assistant out of reach the alarm rings without them.
 
 **Wake with light** lights the room for a while before an alarm: the screen on a Show or a Spot, the
-light ring on a Dot. Set the default on the Alarms card or the setup page, and give an alarm its own
-in its editor (5 to 30 minutes, or off). Once an alarm with a wake light rings, the light stays at
+light ring on a Dot. Set the default on the Alarms card, the setup page, or **Wake light minutes** in
+Home Assistant, and give an alarm its own in its editor (5 to 30 minutes, or off).
+Once an alarm with a wake light rings, the light stays at
 full while it rings and while it is snoozed. When you stop it, the light stays at full until the
 next alarm if that alarm's own wake light has already started; otherwise it goes off. So with half
 an hour of light, alarms at 8:00 and 8:30 are one light from 7:30 until the second is stopped, and
@@ -2148,6 +2214,26 @@ it turns the light off. A
 light-only alarm always has a light: its own, the default, or 30 minutes when both are off; its
 editor's **Wake with light** row shows the minutes it gets. On a Dot, which has no screen, it is the
 light ring's sunrise and nothing else: no sound, and no night to end.
+
+**Wake with** in an alarm's editor (and on the setup page) wakes with music in place of the alarm
+sound: a station from the radio's list, as the radio page shows it, or one of Music Assistant's
+favorite playlists, albums or radio stations (with a music library set up on the device). On a Dot,
+set it on the setup page or with the [alarm_wake_with action](actions.md#wake-with-music). The music
+plays on the device's own speaker at the **Ring volume**, not the music volume, for as long as the
+alarm rings, so a volume turned down (or muted) the night before doesn't make it quiet; the music
+volume is back as it was when the alarm ends. The alarm is a ring as any other: it shows, **Gets
+louder** brings the music up from quiet to the ring volume, a press that quiets the ring quiets the
+music, and Stop stops it. Snooze pauses a Music Assistant favorite and resumes it where it was when
+the snooze ends; if that doesn't work within 4 seconds (the queue is gone, say), the favorite starts
+again from the top. A radio station is live, so there is nowhere to resume from: Snooze stops it and
+it starts again when the snooze ends. If the music isn't heard within 8 seconds, stops for 8 seconds
+while the alarm rings, or can't play at all (no network, Music Assistant not set up or not answering,
+the station gone from the list), the alarm sound rings instead, so nobody oversleeps. With the ring
+volume at 0 the alarm sound rings, silent, as it would for any alarm. The wake light works as with
+any alarm. A light-only or silent alarm has no **Wake with**.
+
+A dashboard card can open the alarms on a Show or a Spot: see
+[docs/dashboards.md](dashboards.md#alarms).
 
 ### How loud the room is
 
@@ -2496,16 +2582,16 @@ except that a public IPv6 address is counted with the rest of its /64.
 An Echo Show, Echo Spot or Skylight can join your Tailscale network, so a device in another house
 stays in your own Home Assistant, and its setup page can be opened from afar with **Remote setup**.
 Off until you give it a key: see [Tailscale: reaching a device from away](tailscale.md). It can also
-join your own Headscale server instead of Tailscale's. Or use NetBird, NetBird's own service or one you
-run: see [NetBird: reaching a device from away](netbird.md).
+join your own Headscale server instead of Tailscale's. NetBird is no longer built in: it runs as an
+add-on, [techo5-netbird](https://github.com/tioan/techo5-netbird), made and kept by its author (see [NetBird](netbird.md)).
 
 ## 13. An Echo Wall Clock
 
 The original Echo Wall Clock — the round one with the LED ring and a sixty-minute dial — can show
 this device's timers. It is off until turned on. Turn on **Wall clock** (the setup page's
-Network tab, or Home Assistant), put the clock in pairing mode (hold its center button until
-the middle LED pulses amber), and choose **Pair the clock** on the setup page, or press the **Pair
-wall clock** button in Home Assistant. The device
+Network tab, or Home Assistant), choose **Pair the clock** on the setup page, or press the **Pair
+wall clock** button in Home Assistant, and then put the clock in pairing mode (hold its center
+button until the middle LED pulses amber). Start the search first and the clock second: the device
 looks for a clock for two minutes, pairs with it, trusts it and remembers its address; the **Wall
 clock status** sensor says what it is doing, from Connecting to Connected or Waiting for the clock.
 A clock that cannot be reached is retried less and less often — ten seconds, then twenty, doubling
@@ -2548,6 +2634,22 @@ offered there. The Skylight has not been tried.
 - [Phone calls](phone.md) through your own SIP provider.
 - [Actions](actions.md): everything Home Assistant can ask the device to do, with examples.
 
+### The buttons in Home Assistant
+
+Each of the device's buttons is an event entity in Home Assistant: **Mute button**, **Volume down
+button** and **Volume up button**, and on the Dots, the Echo 2nd gen and the Echo Input an **Action
+button** too. Only the buttons the device has are listed: the Shows and the Spot have no action
+button, and the Echo Input has only its action and mute buttons. The device acts on a press itself as well; the events are there so an automation can act on one too.
+
+- `press`: a short press, as it is let go. A volume key reports it as it goes down.
+- `hold`: held for 0.7 seconds, as it happens.
+- `long_hold`: held on for longer, on the devices that tell a long hold apart.
+- `double_press` and `triple_press` (action button only): a second or third press within 0.4
+  seconds of the one before. Each press still reports `press` first, so nothing waits to see whether
+  another is coming: a double press is `press`, `press`, `double_press`, and a triple goes on with
+  `press`, `triple_press`. An automation for a single press that should stay quiet on a double can
+  wait half a second for a `double_press` before it acts.
+
 ### Running something of your own at boot
 
 An update replaces the root filesystem, so anything added to it is gone afterwards; userdata is what
@@ -2571,9 +2673,22 @@ stops it at shutdown: write it to run for as long as the device is up, or to han
 supervision. A script that does not exit is not waited for, and one that fails cannot hold up the
 daemon.
 
-This is on the Echo Show builds (Show 8 2nd gen included) and the Skylight; the Dot, Echo and Spot
-builds do not run it yet. Anyone with SSH or a root shell can leave a script here that runs at every
-boot, so only put something here you trust.
+Every build that boots TECHO5's Linux runs it: the Echo Show builds (Show 8 2nd gen included), the
+Skylight and the Echo Spot, and the TECHO5 Dot builds for the Echo Dot 2nd gen, the Echo 2nd gen, the
+Echo Dot 3rd gen and the Echo Input. On the Dot builds it is started last, after the daemon has been
+let start and the check that commits an update is under way. Their logs are also kept to about 1 MB
+each while the device is up, so a long boot's earlier output moves to `rc.local.log.1`. A Dot has no
+clock that keeps time while it is off, so the time may not be set yet when the script starts: wait for
+it before anything that needs it, such as a certificate check. TECHO5 Panel
+is an Android app, not a Linux image, so it has no `rc.local`.
+
+The Dot builds are small. The Echo Dot 2nd gen has about 445 MB of its 481 MB free with everything
+running, and the Echo Dot 3rd gen about 420 MB of its 470 MB when idle, with about 1 GB free on
+userdata. A helper that uses up the memory can get the daemon stopped, and an update that cannot keep
+the daemon up is rolled back, so keep what runs there light. The Echo Spot has 2 GB of memory.
+
+Anyone with SSH or a root shell can leave a script here that runs at every boot, so only put
+something here you trust.
 
 ## Questions and problems
 

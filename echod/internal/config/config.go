@@ -52,7 +52,7 @@ type Config struct {
 	Deck           Deck           `json:"deck,omitempty"`
 	Video          Video          `json:"video,omitempty"`
 	Tailscale      Tailscale      `json:"tailscale"`
-	Netbird        Netbird        `json:"netbird"`
+	Netbird        Netbird        `json:"netbird"` // the built-in NetBird's, gone since #580 (netbird.go)
 	Nearest        Nearest        `json:"nearest,omitempty"`
 	Remote         Remote         `json:"remote,omitempty"`
 	CamStream      CamStream      `json:"cam_stream,omitempty"`
@@ -147,6 +147,9 @@ func (w Writer) Stop() StopWriter { return StopWriter(w) }
 
 // Gate is the other-room floor, which is not a slot either.
 func (w Writer) Gate() GateWriter { return GateWriter(w) }
+
+// Front is the front end choice for Home Assistant's wake words, which is not a slot either.
+func (w Writer) Front() FrontWriter { return FrontWriter(w) }
 
 // Hangup is the hang-up word, which is not a slot either.
 func (w Writer) Hangup() HangupWriter { return HangupWriter(w) }

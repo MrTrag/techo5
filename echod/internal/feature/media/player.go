@@ -186,6 +186,9 @@ type Player struct {
 	step atomic.Int32
 	// muted is Home Assistant's mute: the speaker is silent whatever the level.
 	muted atomic.Bool
+	// alarmStep is the level the speaker is held at for an alarm's music (HoldVolume), plus one; 0
+	// for none.
+	alarmStep atomic.Int32
 	// nightMu keeps one night volume change at a time (night.go).
 	nightMu sync.Mutex
 
@@ -232,6 +235,11 @@ type Player struct {
 	// stopped or replaced does not fire: the difference is the whole use of it, since a radio stream
 	// that ends by itself has been dropped and one that was stopped was stopped by somebody.
 	OnEnd hook.Hook[string]
+
+	// OnUnplayable fires with the URL of a stream Play started that the device cannot decode, when
+	// there is no music library set up to hand it to and nothing else was asked for since. Such a
+	// stream does not fire OnEnd, so without this the radio would go quiet with nothing said (#649).
+	OnUnplayable hook.Hook[string]
 
 	// OnNowPlaying fires whenever what the room is playing, or the name of it, may have changed: a track
 	// starting, pausing or ending, a receiver's or a remote's song, a held track let go. It says only
@@ -566,7 +574,7 @@ func build() *Player {
 	}
 	p.stream = NewStream(speaker.Sound(), speaker.Get(), p.refresh, p.OnEnd.Emit)
 	p.stream.senderPlays = p.senderPlaysAgain
-	p.stream.handOff = handOff
+	p.stream.handOff = p.handOff
 
 	// Volume acts on every tap and on every repeat, so a held button ramps.
 	buttons.Get().Events.Listen(func(e buttons.Event) {
@@ -1324,7 +1332,7 @@ func (p *Player) External() uint64 {
 	p.remoteLast.Store(true)
 	p.nextTitle.Store(nil)
 	n := p.remote.take()
-	p.stream.Stop()
+	p.stream.stopLoaded()
 	p.refresh()
 	return n
 }
@@ -1867,9 +1875,7 @@ func (p *Player) apply(step int, tell bool) int {
 	p.mp.SetVolume(float32(step) / VolumeSteps)
 	// Muted, the level moves but the speaker stays silent: Home Assistant still says muted, and only
 	// an unmute makes it audible again, at whatever level it has reached by then.
-	if !p.muted.Load() {
-		speaker.Get().SetVolume(step)
-	}
+	p.toSpeaker()
 	p.OnLevel.Emit(step)
 	if !tell {
 		return step
@@ -1881,15 +1887,44 @@ func (p *Player) apply(step int, tell bool) int {
 	return step
 }
 
+// toSpeaker puts the level on the speaker: the one held for an alarm's music, or nothing while muted,
+// or the volume.
+func (p *Player) toSpeaker() {
+	switch h := p.alarmStep.Load(); {
+	case h > 0:
+		speakerVolume(int(h - 1))
+	case p.muted.Load():
+		speakerVolume(0)
+	default:
+		speakerVolume(p.Volume())
+	}
+}
+
+// speakerVolume sets the speaker's level; a variable for the tests.
+var speakerVolume = func(step int) { speaker.Get().SetVolume(step) }
+
+// HoldVolume plays what plays here at step, whatever the volume and the mute say, until release: an
+// alarm's music, which rings at the ring volume (#651). The volume is not changed, saved or shown, so
+// Home Assistant goes on reading the one it set; a change to it while held is kept, and heard once
+// release puts the speaker back to it. release may be called more than once.
+func (p *Player) HoldVolume(step int) (release func()) {
+	step = max(0, min(step, VolumeSteps))
+	p.alarmStep.Store(int32(step) + 1)
+	p.toSpeaker()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			p.alarmStep.Store(0)
+			p.toSpeaker()
+		})
+	}
+}
+
 // Mute drops the output without losing the level it was at.
 func (p *Player) Mute(muted bool) {
 	p.muted.Store(muted)
 	p.mp.SetMuted(muted)
-	if muted {
-		speaker.Get().SetVolume(0)
-	} else {
-		speaker.Get().SetVolume(p.Volume())
-	}
+	p.toSpeaker()
 	p.OnMute.Emit(muted)
 }
 

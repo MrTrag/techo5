@@ -607,3 +607,27 @@ func TestAnswerActsOnlyOnTheNearestDevice(t *testing.T) {
 		t.Errorf("alone: acted %d, want at once", acted)
 	}
 }
+
+// A detector that fires again on the same words (#661): the device that answered goes on saying so while
+// its turn is open, so the repeat on another device is told so and stands down.
+func TestARepeatFiringOfTheSameWordsOpensNoSecondTurn(t *testing.T) {
+	h := newHouse(t)
+	h.n.Woke(0)
+	h.wait(300 * time.Millisecond)
+	busy := true
+	h.n.busy = func() bool { return busy }
+	h.now = h.now.Add(1500 * time.Millisecond)
+	if !h.claimFrom("Kitchen", 25) {
+		t.Error("a repeat 1.8 s into the turn was not told the word was answered here")
+	}
+	busy = false
+	if h.claimFrom("Kitchen", 25) {
+		t.Error("a claim after the turn ended was told it was answered here")
+	}
+	busy = true
+	h.now = h.now.Add(2 * time.Second)
+	if h.claimFrom("Kitchen", 25) {
+		t.Error("a claim long after the word was told it was answered here, turn or not")
+	}
+
+}

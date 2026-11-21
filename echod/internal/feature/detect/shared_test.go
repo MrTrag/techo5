@@ -281,3 +281,43 @@ func TestAnUploadedModelRunsOnTheExactFrontEnd(t *testing.T) {
 		t.Errorf("fronts after unloading the uploaded model: %v", b.fronts)
 	}
 }
+
+// Upstream: a model from Home Assistant's custom_wake_words runs on the exact front end too, like an upload (Jarvis build: only with the switch on, see the next test). The
+// same file woke a Dot uploaded and stayed silent from there. The image's words stay where they were.
+func TestAHomeAssistantModelRunsOnTheExactFrontEnd(t *testing.T) {
+	for _, c := range []struct {
+		m     wake.Model
+		exact bool
+		want  bool
+	}{
+		{wake.Model{ID: "image"}, false, false},
+		{wake.Model{ID: "image"}, true, true},
+		{wake.Model{ID: "own", Uploaded: true}, false, true},
+	} {
+		if got := exactFor(c.m, c.exact); got != c.want {
+			t.Errorf("exactFor(%s, %v) = %v, want %v", c.m.ID, c.exact, got, c.want)
+		}
+	}
+}
+
+// Jarvis build: a model from Home Assistant goes on the exact front end only with the device's switch
+// on. Off, the default, it stays on the approximate one.
+func TestAHomeAssistantModelFollowsTheExactSwitch(t *testing.T) {
+	ha := wake.Model{ID: "ha", FromHomeAssistant: true}
+	defer exactHA.Store(exactHA.Load())
+
+	exactHA.Store(false)
+	if exactFor(ha, false) {
+		t.Error("switch off: a Home Assistant word is on the exact front end, want approximate")
+	}
+	if !exactFor(ha, true) {
+		t.Error("switch off, ExactFrontEnd on: want exact")
+	}
+	exactHA.Store(true)
+	if !exactFor(ha, false) {
+		t.Error("switch on: a Home Assistant word is on the approximate front end, want exact")
+	}
+	if exactFor(wake.Model{ID: "image"}, false) {
+		t.Error("switch on: an image word moved to exact, want approximate")
+	}
+}

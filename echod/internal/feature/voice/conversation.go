@@ -698,10 +698,12 @@ func (c *conversation) turnEvent(e event) {
 		if c.phase == phaseIdle {
 			return
 		}
+		// The log keeps the reply as the voice got it, tags and all, to tell what the voice was asked for.
 		slog.Info("replying", "slot", c.slot+1, "text", activity.Said(e.text))
-		c.log.Replied(e.text)
-		c.turn.Replying(e.text)
-		c.shown.Reply = e.text
+		shown := withoutTags(e.text)
+		c.log.Replied(shown)
+		c.turn.Replying(shown)
+		c.shown.Reply = shown
 		replyArrived(time.Now(), e.spoken)
 		Changed.Emit(c.shown)
 		if c.phase == phaseListening {
@@ -1979,6 +1981,10 @@ func (c *conversation) reported(dry time.Time) {
 		"clipped", c.speaker.Clipped(),
 		"dropped", c.source.Dropped())
 }
+
+// SavedWakeWords is the selection the user last made, of what models has (activeWakeWords): what the
+// device should be listening for.
+func SavedWakeWords(models []wake.Model) []string { return activeWakeWords(models, wakeword.Slots) }
 
 // activeWakeWords is the per-slot selection the user last made, filtered to what the device can
 // actually load. Home Assistant takes it as authoritative, so claiming a model that is not here would
