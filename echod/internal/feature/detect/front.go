@@ -14,6 +14,31 @@ import (
 // (config.Wake.ExactHA). Read by exactFor at every load; off until restored or switched.
 var exactHA atomic.Bool
 
+// frontLocked names the front end the model in slot n was actually loaded on, for the log: "approx",
+// "exact", "oww" (openWakeWord) or "" with nothing there. It reads what the backend holds for the
+// loaded model, not the switch, so the "wake word loaded", "wake word ready" and wake lines say what
+// is really running. The caller holds e.mu (FrontOf is the locking one, with upstream's names).
+func (e *Engine) frontLocked(n int) string {
+	if n < 0 || n >= len(e.slots) || !e.slots[n].loaded {
+		return ""
+	}
+	m := e.slots[n].model
+	switch b := e.backends[m.Kind].(type) {
+	case *microBackend:
+		k, ok := b.step[m.ID]
+		if !ok {
+			return ""
+		}
+		if k.exact {
+			return "exact"
+		}
+		return "approx"
+	case *owwBackend:
+		return "oww"
+	}
+	return ""
+}
+
 // newFrontEntity is the switch for it, on the microphone beside the other-room floor. Off, the
 // default, a word from Home Assistant runs on the approximate front end as it always has here;
 // on, it moves to the exact one at once, without a restart (Engine.Refront). It is per device so a

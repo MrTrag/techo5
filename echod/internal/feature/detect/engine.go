@@ -363,7 +363,7 @@ func (e *Engine) Use(n int, m wake.Model) error {
 	e.board.forget(n)
 	e.slotsChanged()
 
-	slog.Info("wake word loaded", "slot", n+1, "phrase", m.Phrase, "id", m.ID, "engine", m.Kind)
+	slog.Info("wake word loaded", "slot", n+1, "phrase", m.Phrase, "id", m.ID, "engine", m.Kind, "front", e.frontLocked(n))
 	return nil
 }
 
@@ -668,7 +668,7 @@ func (e *Engine) score(frame []int16, source *mic.Source) {
 		}
 		if !s.scored {
 			s.scored = true
-			slog.Info("wake word ready", "slot", i+1, "id", s.model.ID)
+			slog.Info("wake word ready", "slot", i+1, "id", s.model.ID, "front", e.frontLocked(i))
 			e.board.event(wakeword.ScoreEvent{At: now, Slot: i + 1, What: "ready", ID: s.model.ID})
 			if e.OnReady != nil {
 				n := i
@@ -740,7 +740,7 @@ func (e *Engine) judge(n int, s *slot, score float64, now time.Time, source *mic
 			what = "wake ignored: said in another room"
 		}
 		slog.Info(what, "slot", n+1, "id", s.model.ID, "peak", s.peak,
-			"crossing", s.crossing, "cutoff", s.crossCutoff, "dropped", source.Dropped())
+			"crossing", s.crossing, "cutoff", s.crossCutoff, "dropped", source.Dropped(), "front", e.frontLocked(n))
 		// The scores view says what the log says: only a word that opened a turn is "detected".
 		ev := "detected"
 		switch {
