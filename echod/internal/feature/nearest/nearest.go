@@ -449,19 +449,20 @@ func (n *Nearest) Answer(word string, can func() bool, act func()) {
 // nearest; now runs in its place when there is nobody to ask. lost, if not nil, runs when another
 // device has the word instead.
 //
-// A device in the middle of a turn claims the word like any other, while it is listening too, not only
-// over a wake word that takes the turn over (claimsOver, upstream's #737). It used to say nothing, and
+// A device in the middle of a turn claims a wake word like any other, while it is listening too, not only
+// over a wake word that takes the turn over (claimsOver, upstream's #737). Any other word during a turn
+// (the next song word) is acted on at once, as upstream has it. It used to say nothing, and
 // nothing else spoke for it: the turn it opened is only vouched for until kept after its own wake word,
 // so the word said again a few seconds into the turn was claimed by nobody near, and a device that barely
 // heard it through a wall answered unopposed. If this device wins, the word does what it always did to a
 // turn here (ignored while still listening, takes the turn over after that); if another heard it better,
 // that one answers, and a reply here ends (cutOff) while a turn still listening is left alone.
 func (n *Nearest) contend(word string, at time.Time, wake bool, can func() bool, open func(time.Time, float64), now, lost func()) {
-	if !n.open() || !can() {
+	if !n.open() || n.busy() && !wake || !can() {
 		now()
 		return
 	}
-	n.contendHeard(word, at, n.score(), wake, can, open, now, lost)
+	n.claimHeard(word, at, n.score(), wake, can, open, now, lost)
 }
 
 // claimsOver is whether a word heard during a turn of this device's own is claimed all the same: a
@@ -476,12 +477,18 @@ func (n *Nearest) claimsOver(wake bool) bool {
 }
 
 // contendHeard is contend with how clearly this device heard the word already measured, and lost, if
-// not nil, run when another device has it instead.
+// not nil, run when another device has it instead. It is upstream's rule for a turn already open (used
+// by Confirmed): only a wake word that takes the turn over is claimed.
 func (n *Nearest) contendHeard(word string, at time.Time, clarity float64, wake bool, can func() bool, open func(time.Time, float64), now, lost func()) {
-	if !n.open() || !can() {
+	if !n.open() || n.busy() && !n.claimsOver(wake) || !can() {
 		now()
 		return
 	}
+	n.claimHeard(word, at, clarity, wake, can, open, now, lost)
+}
+
+// claimHeard sends the claim and decides after the window, the checks on whether to claim at all done.
+func (n *Nearest) claimHeard(word string, at time.Time, clarity float64, wake bool, can func() bool, open func(time.Time, float64), now, lost func()) {
 	peers := hearing(n.peers())
 	if len(peers) == 0 {
 		now()

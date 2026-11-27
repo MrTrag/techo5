@@ -116,14 +116,15 @@ func TestTheDeviceBarelyHearingStandsDownToTheOneTalking(t *testing.T) {
 	}
 }
 
-// A wake word while listening is part of the sentence and is ignored, so it is still not claimed; nor
-// is any word but a wake word over a turn, such as the next song word.
+// Ours (jarvis): a wake word while listening is claimed too, so a device that barely heard it through a
+// wall does not answer it unopposed. Any word but a wake word over a turn, such as the next song word,
+// is still acted on at once, as upstream has it.
 func TestOnlyAWakeThatTakesTheTurnOverIsClaimed(t *testing.T) {
 	h := newHouse(t)
 	h.n.busy = func() bool { return true }
 	h.n.Woke(0)
-	if h.at0 != 1 || len(h.sent) != 0 {
-		t.Errorf("listening: answered at once %d times, claims %v", h.at0, h.sent)
+	if h.at0 != 0 || len(h.sent) != 1 {
+		t.Errorf("listening: answered at once %d times, claims %v; want claimed", h.at0, h.sent)
 	}
 
 	h = newHouse(t)

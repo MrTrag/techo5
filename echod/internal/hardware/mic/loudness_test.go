@@ -12,6 +12,11 @@ func dbFS(v int16) float64 { return 20 * math.Log10(float64(v)/fullScale) }
 
 func near(a, b float64) bool { return math.Abs(a-b) < 0.01 }
 
+// twoSeconds is where the newest two seconds start in a full ring. The ring is longer than the two
+// seconds these tests look back over since upstream's Held (three seconds, dot-v1.0.81), so what they
+// plant is placed from there, not from the ring's start.
+const twoSeconds = historyFrames - 2*Rate/FrameSamples
+
 // A word is the loudest stretch of the audio before a wake, heard and as it came in over the same
 // frames, so the difference between the two is the gain the leveler had on the word. The quiet
 // either side of it does not drag the number down.
@@ -19,7 +24,7 @@ func TestLoudnessFindsTheWordAndTheGainOnIt(t *testing.T) {
 	var h history
 	for i := range historyFrames {
 		heard, came := int16(100), int16(100)
-		if i >= 40 && i < 52 { // 240 ms of word, lifted about 26 dB by the leveler
+		if i >= twoSeconds+40 && i < twoSeconds+52 { // 240 ms of word, lifted about 26 dB by the leveler
 			heard, came = 10000, 500
 		}
 		h.add(steady(heard), meanSquare(steady(came)))
@@ -36,7 +41,7 @@ func TestLoudnessLooksOnlyAsFarBackAsAsked(t *testing.T) {
 	var h history
 	for i := range historyFrames {
 		v := int16(100)
-		if i < 12 {
+		if i >= twoSeconds && i < twoSeconds+12 {
 			v = 10000
 		}
 		h.add(steady(v), meanSquare(steady(v)))
