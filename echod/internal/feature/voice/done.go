@@ -29,7 +29,7 @@ func isDone(text string) bool {
 // sayDone plays note, the owner's recording for a command carried out, as the turn's reply.
 func (c *conversation) sayDone(note speaker.Note) {
 	slog.Info("replying with the owner's recording", "slot", c.slot+1, "sound", "done")
-	c.respond(reply{own: true}, func(ctx context.Context, p *speaker.Player, playing func()) error {
+	c.respond(reply{own: true}, func(ctx context.Context, p *speaker.Player, playing func(), _ uint64) error {
 		playing()
 		p.Chime(speaker.ToneLevel, note)
 		return nil

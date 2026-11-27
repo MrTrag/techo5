@@ -238,7 +238,7 @@ func (d *Display) customScene(s *scene, now time.Time) {
 		return
 	}
 	over := s.showSheet || s.showDrawer || s.showCamera || s.showWifi || s.showAlert || s.showCalendar ||
-		s.showWeather || s.showRadar || s.bt.Pairing || s.showDeck || s.redClock
+		s.showWeather || s.showRadar || s.bt.Pairing || s.showDeck || s.redClock || s.showCast
 	idle := idleScreen()
 	d.mu.Lock()
 	if d.customs.up != "" && dashForgotten(d.customs.touched) {
@@ -325,7 +325,7 @@ func customCache[T any](r *renderer, id string, mk func() *T) *T {
 // customAlonePage is a frame of a custom screen with nothing drawn over it: no card, strip, cue or
 // pill, nor any page that takes its place.
 func customAlonePage(s scene) bool {
-	return customFrameKey(s, s.ring.any(), s.call.Phase != phone.Idle) != "" && !s.muted && s.linkDown == "" && s.camtest == nil && s.qrscan == nil
+	return customFrameKey(s, s.ring.any(), s.call.Phase != phone.Idle) != "" && !s.micOffSaid() && s.linkDown == "" && s.camtest == nil && s.qrscan == nil
 }
 
 // keptCustom is whether the canvas holds the page the custom screen up drew in the frame before, alone,

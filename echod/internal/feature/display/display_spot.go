@@ -34,7 +34,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	esphome "github.com/ygelfand/go-esphome-device"
@@ -170,8 +169,8 @@ type Display struct {
 	skinSl     *esphome.Select // Screen skin
 	// callBtn is the home screen's Call button, on or off (callbutton.go).
 	callBtn *esphome.Switch
-	// saverBtn is the Show screensaver button (screensaver_show.go).
-	saverBtn *esphome.Button
+	// saverBtn and saverHideBtn are the Show and Hide screensaver buttons (screensaver_show.go).
+	saverBtn, saverHideBtn *esphome.Button
 	// styleSwipeSw is Swipe between clock styles (style_swipe.go).
 	styleSwipeSw *esphome.Switch
 	// clockTap is what a tap on the clock does (clock_tap.go).
@@ -196,6 +195,8 @@ type Display struct {
 	press     pressState
 	pageShown pageID
 	pressSeq  uint64
+	// seekF is a finger on the video's bar to seek on (seekbar.go).
+	seekF seekFinger
 
 	// The dashboard face (dashboard_spot.go): asked for, when last touched, whether the last frame
 	// drew it, whether the touch screen follows fingers for it, where it is scrolled and on which
@@ -372,6 +373,12 @@ type Display struct {
 	// released (notice_spot.go). Both under mu.
 	notifyLit  string
 	notifySeen string
+	// crit is the face's light in a critical notification's (relight, under mu). critSeen is the ring
+	// the frame last saw, and critWoke the critical notification that turned the face on, to turn it off
+	// again (frame's alone).
+	crit     critLit
+	critSeen time.Time
+	critWoke string
 }
 
 var (
@@ -423,7 +430,7 @@ func build() *Display {
 	d.turnStyle = turnStyleSelect(d.wake)
 	d.skinSl = skinSelect(d.wake)
 	d.callBtn = callButtonSwitch(d.wake)
-	d.saverBtn = screensaverButton(d)
+	d.saverBtn, d.saverHideBtn = screensaverButton(d), screensaverHideButton(d)
 	d.styleSwipeSw = styleSwipeSwitch()
 	d.clockTap = clockTapSelect()
 	d.volumeSwipeSw = volumeSwipeSwitch()
@@ -505,7 +512,7 @@ func (d *Display) timerStyleSel() *esphome.Select { return nil }
 func (d *Display) skinSel() *esphome.Select { return d.skinSl }
 
 func (d *Display) Entities() []esphome.Entity {
-	return []esphome.Entity{d.light, d.power, d.roomSw, d.auto, d.clock, d.clockStyleSel, d.clockPos, d.camTime, d.answerTime, d.turnStyle, d.skinSl, d.callBtn, d.saverBtn, d.weatherFx, d.muteRing, d.camDot, d.idleRing, d.lang, d.styleSwipeSw, d.volumeSwipeSw, d.clockTap, d.fontSel, d.textSizeSel,
+	return []esphome.Entity{d.light, d.power, d.roomSw, d.auto, d.clock, d.clockStyleSel, d.clockPos, d.camTime, d.answerTime, d.turnStyle, d.skinSl, d.callBtn, d.saverBtn, d.saverHideBtn, d.weatherFx, d.muteRing, d.camDot, d.idleRing, d.lang, d.styleSwipeSw, d.volumeSwipeSw, d.clockTap, d.fontSel, d.textSizeSel,
 		d.nightHours, d.nightStart, d.nightEnd, d.weekendStart, d.weekendEnd, d.nightMode, d.atNight, d.nightStyle, d.glowLevel, d.nightInfoSw}
 }
 
@@ -635,6 +642,13 @@ func (d *Display) relight(jump bool) {
 	if p := sunriseProgress(time.Now()); p > 0 && d.on {
 		full := backlightMin + (screen.BacklightMax-backlightMin)*float64(min(max(d.ceiling, 0), 100))/100
 		target = backlightMin + (full-backlightMin)*sunriseLevel(p)
+	}
+	// A critical notification takes the backlight over while it rings, as on the Show.
+	if d.on {
+		l, ringing := notify.Get().CriticalLight()
+		target = d.crit.target(l, ringing, d.level, target, time.Now(), func(pct int) float64 {
+			return backlightMin + (screen.BacklightMax-backlightMin)*float64(pct)/100
+		})
 	}
 	target = watchedLight(target, d.on, watched(), backlightMin)
 	if jump || d.level == 0 {
@@ -795,8 +809,9 @@ func (d *Display) gesture(g touch.Gesture) {
 		}
 		if n, up := notify.Get().Card(); up && g.Kind == touch.Tap && nightInfoOn() {
 			// Night clock shows Next up and notifications: the card on the night clock is tapped away,
-			// and the night light stays.
-			go notify.Get().DismissID(n.ID)
+			// and the night light stays. One with buttons is not drawn there (gateNotice), so this is a
+			// tap on the card alone.
+			go notify.Get().Tap(n.ID)
 			d.wake()
 			return
 		}
@@ -875,6 +890,18 @@ func (d *Display) gesture(g touch.Gesture) {
 		d.wake()
 		return
 	}
+	// A critical notification takes the face over a reminder and an announcement (render_spot.go), and
+	// the taps with it, unless a camera view is over it: gated as the face is (gateCamera), so a view
+	// held back for the night does not take taps from the card that is showing.
+	if cam, camera := home.Get().Camera(); func() bool { _, up := d.gateCamera(cam, camera, nightNow(time.Now())); return !up }() {
+		if n, up := notify.Get().Card(); up && n.Critical {
+			if g.Kind == touch.Tap && d.r != nil {
+				d.r.tapNotifyFace(n, image.Pt(g.X, g.Y))
+			}
+			d.wake()
+			return
+		}
+	}
 	// A reminder takes the face, over an announcement, and every gesture on it is its.
 	if _, showing := remind.Get().Showing(); showing {
 		d.reminderGesture(g)
@@ -902,8 +929,8 @@ func (d *Display) gesture(g touch.Gesture) {
 	// over it (the card stays up underneath and shows when the view ends), so the view takes the taps.
 	if _, camera := home.Get().Camera(); !camera {
 		if n, up := notify.Get().Card(); up {
-			if g.Kind == touch.Tap {
-				go notify.Get().DismissID(n.ID)
+			if g.Kind == touch.Tap && d.r != nil {
+				d.r.tapNotifyFace(n, image.Pt(g.X, g.Y))
 			}
 			d.wake()
 			return
@@ -1375,12 +1402,10 @@ func (d *Display) locked(f func()) {
 	f()
 }
 
-// restartDevice reboots; the slot store and the daemon's state are on disk already.
+// restartDevice reboots; the slot store and the daemon's state are on disk already, and what waits in
+// memory is saved first (bootreason.Reboot).
 func restartDevice() {
-	bootreason.Mark(bootreason.Restart)
-	syscall.Sync()
-	if err := syscall.Reboot(syscall.LINUX_REBOOT_CMD_RESTART); err != nil {
-		bootreason.Unmark()
+	if err := bootreason.Reboot(bootreason.Restart); err != nil {
 		slog.Error("restart failed", "err", err)
 	}
 }
@@ -1456,6 +1481,7 @@ func (d *Display) Close() error {
 	if d.dev == nil {
 		return nil
 	}
+	d.dev.Blank() // the last frame goes black rather than staying on the glass (#560)
 	err := d.dev.Close()
 	d.dev = nil
 	return err
@@ -1737,6 +1763,11 @@ func (d *Display) frame() (next time.Duration) {
 	if away {
 		s.nowPlaying = false
 	}
+	// The light before an alarm takes the face from the music, as the alarm ringing would (#17): the
+	// panel is the lamp in the room. The music plays on; its face comes back when the light ends.
+	if s.nowPlaying && sunriseProgress(now) > 0 {
+		s.nowPlaying = false
+	}
 	if s.nowPlaying || (s.menuOpen && s.menuMode == modeRadio) {
 		if rows := radioRows(s.radio, s.playing || s.paused); s.radioSel >= len(rows) || s.radioSel < 0 {
 			s.radioSel = min(max(s.radioSel, 0), max(len(rows)-1, 0))
@@ -1773,6 +1804,10 @@ func (d *Display) frame() (next time.Duration) {
 	s.reminder, s.showReminder = remind.Get().Showing()
 	s.notification, s.showNotification = notify.Get().Card()
 	d.gateNotice(&s, nightNow(now))
+	if s.showNotification {
+		s.notifyPulse = notifyPulse(s.notification, now)
+	}
+	d.followCriticalLight()
 	if s.reminder.From != config.Get().Device.Name {
 		s.reminderFrom = s.reminder.From
 	}
@@ -1914,6 +1949,8 @@ func (d *Display) frame() (next time.Duration) {
 		return fxFrame
 	case s.sheetOpen:
 		return dialFrame // a finger dragging the page is followed smoothly
+	case s.notifyPulse > 0 && s.showNotification && !s.menuOpen:
+		return pulseFrame // a critical notification's face pulses while it rings
 	case s.firstRunUp:
 		return time.Second // Home Assistant connecting moves it on by itself
 	case s.showDash && !s.menuOpen:

@@ -20,13 +20,18 @@ const History = 250 * time.Millisecond
 // score the word at all.
 const Confirming = 2 * time.Second
 
-// The ring holds two seconds, whatever is being sent of it. A turn sends a quarter of that; the rest
-// is for the recording a turn keeps, which wants the wake word whole. Detection fires around half a
-// second after the word has ended, and the word itself is half a second or more, so a ring of one
-// second held its tail and lost its start (measured on the lounge Dot, 24 September 2026). 64 KB.
-const historySamples = 2 * Rate
+// Held is how far back a turn can reach after a wake word held back while another device asked Home
+// Assistant about one it was not sure of (feature/nearest, #685): the word, the wait, and the request
+// said straight after the word.
+const Held = 3 * time.Second
 
-// historyFrames is the same two seconds counted in frames, for the loudness kept beside the samples.
+// The ring holds the longest of these, whatever is being sent of it. Ours needed two seconds of it for
+// the recording a turn keeps, which wants the wake word whole: detection fires around half a second
+// after the word has ended, and the word itself is half a second or more, so a ring of one second held
+// its tail and lost its start (measured on the lounge Dot, 24 September 2026). Held's three cover that.
+const historySamples = 3 * Rate
+
+// historyFrames is the same ring counted in frames, for the loudness kept beside the samples.
 const historyFrames = historySamples / FrameSamples
 
 // history is a ring of the most recently captured mono samples.

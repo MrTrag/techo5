@@ -2,6 +2,7 @@ package detect
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"slices"
 	"sync"
@@ -24,6 +25,7 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/hardware/led"
 	"github.com/HuskerMinion/techo5/echod/internal/hardware/mic"
 	"github.com/HuskerMinion/techo5/echod/internal/hardware/speaker"
+	"github.com/HuskerMinion/techo5/echod/internal/lib/bootreason"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/safe"
 	"github.com/HuskerMinion/techo5/echod/internal/lib/wake"
 	"github.com/HuskerMinion/techo5/echod/internal/service"
@@ -76,11 +78,24 @@ type Detect struct {
 	// words, and a model the engine refuses refuses again.
 	refused *refusal
 
+	// stopWord is the stop word's select, and stopMu keeps one load of the stop slot at a time: see
+	// stopword.go and loadStop.
+	stopWord *stopWord
+	stopMu   sync.Mutex
+
 	// hangup is the hang-up word's select and threshold, and its loading with the call: see hangup.go.
 	hangup *hangup
 
 	// score is the last wake's peak, for setting the threshold by: see newScoreEntity.
 	score *esphome.Sensor
+
+	// wakeProblem says why a wake word chosen in Home Assistant is not listening, or "None": a model
+	// the device refuses drops the slot to no wake word, and its reason was only in the log.
+	wakeProblem *esphome.TextSensor
+
+	// dropMu guards lastDrop: when each wake word's model last failed on live audio (dropped.go).
+	dropMu   sync.Mutex
+	lastDrop map[string]time.Time
 
 	// frames is how the wake word loop keeps up: see newFrameEntities.
 	frames frameEntities
@@ -218,12 +233,20 @@ func newDetect() *Detect {
 		}
 		return wakeword.Threshold(slot)
 	}
-	e.Threshold = func(slot int) float64 {
+	slack := func(slot int) bool {
 		// A call still waiting to be dialed has no far end in the speaker, only "Calling Mom.", so the
 		// stop word keeps the slack it has over any announcement.
 		onCall := phone.Get().Busy() && !phone.Get().State().Waiting
-		slack := slackFor(slot, mic.Get().Canceling(), onCall, ring.IsSounding())
-		return thresholdWithPlayback(slot, base, config.Get().Wake.Stop.Threshold, slack, wakeword.PlayingThreshold)
+		return slackFor(slot, mic.Get().Canceling(), onCall, ring.IsSounding())
+	}
+	e.Threshold = func(slot int) float64 {
+		return thresholdWithPlayback(slot, base, config.Get().Wake.Stop.Threshold, slack(slot), wakeword.PlayingThreshold)
+	}
+	// While the speaker's allowance is off its threshold, the stop word's near misses are logged from
+	// under its cutoff, rather than from NearMiss, which is where its cutoff then sits (stop.go). The
+	// engine asks in the same breath as it asks for the cutoff, when the word peaks.
+	e.NearMissFloor = func(slot int, cutoff float64) float64 {
+		return stopNearMissFloor(slot, cutoff, slack(slot))
 	}
 
 	// d is made below, once the hooks it chains onto are in place; a detection only arrives after Start.
@@ -315,6 +338,12 @@ func newDetect() *Detect {
 		}
 		voice.Get().Candidate(slot, peak)
 	}
+	e.OnCandidateStart = func(slot int) {
+		if phone.Get().Busy() || talkback.Get().Busy() || voice.Get().HomeAssistantHears(slot) {
+			return
+		}
+		voice.Get().CandidateStarting(slot)
+	}
 
 	// A shadowed slot never reaches the turn. What it heard is kept, with the score and the word that
 	// heard it, so the candidate in that slot is judged on the same nights and the same sounds as the
@@ -339,6 +368,7 @@ func newDetect() *Detect {
 	d.ducker = newDucker()
 	d.ducker.watch(e)
 	d.stop = newStopEntity(d)
+	d.stopWord = newStopWord(d)
 	d.hangup = newHangup(d)
 	// What the words scored during each call, said as it ends (#484). Read as it runs, as the hang-up
 	// word's loading is: two changes close together may run out of order.
@@ -346,12 +376,15 @@ func newDetect() *Detect {
 	phone.Get().Changed.Listen(func(phone.State) {
 		go calls.follow(phone.Get().State(), time.Now())
 	})
+	// And what the stop word scored over each reply, said as the turn ends (replyscores.go).
+	followReplies(e, slog.Info)
 	for _, k := range commandKinds {
 		c := newCommand(d, k)
 		c.watch()
 		d.commands = append(d.commands, c)
 	}
 	d.score = newScoreEntity()
+	d.wakeProblem = newWakeProblemEntity()
 	d.onHA = newOnHAEntities()
 	e.OnScored = func(slot int, peak, _ float64) { d.scored(slot, peak) }
 	d.frames = newFrameEntities()
@@ -374,6 +407,15 @@ func newDetect() *Detect {
 	d.sender.publish = d.publishSend
 	d.clips.changed = d.sender.wake
 	d.clips.abortSend = d.sender.abortSend
+	// A reboot the daemon makes itself (settings, an update into a slot) ends the process without its
+	// stop, so the clips waiting in RAM, which the sender moves to the storage as it stops, would be lost:
+	// they are moved first. Not for a reset, which deletes them with the rest.
+	clips := d.clips
+	bootreason.BeforeReboot(func() {
+		if !bootreason.IsReset() {
+			clips.spill(func(string, time.Time) bool { return true })
+		}
+	})
 
 	// A cut microphone hands on silence, and running the models over it is work that cannot find
 	// anything. The engines go down with the microphones and come back with them. Not for a panel's
@@ -399,7 +441,7 @@ func newDetect() *Detect {
 		}
 	})
 	e.OnReady = d.busy.scored
-	e.OnDropped = d.commandDropped
+	e.OnDropped = d.dropped
 
 	// The engine loads on every start, including a restart. Home Assistant only pushes a selection when
 	// the user changes one, so an engine that came back empty would leave the device deaf while it went
@@ -409,7 +451,9 @@ func newDetect() *Detect {
 		// what every later start loads too (#657).
 		turn := voice.Get()
 		turn.SetActiveWakeWords(d.load(voice.SavedWakeWords(d.library().Ours())))
-		d.loadStop()
+		// The load above has usually put the stop word in already (loadFrom); quiet, so a start says
+		// "stop word listening" once.
+		d.followStop()
 		// A call already up when the engine starts has its hang-up word, as one that starts later does.
 		d.hangup.follow(hangupListens(phone.Get().State()))
 		// Back in if music is playing: the start emptied their slots.
@@ -445,6 +489,17 @@ func (d *Detect) selected() {
 	diag.Get().Measure()
 	for _, c := range d.commands {
 		c.follow()
+	}
+	// The stop and hang-up words keep away from the wake words saved, as the command words do, and
+	// loadFrom looked at them before this selection was saved: a word of one's own just chosen as a wake
+	// word would otherwise go on listening as the stop word too until a restart (#741).
+	if d.hangup != nil {
+		d.hangup.refreshOptions()
+		d.hangup.follow(hangupListens(phone.Get().State()))
+	}
+	if d.stopWord != nil {
+		d.stopWord.refreshOptions()
+		d.followStop()
 	}
 }
 
@@ -598,6 +653,7 @@ func (d *Detect) loadFrom(ids []string, resolve func([]string) []wake.Model) []s
 
 	var accepted []string
 	var loaded []int
+	var problems []string
 	for slot := range wakeword.Slots {
 		if slot >= len(ids) || ids[slot] == "" {
 			d.engine.Clear(slot)
@@ -607,11 +663,13 @@ func (d *Detect) loadFrom(ids []string, resolve func([]string) []wake.Model) []s
 		m, ok := wake.Find(models, ids[slot])
 		if !ok {
 			slog.Warn("unknown wake word", "slot", slot+1, "id", ids[slot])
+			problems = append(problems, fmt.Sprintf("Wake word %d (%s): not on this device or offered by Home Assistant", slot+1, ids[slot]))
 			d.engine.Clear(slot)
 			continue
 		}
 		if err := d.engine.Use(slot, m); err != nil {
 			slog.Error("loading the selected wake word failed", "slot", slot+1, "id", m.ID, "err", err)
+			problems = append(problems, fmt.Sprintf("Wake word %d (%s): %s", slot+1, m.ID, wakeProblemText(err)))
 			d.engine.Clear(slot)
 			continue
 		}
@@ -619,6 +677,7 @@ func (d *Detect) loadFrom(ids []string, resolve func([]string) []wake.Model) []s
 		loaded = append(loaded, slot)
 	}
 	d.library().Loaded(accepted)
+	d.setWakeProblem(problems)
 	// A word running as a wake word now is not listened for as a command word too. A selection looks
 	// again once it is saved (OnWakeWord); this covers a start and a refresh.
 	for _, c := range d.commands {
@@ -630,6 +689,11 @@ func (d *Detect) loadFrom(ids []string, resolve func([]string) []wake.Model) []s
 	if d.hangup != nil {
 		d.hangup.refreshOptions()
 		d.hangup.follow(hangupListens(phone.Get().State()))
+	}
+	// And so does the stop word's: one chosen as a wake word now has the built-in word listen in its place.
+	if d.stopWord != nil {
+		d.stopWord.refreshOptions()
+		d.followStop()
 	}
 
 	// Only the slots that took a wake word are waited on. A selection that loaded nothing has nothing to
